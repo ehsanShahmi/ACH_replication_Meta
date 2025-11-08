@@ -1,6 +1,13 @@
 from datasets import load_dataset
 from google import genai
 from google.genai import types
+from sumy.parsers.plaintext import PlaintextParser
+from sumy.nlp.tokenizers import Tokenizer
+from sumy.summarizers.luhn import LuhnSummarizer
+from sumy.nlp.stemmers import Stemmer
+from sumy.utils import get_stop_words
+import nltk
+# nltk.download('punkt_tab')
 import pandas as pd
 import numpy as np
 import coverage as cv
@@ -13,7 +20,7 @@ import io
 
 ##This part of the code is just setting up the Gemini-pro LLM:
 # Set your API key
-os.environ['GEMINI_API_KEY'] = '......'
+os.environ['GEMINI_API_KEY'] = 'AIzaSyBvjwIXLob-RZKvfpJNnfbF0X8pQKfRP5M'
 # we can confirm the key was set (optional)
 # print(os.environ['GEMINI_API_KEY'])
 # The client gets the API key from the environment variable `GEMINI_API_KEY`, which is set above.
@@ -30,6 +37,21 @@ secVulEval = secVulEvalfull[secVulEvalfull['is_vulnerable'] != False].reset_inde
 # We here take the first instance of this dataset. We take the "commit message" as the first security issue.
 security_issues = secVulEval['commit_message']
 security_issue = security_issues[0]
-print (security_issue)
+# print (security_issue)
 
-# After loading, now we try to make a summary of it. This can either be done using an LLM, manually or by using libraries.
+def luhn_summarize(text, sentence_count=2):
+    # Parse the input text
+    parser = PlaintextParser.from_string(text, Tokenizer("english"))
+    # Initialize summarizer with stemmer
+    summarizer = LuhnSummarizer(Stemmer("english"))
+    summarizer.stop_words = get_stop_words("english")
+    # Generate summary
+    summary = summarizer(parser.document, sentence_count)
+    return summary
+
+
+# After laoding, now we try to make a summary of it. This can either be done using an LLM, manually or by using libraries.
+issue_summary = luhn_summarize(security_issue, 2)
+print (issue_summary)
+# for sentence in issue_summary:
+#     print(sentence)
