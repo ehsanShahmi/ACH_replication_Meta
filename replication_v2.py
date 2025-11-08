@@ -13,7 +13,7 @@ import io
 
 ##This part of the code is just setting up the Gemini-pro LLM:
 # Set your API key
-os.environ['GEMINI_API_KEY'] = 'AIzaSyBvjwIXLob-RZKvfpJNnfbF0X8pQKfRP5M'
+os.environ['GEMINI_API_KEY'] = '......'
 # we can confirm the key was set (optional)
 # print(os.environ['GEMINI_API_KEY'])
 # The client gets the API key from the environment variable `GEMINI_API_KEY`, which is set above.
@@ -32,4 +32,4 @@ security_issues = secVulEval['commit_message']
 security_issue = security_issues[0]
 print (security_issue)
 
-# After laoding, now we try to make a summary of it. This can either be done using an LLM, manually or by using libraries.
+# After loading, now we try to make a summary of it. This can either be done using an LLM, manually or by using libraries.
