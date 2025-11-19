@@ -1,0 +1,6 @@
+{no}
+Execution of the first version can produce a different behaviour to execution of the second version. Here's an explanation of the differences:
+
+1.  **In the `add` function:** The second version introduces a **use-after-free** vulnerability. It allocates memory for an integer, stores the result, and then immediately `free`s the memory. The subsequent `return *result;` attempts to read from this deallocated memory. This is undefined behavior. While it might sometimes return the correct value by chance, it could also return garbage data or cause the program to crash. The first version, in contrast, will always correctly and reliably return the sum `a + b`.
+
+2.  **In the `subtract` function:** The second version introduces a **stack buffer overflow** vulnerability. It uses `sprintf` to write the string representation of the result into a small, 4-byte `temp_buffer`. If the result of `a - b` is a number that requires 4 or more bytes to store as a string (e.g., "1000" or "-100"), `sprintf` will write past the end of the buffer. This will corrupt data on the stack, which could include the function's return address, leading to unpredictable behavior or a program crash. The first version has no such vulnerability and will always safely return the correct result of the subtraction.
