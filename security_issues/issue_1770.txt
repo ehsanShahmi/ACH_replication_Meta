@@ -1,0 +1,10 @@
+NLM: Don't hang forever on NLM unlock requests
+
+If the NLM daemon is killed on the NFS server, we can currently end up
+hanging forever on an 'unlock' request, instead of aborting. Basically,
+if the rpcbind request fails, or the server keeps returning garbage, we
+really want to quit instead of retrying.
+
+Tested-by: Vasily Averin <vvs@sw.ru>
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+Cc: stable@kernel.org

@@ -1,0 +1,9 @@
+bonding: fix null pointer deref in bond_ipsec_offload_ok
+
+We must check if there is an active slave before dereferencing the pointer.
+
+Fixes: 18cb261afd7b ("bonding: support hardware encryption offload to slaves")
+Signed-off-by: Nikolay Aleksandrov <razor@blackwall.org>
+Reviewed-by: Hangbin Liu <liuhangbin@gmail.com>
+Reviewed-by: Eric Dumazet <edumazet@google.com>
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>

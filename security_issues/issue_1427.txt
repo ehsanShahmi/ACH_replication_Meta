@@ -1,0 +1,11 @@
+drm/msm/gem: Add check for kmalloc
+
+Add the check for the return value of kmalloc in order to avoid
+NULL pointer dereference in copy_from_user.
+
+Fixes: 20224d715a88 ("drm/msm/submit: Move copy_from_user ahead of locking bos")
+Signed-off-by: Jiasheng Jiang <jiasheng@iscas.ac.cn>
+Reviewed-by: Dmitry Baryshkov <dmitry.baryshkov@linaro.org>
+Patchwork: https://patchwork.freedesktop.org/patch/514678/
+Link: https://lore.kernel.org/r/20221212091117.43511-1-jiasheng@iscas.ac.cn
+Signed-off-by: Dmitry Baryshkov <dmitry.baryshkov@linaro.org>

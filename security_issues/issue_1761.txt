@@ -1,0 +1,8 @@
+ext4: reimplement convert and split_unwritten
+
+Reimplement ext4_ext_convert_to_initialized() and
+ext4_split_unwritten_extents() using ext4_split_extent()
+
+Signed-off-by: Yongqiang Yang <xiaoqiangnk@gmail.com>
+Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+Tested-by: Allison Henderson <achender@linux.vnet.ibm.com>

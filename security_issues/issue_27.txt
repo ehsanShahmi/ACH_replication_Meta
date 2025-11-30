@@ -1,0 +1,10 @@
+NetLabel: correct CIPSO tag handling when adding new DOI definitions
+
+The current netlbl_cipsov4_add_common() function has two problems which are
+fixed with this patch.  The first is an off-by-one bug where it is possibile to
+overflow the doi_def->tags[] array.  The second is a bug where the same
+doi_def->tags[] array was not always fully initialized, which caused sporadic
+failures.
+
+Signed-off-by: Paul Moore <paul.moore@hp.com>
+Signed-off-by: James Morris <jmorris@namei.org>

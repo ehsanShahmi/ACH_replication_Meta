@@ -1,0 +1,27 @@
+btrfs: zoned: fix use-after-free due to race with dev replace
+
+While loading a zone's info during creation of a block group, we can race
+with a device replace operation and then trigger a use-after-free on the
+device that was just replaced (source device of the replace operation).
+
+This happens because at btrfs_load_zone_info() we extract a device from
+the chunk map into a local variable and then use the device while not
+under the protection of the device replace rwsem. So if there's a device
+replace operation happening when we extract the device and that device
+is the source of the replace operation, we will trigger a use-after-free
+if before we finish using the device the replace operation finishes and
+frees the device.
+
+Fix this by enlarging the critical section under the protection of the
+device replace rwsem so that all uses of the device are done inside the
+critical section.
+
+CC: stable@vger.kernel.org # 6.1.x: 15c12fcc50a1: btrfs: zoned: introduce a zone_info struct in btrfs_load_block_group_zone_info
+CC: stable@vger.kernel.org # 6.1.x: 09a46725cc84: btrfs: zoned: factor out per-zone logic from btrfs_load_block_group_zone_info
+CC: stable@vger.kernel.org # 6.1.x: 9e0e3e74dc69: btrfs: zoned: factor out single bg handling from btrfs_load_block_group_zone_info
+CC: stable@vger.kernel.org # 6.1.x: 87463f7e0250: btrfs: zoned: factor out DUP bg handling from btrfs_load_block_group_zone_info
+CC: stable@vger.kernel.org # 6.1.x
+Reviewed-by: Johannes Thumshirn <johannes.thumshirn@wdc.com>
+Signed-off-by: Filipe Manana <fdmanana@suse.com>
+Reviewed-by: David Sterba <dsterba@suse.com>
+Signed-off-by: David Sterba <dsterba@suse.com>

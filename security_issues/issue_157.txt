@@ -1,0 +1,8 @@
+fs/ntfs3: Check fields while reading
+
+Added new functions index_hdr_check and index_buf_check.
+Now we check all stuff for correctness while reading from disk.
+Also fixed bug with stale nfs data.
+
+Reported-by: van fantasy <g1042620637@gmail.com>
+Signed-off-by: Konstantin Komarov <almaz.alexandrovich@paragon-software.com>

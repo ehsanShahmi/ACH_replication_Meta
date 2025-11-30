@@ -1,0 +1,34 @@
+orinoco: fix TKIP countermeasure behaviour
+
+Enable the port when disabling countermeasures, and disable it on
+enabling countermeasures.
+
+This bug causes the response of the system to certain attacks to be
+ineffective.
+
+It also prevents wpa_supplicant from getting scan results, as
+wpa_supplicant disables countermeasures on startup - preventing the
+hardware from scanning.
+
+wpa_supplicant works with ap_mode=2 despite this bug because the commit
+handler re-enables the port.
+
+The log tends to look like:
+
+State: DISCONNECTED -> SCANNING
+Starting AP scan for wildcard SSID
+Scan requested (ret=0) - scan timeout 5 seconds
+EAPOL: disable timer tick
+EAPOL: Supplicant port status: Unauthorized
+Scan timeout - try to get results
+Failed to get scan results
+Failed to get scan results - try scanning again
+Setting scan request: 1 sec 0 usec
+Starting AP scan for wildcard SSID
+Scan requested (ret=-1) - scan timeout 5 seconds
+Failed to initiate AP scan.
+
+Reported by: Giacomo Comes <comes@naic.edu>
+Signed-off by: David Kilroy <kilroyd@googlemail.com>
+Cc: stable@kernel.org
+Signed-off-by: John W. Linville <linville@tuxdriver.com>

@@ -1,0 +1,12 @@
+iommu: sprd: Avoid NULL deref in sprd_iommu_hw_en
+
+In sprd_iommu_cleanup() before calling function sprd_iommu_hw_en()
+dom->sdev is equal to NULL, which leads to null dereference.
+
+Found by Linux Verification Center (linuxtesting.org) with SVACE.
+
+Fixes: 9afea57384d4 ("iommu/sprd: Release dma buffer to avoid memory leak")
+Signed-off-by: Artem Chernyshev <artem.chernyshev@red-soft.ru>
+Reviewed-by: Chunyan Zhang <zhang.lyra@gmail.com>
+Link: https://lore.kernel.org/r/20240716125522.3690358-1-artem.chernyshev@red-soft.ru
+Signed-off-by: Will Deacon <will@kernel.org>

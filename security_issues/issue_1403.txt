@@ -1,0 +1,11 @@
+f2fs: fix null reference error when checking end of zone
+
+This patch fixes a potentially null pointer being accessed by
+is_end_zone_blkaddr() that checks the last block of a zone
+when f2fs is mounted as a single device.
+
+Fixes: e067dc3c6b9c ("f2fs: maintain six open zones for zoned devices")
+Signed-off-by: Daejun Park <daejun7.park@samsung.com>
+Reviewed-by: Chao Yu <chao@kernel.org>
+Reviewed-by: Daeho Jeong <daehojeong@google.com>
+Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>

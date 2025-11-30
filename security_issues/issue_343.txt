@@ -1,0 +1,12 @@
+fix autofs/afs/etc. magic mountpoint breakage
+
+We end up trying to kfree() nd.last.name on open("/mnt/tmp", O_CREAT)
+if /mnt/tmp is an autofs direct mount.  The reason is that nd.last_type
+is bogus here; we want LAST_BIND for everything of that kind and we
+get LAST_NORM left over from finding parent directory.
+
+So make sure that it *is* set properly; set to LAST_BIND before
+doing ->follow_link() - for normal symlinks it will be changed
+by __vfs_follow_link() and everything else needs it set that way.
+
+Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>

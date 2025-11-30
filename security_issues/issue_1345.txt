@@ -1,0 +1,9 @@
+drm/xe: Add a NULL check in xe_ttm_stolen_mgr_init
+
+Add an explicit check to ensure that the mgr is not NULL.
+
+Cc: Matthew Auld <matthew.auld@intel.com>
+Signed-off-by: Nirmoy Das <nirmoy.das@intel.com>
+Reviewed-by: Matthew Auld <matthew.auld@intel.com>
+Signed-off-by: Matthew Auld <matthew.auld@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20240319130925.22399-1-nirmoy.das@intel.com

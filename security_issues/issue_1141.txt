@@ -1,0 +1,15 @@
+media: v4l: async: Fix duplicated list deletion
+
+The list deletion call dropped here is already called from the
+helper function in the line before. Having a second list_del()
+call results in either a warning (with CONFIG_DEBUG_LIST=y):
+
+list_del corruption, c46c8198->next is LIST_POISON1 (00000100)
+
+If CONFIG_DEBUG_LIST is disabled the operation results in a
+kernel error due to NULL pointer dereference.
+
+Fixes: 28a1295795d8 ("media: v4l: async: Allow multiple connections between entities")
+Signed-off-by: Sebastian Reichel <sre@kernel.org>
+Signed-off-by: Sakari Ailus <sakari.ailus@linux.intel.com>
+Signed-off-by: Hans Verkuil <hverkuil-cisco@xs4all.nl>

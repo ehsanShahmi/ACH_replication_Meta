@@ -1,0 +1,10 @@
+smb/client: avoid dereferencing rdata=NULL in smb2_new_read_req()
+
+This happens when called from SMB2_read() while using rdma
+and reaching the rdma_readwrite_threshold.
+
+Cc: stable@vger.kernel.org
+Fixes: a6559cc1d35d ("cifs: split out smb3_use_rdma_offload() helper")
+Reviewed-by: David Howells <dhowells@redhat.com>
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Signed-off-by: Steve French <stfrench@microsoft.com>

@@ -1,0 +1,11 @@
+drm/xe: Fix potential integer overflow in page size calculation
+
+Explicitly cast tbo->page_alignment to u64 before bit-shifting to
+prevent overflow when assigning to min_page_size.
+
+Cc: Matthew Auld <matthew.auld@intel.com>
+Cc: Matthew Brost <matthew.brost@intel.com>
+Signed-off-by: Nirmoy Das <nirmoy.das@intel.com>
+Reviewed-by: Matthew Auld <matthew.auld@intel.com>
+Signed-off-by: Matthew Auld <matthew.auld@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20240318164342.3094-1-nirmoy.das@intel.com

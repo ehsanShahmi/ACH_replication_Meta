@@ -1,0 +1,8 @@
+netfilter: nf_tables: bail out on mismatching dynset and set expressions
+
+If dynset expressions provided by userspace is larger than the declared
+set expressions, then bail out.
+
+Fixes: 48b0ae046ee9 ("netfilter: nftables: netlink support for several set element expressions")
+Reported-by: Xingyuan Mo <hdthky0@gmail.com>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>

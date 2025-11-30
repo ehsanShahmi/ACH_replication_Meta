@@ -1,0 +1,8 @@
+Merge branch 'stacking-fixes' (vfs stacking fixes from Jann)
+
+Merge filesystem stacking fixes from Jann Horn.
+
+* emailed patches from Jann Horn <jannh@google.com>:
+  sched: panic on corrupted stack end
+  ecryptfs: forbid opening files without mmap handler
+  proc: prevent stacking filesystems on top

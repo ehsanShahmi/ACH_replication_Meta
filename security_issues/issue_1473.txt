@@ -1,0 +1,10 @@
+ALSA: hda: Fix possible null-ptr-deref when assigning a stream
+
+While AudioDSP drivers assign streams exclusively of HOST or LINK type,
+nothing blocks a user to attempt to assign a COUPLED stream. As
+supplied substream instance may be a stub, what is the case when
+code-loading, such scenario ends with null-ptr-deref.
+
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+Link: https://lore.kernel.org/r/20231006102857.749143-2-cezary.rojewski@intel.com
+Signed-off-by: Takashi Iwai <tiwai@suse.de>

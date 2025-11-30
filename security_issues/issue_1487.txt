@@ -1,0 +1,22 @@
+Merge tag 'for-5.19/fbdev-3' of git://git.kernel.org/pub/scm/linux/kernel/git/deller/linux-fbdev
+
+Pull fbdev fixes from Helge Deller:
+
+ - fbcon now prevents switching to screen resolutions which are smaller
+   than the font size, and prevents enabling a font which is bigger than
+   the current screen resolution. This fixes vmalloc-out-of-bounds
+   accesses found by KASAN.
+
+ - Guiling Deng fixed a bug where the centered fbdev logo wasn't
+   displayed correctly if the screen size matched the logo size.
+
+ - Hsin-Yi Wang provided a patch to include errno.h to fix build when
+   CONFIG_OF isn't enabled.
+
+* tag 'for-5.19/fbdev-3' of git://git.kernel.org/pub/scm/linux/kernel/git/deller/linux-fbdev:
+  fbcon: Use fbcon_info_from_console() in fbcon_modechange_possible()
+  fbmem: Check virtual screen sizes in fb_set_var()
+  fbcon: Prevent that screen size is smaller than font size
+  fbcon: Disallow setting font bigger than screen size
+  video: of_display_timing.h: include errno.h
+  fbdev: fbmem: Fix logo center image dx issue

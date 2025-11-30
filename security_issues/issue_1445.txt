@@ -1,0 +1,14 @@
+RDMA/cxgb4: Added NULL check for lookup_atid
+
+The lookup_atid() function can return NULL if the ATID is
+invalid or does not exist in the identifier table, which
+could lead to dereferencing a null pointer without a
+check in the `act_establish()` and `act_open_rpl()` functions.
+Add a NULL check to prevent null pointer dereferencing.
+
+Found by Linux Verification Center (linuxtesting.org) with SVACE.
+
+Fixes: cfdda9d76436 ("RDMA/cxgb4: Add driver for Chelsio T4 RNIC")
+Signed-off-by: Mikhail Lobanov <m.lobanov@rosalinux.ru>
+Link: https://patch.msgid.link/20240912145844.77516-1-m.lobanov@rosalinux.ru
+Signed-off-by: Leon Romanovsky <leon@kernel.org>

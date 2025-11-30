@@ -1,0 +1,14 @@
+media: v4l: async: Fix NULL pointer dereference in adding ancillary links
+
+In v4l2_async_create_ancillary_links(), ancillary links are created for
+lens and flash sub-devices. These are sub-device to sub-device links and
+if the async notifier is related to a V4L2 device, the source sub-device
+of the ancillary link is NULL, leading to a NULL pointer dereference.
+Check the notifier's sd field is non-NULL in
+v4l2_async_create_ancillary_links().
+
+Fixes: aa4faf6eb271 ("media: v4l2-async: Create links during v4l2_async_match_notify()")
+Signed-off-by: ChiYuan Huang <cy_huang@richtek.com>
+[Sakari Ailus: Reword the subject and commit messages slightly.]
+Signed-off-by: Sakari Ailus <sakari.ailus@linux.intel.com>
+Signed-off-by: Hans Verkuil <hverkuil-cisco@xs4all.nl>

@@ -1,0 +1,17 @@
+nilfs2: fix potential oob read in nilfs_btree_check_delete()
+
+The function nilfs_btree_check_delete(), which checks whether degeneration
+to direct mapping occurs before deleting a b-tree entry, causes memory
+access outside the block buffer when retrieving the maximum key if the
+root node has no entries.
+
+This does not usually happen because b-tree mappings with 0 child nodes
+are never created by mkfs.nilfs2 or nilfs2 itself.  However, it can happen
+if the b-tree root node read from a device is configured that way, so fix
+this potential issue by adding a check for that case.
+
+Link: https://lkml.kernel.org/r/20240904081401.16682-4-konishi.ryusuke@gmail.com
+Fixes: 17c76b0104e4 ("nilfs2: B-tree based block mapping")
+Signed-off-by: Ryusuke Konishi <konishi.ryusuke@gmail.com>
+Cc: Lizhi Xu <lizhi.xu@windriver.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>

@@ -1,0 +1,17 @@
+wifi: ath12k: fix possible out-of-bound read in ath12k_htt_pull_ppdu_stats()
+
+len is extracted from HTT message and could be an unexpected value in
+case errors happen, so add validation before using to avoid possible
+out-of-bound read in the following message iteration and parsing.
+
+The same issue also applies to ppdu_info->ppdu_stats.common.num_users,
+so validate it before using too.
+
+These are found during code review.
+
+Compile test only.
+
+Signed-off-by: Baochen Qiang <quic_bqiang@quicinc.com>
+Acked-by: Jeff Johnson <quic_jjohnson@quicinc.com>
+Signed-off-by: Kalle Valo <quic_kvalo@quicinc.com>
+Link: https://lore.kernel.org/r/20230901015602.45112-1-quic_bqiang@quicinc.com

@@ -1,0 +1,7 @@
+tunnels: fix netns vs proto registration ordering
+
+Same stuff as in ip_gre patch: receive hook can be called before netns
+setup is done, oopsing in net_generic().
+
+Signed-off-by: Alexey Dobriyan <adobriyan@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>

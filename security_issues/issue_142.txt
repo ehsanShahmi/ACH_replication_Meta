@@ -1,0 +1,6 @@
+KVM: PIT: control word is write-only
+
+PIT control word (address 0x43) is write-only, reads are undefined.
+
+Cc: stable@kernel.org
+Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>

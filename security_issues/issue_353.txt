@@ -1,0 +1,14 @@
+AppArmor: fix oops in apparmor_setprocattr
+
+When invalid parameters are passed to apparmor_setprocattr a NULL deref
+oops occurs when it tries to record an audit message. This is because
+it is passing NULL for the profile parameter for aa_audit. But aa_audit
+now requires that the profile passed is not NULL.
+
+Fix this by passing the current profile on the task that is trying to
+setprocattr.
+
+Signed-off-by: Kees Cook <kees@ubuntu.com>
+Signed-off-by: John Johansen <john.johansen@canonical.com>
+Cc: stable@kernel.org
+Signed-off-by: James Morris <jmorris@namei.org>

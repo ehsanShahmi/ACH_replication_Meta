@@ -1,0 +1,9 @@
+drm/amdgpu: Validate TA binary size
+
+Add TA binary size validation to avoid OOB write.
+
+Signed-off-by: Candice Li <candice.li@amd.com>
+Reviewed-by: Hawking Zhang <Hawking.Zhang@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+(cherry picked from commit c0a04e3570d72aaf090962156ad085e37c62e442)
+Cc: stable@vger.kernel.org

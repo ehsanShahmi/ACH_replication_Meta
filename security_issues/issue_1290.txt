@@ -1,0 +1,13 @@
+s390/dasd: fix error checks in dasd_copy_pair_store()
+
+dasd_add_busid() can return an error via ERR_PTR() if an allocation
+fails. However, two callsites in dasd_copy_pair_store() do not check
+the result, potentially resulting in a NULL pointer dereference. Fix
+this by checking the result with IS_ERR() and returning the error up
+the stack.
+
+Fixes: a91ff09d39f9b ("s390/dasd: add copy pair setup")
+Signed-off-by: Carlos López <clopez@suse.de>
+Signed-off-by: Stefan Haberland <sth@linux.ibm.com>
+Link: https://lore.kernel.org/r/20240715112434.2111291-3-sth@linux.ibm.com
+Signed-off-by: Jens Axboe <axboe@kernel.dk>

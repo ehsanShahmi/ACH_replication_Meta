@@ -1,0 +1,9 @@
+netfilter: nf_tables: remove catchall element in GC sync path
+
+The expired catchall element is not deactivated and removed from GC sync
+path. This path holds mutex so just call nft_setelem_data_deactivate()
+and nft_setelem_catchall_remove() before queueing the GC work.
+
+Fixes: 4a9e12ea7e70 ("netfilter: nft_set_pipapo: call nft_trans_gc_queue_sync() in catchall GC")
+Reported-by: lonial con <kongln9170@gmail.com>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>

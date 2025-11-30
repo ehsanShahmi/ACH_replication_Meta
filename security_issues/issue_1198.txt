@@ -1,0 +1,27 @@
+PCI: endpoint: pci-epf-test: Make use of cached 'epc_features' in pci_epf_test_core_init()
+
+Instead of getting the epc_features from pci_epc_get_features() API, use
+the cached pci_epf_test::epc_features value to avoid the NULL check. Since
+the NULL check is already performed in pci_epf_test_bind(), having one more
+check in pci_epf_test_core_init() is redundant and it is not possible to
+hit the NULL pointer dereference.
+
+Also with commit a01e7214bef9 ("PCI: endpoint: Remove "core_init_notifier"
+flag"), 'epc_features' got dereferenced without the NULL check, leading to
+the following false positive Smatch warning:
+
+  drivers/pci/endpoint/functions/pci-epf-test.c:784 pci_epf_test_core_init() error: we previously assumed 'epc_features' could be null (see line 747)
+
+Thus, remove the redundant NULL check and also use the epc_features::
+{msix_capable/msi_capable} flags directly to avoid local variables.
+
+[kwilczynski: commit log]
+Fixes: 5e50ee27d4a5 ("PCI: pci-epf-test: Add support to defer core initialization")
+Closes: https://lore.kernel.org/linux-pci/024b5826-7180-4076-ae08-57d2584cca3f@moroto.mountain
+Link: https://lore.kernel.org/linux-pci/20240418-pci-epf-test-fix-v2-1-eacd54831444@linaro.org
+Reported-by: Dan Carpenter <dan.carpenter@linaro.org>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+Signed-off-by: Krzysztof Wilczyński <kwilczynski@kernel.org>
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+Reviewed-by: Frank Li <Frank.Li@nxp.com>
+Reviewed-by: Niklas Cassel <cassel@kernel.org>

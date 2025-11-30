@@ -1,0 +1,15 @@
+ipv6: udp: fix the wrong headroom check
+
+At this point, skb->data points to skb_transport_header.
+So, headroom check is wrong.
+
+For some case:bridge(UFO is on) + eth device(UFO is off),
+there is no enough headroom for IPv6 frag head.
+But headroom check is always false.
+
+This will bring about data be moved to there prior to skb->head,
+when adding IPv6 frag header to skb.
+
+Signed-off-by: Shan Wei <shanwei@cn.fujitsu.com>
+Acked-by: Herbert Xu <herbert@gondor.apana.org.au>
+Signed-off-by: David S. Miller <davem@davemloft.net>

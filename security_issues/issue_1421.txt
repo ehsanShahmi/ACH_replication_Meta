@@ -1,0 +1,8 @@
+drm/amdgpu/pm: Fix the null pointer dereference in apply_state_adjust_rules
+
+Check the pointer value to fix potential null pointer
+dereference
+
+Acked-by: Yang Wang<kevinyang.wang@amd.com>
+Signed-off-by: Ma Jun <Jun.Ma2@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>

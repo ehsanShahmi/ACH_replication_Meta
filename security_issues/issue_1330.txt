@@ -1,0 +1,3 @@
+Julia Lawall reported this null pointer dereference, this should fix it.
+
+Signed-off-by: Mike Marshall <hubcap@omnibond.com>

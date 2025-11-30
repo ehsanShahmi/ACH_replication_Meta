@@ -1,0 +1,13 @@
+drm/amd/display: Ensure index calculation will not overflow
+
+[WHY & HOW]
+Make sure vmid0p72_idx, vnom0p8_idx and vmax0p9_idx calculation will
+never overflow and exceess array size.
+
+This fixes 3 OVERRUN and 1 INTEGER_OVERFLOW issues reported by Coverity.
+
+Reviewed-by: Harry Wentland <harry.wentland@amd.com>
+Acked-by: Tom Chung <chiahsuan.chung@amd.com>
+Signed-off-by: Alex Hung <alex.hung@amd.com>
+Tested-by: Daniel Wheeler <daniel.wheeler@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>

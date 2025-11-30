@@ -1,0 +1,12 @@
+net: ethtool: pse-pd: Fix possible null-deref
+
+Fix a possible null dereference when a PSE supports both c33 and PoDL, but
+only one of the netlink attributes is specified. The c33 or PoDL PSE
+capabilities are already validated in the ethnl_set_pse_validate() call.
+
+Signed-off-by: Kory Maincent <kory.maincent@bootlin.com>
+Reported-by: Jakub Kicinski <kuba@kernel.org>
+Closes: https://lore.kernel.org/netdev/20240705184116.13d8235a@kernel.org/
+Fixes: 4d18e3ddf427 ("net: ethtool: pse-pd: Expand pse commands with the PSE PoE interface")
+Link: https://patch.msgid.link/20240711-fix_pse_pd_deref-v3-2-edd78fc4fe42@bootlin.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>

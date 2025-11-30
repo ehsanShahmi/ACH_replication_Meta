@@ -1,0 +1,9 @@
+drm/amdgpu/vkms: fix a possible null pointer dereference
+
+In amdgpu_vkms_conn_get_modes(), the return value of drm_cvt_mode()
+is assigned to mode, which will lead to a NULL pointer dereference
+on failure of drm_cvt_mode(). Add a check to avoid null pointer
+dereference.
+
+Signed-off-by: Ma Ke <make_ruc2021@163.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>

@@ -1,0 +1,8 @@
+netfilter: nft_set_pipapo: skip inactive elements during set walk
+
+Otherwise set elements can be deactivated twice which will cause a crash.
+
+Reported-by: Xingyuan Mo <hdthky0@gmail.com>
+Fixes: 3c4287f62044 ("nf_tables: Add set type for arbitrary concatenation of ranges")
+Signed-off-by: Florian Westphal <fw@strlen.de>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>

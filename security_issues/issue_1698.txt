@@ -1,0 +1,16 @@
+veth: Dont kfree_skb() after dev_forward_skb()
+
+In case of congestion, netif_rx() frees the skb, so we must assume
+dev_forward_skb() also consume skb.
+
+Bug introduced by commit 445409602c092
+(veth: move loopback logic to common location)
+
+We must change dev_forward_skb() to always consume skb, and veth to not
+double free it.
+
+Bug report : http://marc.info/?l=linux-netdev&m=127310770900442&w=3
+
+Reported-by: Martín Ferrari <martin.ferrari@gmail.com>
+Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>

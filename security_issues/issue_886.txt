@@ -1,0 +1,12 @@
+drm/xe: Free job before xe_exec_queue_put
+
+Free job depends on job->vm being valid, the last xe_exec_queue_put can
+destroy the VM. Prevent UAF by freeing job before xe_exec_queue_put.
+
+Fixes: dd08ebf6c352 ("drm/xe: Introduce a new DRM driver for Intel GPUs")
+Signed-off-by: Matthew Brost <matthew.brost@intel.com>
+Reviewed-by: Nirmoy Das <nirmoy.das@intel.com>
+Reviewed-by: Jagmeet Randhawa <jagmeet.randhawa@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20240820202309.1260755-1-matthew.brost@intel.com
+(cherry picked from commit 32a42c93b74c8ca6d0915ea3eba21bceff53042f)
+Signed-off-by: Rodrigo Vivi <rodrigo.vivi@intel.com>

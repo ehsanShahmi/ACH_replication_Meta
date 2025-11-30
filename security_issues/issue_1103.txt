@@ -1,0 +1,11 @@
+spi: intel: Add check devm_kasprintf() returned value
+
+intel_spi_populate_chip() use devm_kasprintf() to set pdata->name.
+This can return a NULL pointer on failure but this returned value
+is not checked.
+
+Fixes: e58db3bcd93b ("spi: intel: Add default partition and name to the second chip")
+Signed-off-by: Charles Han <hanchunchao@inspur.com>
+Reviewed-by: Mika Westerberg <mika.westerberg@linux.intel.com>
+Link: https://patch.msgid.link/20240830074106.8744-1-hanchunchao@inspur.com
+Signed-off-by: Mark Brown <broonie@kernel.org>

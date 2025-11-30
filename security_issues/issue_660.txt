@@ -1,0 +1,8 @@
+nfsd: fix potential UAF in nfsd4_cb_getattr_release
+
+Once we drop the delegation reference, the fields embedded in it are no
+longer safe to access. Do that last.
+
+Fixes: c5967721e106 ("NFSD: handle GETATTR conflict with write delegation")
+Signed-off-by: Jeff Layton <jlayton@kernel.org>
+Signed-off-by: Chuck Lever <chuck.lever@oracle.com>

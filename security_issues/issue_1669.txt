@@ -1,0 +1,11 @@
+block: Fix io_context leak after failure of clone with CLONE_IO
+
+With CLONE_IO, parent's io_context->nr_tasks is incremented, but never
+decremented whenever copy_process() fails afterwards, which prevents
+exit_io_context() from calling IO schedulers exit functions.
+
+Give a task_struct to exit_io_context(), and call exit_io_context() instead of
+put_io_context() in copy_process() cleanup path.
+
+Signed-off-by: Louis Rilling <louis.rilling@kerlabs.com>
+Signed-off-by: Jens Axboe <jens.axboe@oracle.com>

@@ -1,0 +1,10 @@
+Bluetooth: Add configuration support for ERTM and Streaming mode
+
+Add support to config_req and config_rsp to configure ERTM and Streaming
+mode. If the remote device specifies ERTM or Streaming mode, then the
+same mode is proposed. Otherwise ERTM or Basic mode is used. And in case
+of a state 2 device, the remote device should propose the same mode. If
+not, then the channel gets disconnected.
+
+Signed-off-by: Gustavo F. Padovan <gustavo@las.ic.unicamp.br>
+Signed-off-by: Marcel Holtmann <marcel@holtmann.org>

@@ -1,0 +1,14 @@
+drm/amdgpu/pm: Fix NULL pointer dereference when get power limit
+
+Because powerplay_table initialization is skipped under
+sriov case, We check and set default lower and upper OD
+value if powerplay_table is NULL.
+
+Fixes: 7968e9748fbb ("drm/amdgpu/pm: Fix the power1_min_cap value")
+Signed-off-by: Ma Jun <Jun.Ma2@amd.com>
+Reported-by: Yin Zhenguo <zhenguo.yin@amd.com>
+Suggested-by: Lazar Lijo <lijo.lazar@amd.com>
+Suggested-by: Alex Deucher <Alexander.Deucher@amd.com>
+Reviewed-by: Alex Deucher <alexander.deucher@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+Cc: stable@vger.kernel.org

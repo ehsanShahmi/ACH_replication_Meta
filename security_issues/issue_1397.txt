@@ -1,0 +1,12 @@
+drm/amd/display: Skip wbscl_set_scaler_filter if filter is null
+
+Callers can pass null in filter (i.e. from returned from the function
+wbscl_get_filter_coeffs_16p) and a null check is added to ensure that is
+not the case.
+
+This fixes 4 NULL_RETURNS issues reported by Coverity.
+
+Reviewed-by: Harry Wentland <harry.wentland@amd.com>
+Acked-by: Hamza Mahfooz <hamza.mahfooz@amd.com>
+Signed-off-by: Alex Hung <alex.hung@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>

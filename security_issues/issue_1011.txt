@@ -1,0 +1,13 @@
+io_uring/poll: serialize poll linked timer start with poll removal
+
+We selectively grab the ctx->uring_lock for poll update/removal, but
+we really should grab it from the start to fully synchronize with
+linked timeouts. Normally this is indeed the case, but if requests
+are forced async by the application, we don't fully cover removal
+and timer disarm within the uring_lock.
+
+Make this simpler by having consistent locking state for poll removal.
+
+Cc: stable@vger.kernel.org # 6.1+
+Reported-by: Querijn Voet <querijnqyn@gmail.com>
+Signed-off-by: Jens Axboe <axboe@kernel.dk>

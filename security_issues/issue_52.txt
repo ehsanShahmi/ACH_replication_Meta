@@ -1,0 +1,10 @@
+ksmbd: fix slub overflow in ksmbd_decode_ntlmssp_auth_blob()
+
+If authblob->SessionKey.Length is bigger than session key
+size(CIFS_KEY_SIZE), slub overflow can happen in key exchange codes.
+cifs_arc4_crypt copy to session key array from SessionKey from client.
+
+Cc: stable@vger.kernel.org
+Reported-by: zdi-disclosures@trendmicro.com # ZDI-CAN-21940
+Signed-off-by: Namjae Jeon <linkinjeon@kernel.org>
+Signed-off-by: Steve French <stfrench@microsoft.com>

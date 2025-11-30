@@ -1,0 +1,10 @@
+net: sched: sch_multiq: fix possible OOB write in multiq_tune()
+
+q->bands will be assigned to qopt->bands to execute subsequent code logic
+after kmalloc. So the old q->bands should not be used in kmalloc.
+Otherwise, an out-of-bounds write will occur.
+
+Fixes: c2999f7fb05b ("net: sched: multiq: don't call qdisc_put() while holding tree lock")
+Signed-off-by: Hangyu Hua <hbh25y@gmail.com>
+Acked-by: Cong Wang <cong.wang@bytedance.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>

@@ -1,0 +1,16 @@
+atm: Fix Use-After-Free in do_vcc_ioctl
+
+Because do_vcc_ioctl() accesses sk->sk_receive_queue
+without holding a sk->sk_receive_queue.lock, it can
+cause a race with vcc_recvmsg().
+A use-after-free for skb occurs with the following flow.
+```
+do_vcc_ioctl() -> skb_peek()
+vcc_recvmsg() -> skb_recv_datagram() -> skb_free_datagram()
+```
+Add sk->sk_receive_queue.lock to do_vcc_ioctl() to fix this issue.
+
+Fixes: 1da177e4c3f4 ("Linux-2.6.12-rc2")
+Signed-off-by: Hyunwoo Kim <v4bel@theori.io>
+Link: https://lore.kernel.org/r/20231209094210.GA403126@v4bel-B760M-AORUS-ELITE-AX
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>

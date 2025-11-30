@@ -1,0 +1,13 @@
+i2c: smbus: fix NULL function pointer dereference
+
+Baruch reported an OOPS when using the designware controller as target
+only. Target-only modes break the assumption of one transfer function
+always being available. Fix this by always checking the pointer in
+__i2c_transfer.
+
+Reported-by: Baruch Siach <baruch@tkos.co.il>
+Closes: https://lore.kernel.org/r/4269631780e5ba789cf1ae391eec1b959def7d99.1712761976.git.baruch@tkos.co.il
+Fixes: 4b1acc43331d ("i2c: core changes for slave support")
+[wsa: dropped the simplification in core-smbus to avoid theoretical regressions]
+Signed-off-by: Wolfram Sang <wsa+renesas@sang-engineering.com>
+Tested-by: Baruch Siach <baruch@tkos.co.il>

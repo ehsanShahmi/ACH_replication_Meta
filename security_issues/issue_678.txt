@@ -1,0 +1,17 @@
+filelock: fix potential use-after-free in posix_lock_inode
+
+Light Hsieh reported a KASAN UAF warning in trace_posix_lock_inode().
+The request pointer had been changed earlier to point to a lock entry
+that was added to the inode's list. However, before the tracepoint could
+fire, another task raced in and freed that lock.
+
+Fix this by moving the tracepoint inside the spinlock, which should
+ensure that this doesn't happen.
+
+Fixes: 74f6f5912693 ("locks: fix KASAN: use-after-free in trace_event_raw_event_filelock_lock")
+Link: https://lore.kernel.org/linux-fsdevel/724ffb0a2962e912ea62bb0515deadf39c325112.camel@kernel.org/
+Reported-by: Light Hsieh (謝明燈) <Light.Hsieh@mediatek.com>
+Signed-off-by: Jeff Layton <jlayton@kernel.org>
+Link: https://lore.kernel.org/r/20240702-filelock-6-10-v1-1-96e766aadc98@kernel.org
+Reviewed-by: Alexander Aring <aahringo@redhat.com>
+Signed-off-by: Christian Brauner <brauner@kernel.org>

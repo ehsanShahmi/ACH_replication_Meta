@@ -1,0 +1,11 @@
+prlimit: do_prlimit needs to have a speculation check
+
+do_prlimit() adds the user-controlled resource value to a pointer that
+will subsequently be dereferenced.  In order to help prevent this
+codepath from being used as a spectre "gadget" a barrier needs to be
+added after checking the range.
+
+Reported-by: Jordy Zomer <jordyzomer@google.com>
+Tested-by: Jordy Zomer <jordyzomer@google.com>
+Suggested-by: Linus Torvalds <torvalds@linuxfoundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>

@@ -1,0 +1,15 @@
+scsi: lpfc: Fix a possible null pointer dereference
+
+In function lpfc_xcvr_data_show, the memory allocation with kmalloc might
+fail, thereby making rdp_context a null pointer. In the following context
+and functions that use this pointer, there are dereferencing operations,
+leading to null pointer dereference.
+
+To fix this issue, a null pointer check should be added. If it is null,
+use scnprintf to notify the user and return len.
+
+Fixes: 479b0917e447 ("scsi: lpfc: Create a sysfs entry called lpfc_xcvr_data for transceiver info")
+Signed-off-by: Huai-Yuan Liu <qq810974084@gmail.com>
+Link: https://lore.kernel.org/r/20240621082545.449170-1-qq810974084@gmail.com
+Reviewed-by: Justin Tee <justin.tee@broadcom.com>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>

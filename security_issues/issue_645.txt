@@ -1,0 +1,21 @@
+net/sched: cls_u32: Fix reference counter leak leading to overflow
+
+In the event of a failure in tcf_change_indev(), u32_set_parms() will
+immediately return without decrementing the recently incremented
+reference counter.  If this happens enough times, the counter will
+rollover and the reference freed, leading to a double free which can be
+used to do 'bad things'.
+
+In order to prevent this, move the point of possible failure above the
+point where the reference counter is incremented.  Also save any
+meaningful return values to be applied to the return data at the
+appropriate point in time.
+
+This issue was caught with KASAN.
+
+Fixes: 705c7091262d ("net: sched: cls_u32: no need to call tcf_exts_change for newly allocated struct")
+Suggested-by: Eric Dumazet <edumazet@google.com>
+Signed-off-by: Lee Jones <lee@kernel.org>
+Reviewed-by: Eric Dumazet <edumazet@google.com>
+Acked-by: Jamal Hadi Salim <jhs@mojatatu.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>

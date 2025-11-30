@@ -1,0 +1,16 @@
+netfilter: nf_conntrack_reasm: properly handle packets fragmented into a single fragment
+
+When an ICMPV6_PKT_TOOBIG message is received with a MTU below 1280,
+all further packets include a fragment header.
+
+Unlike regular defragmentation, conntrack also needs to "reassemble"
+those fragments in order to obtain a packet without the fragment
+header for connection tracking. Currently nf_conntrack_reasm checks
+whether a fragment has either IP6_MF set or an offset != 0, which
+makes it ignore those fragments.
+
+Remove the invalid check and make reassembly handle fragment queues
+containing only a single fragment.
+
+Reported-and-tested-by: Ulrich Weber <uweber@astaro.com>
+Signed-off-by: Patrick McHardy <kaber@trash.net>

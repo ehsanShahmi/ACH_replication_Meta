@@ -1,0 +1,11 @@
+tpm: Use auth only after NULL check in tpm_buf_check_hmac_response()
+
+Dereference auth after NULL check in tpm_buf_check_hmac_response().
+Otherwise, unless tpm2_sessions_init() was called, a call can cause NULL
+dereference, when TCG_TPM2_HMAC is enabled.
+
+[jarkko: adjusted the commit message.]
+Cc: stable@vger.kernel.org # v6.10+
+Fixes: 7ca110f2679b ("tpm: Address !chip->auth in tpm_buf_append_hmac_session*()")
+Signed-off-by: Hao Ge <gehao@kylinos.cn>
+Signed-off-by: Jarkko Sakkinen <jarkko@kernel.org>

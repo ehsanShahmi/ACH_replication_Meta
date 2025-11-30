@@ -1,0 +1,6 @@
+[IPV6]: Fix slab corruption running ip6sic
+
+From: Eric Sesterhenn <snakebyte@gmx.de>
+
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>

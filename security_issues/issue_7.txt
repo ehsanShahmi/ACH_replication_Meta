@@ -1,0 +1,9 @@
+mlx4_en: Fix out of bounds array access
+
+When searching for a free entry in either mlx4_register_vlan() or
+mlx4_register_mac(), and there is no free entry, the loop terminates without
+updating the local variable free thus causing out of array bounds access. Fix
+this by adding a proper check outside the loop.
+
+Signed-off-by: Eli Cohen <eli@mellanox.co.il>
+Signed-off-by: David S. Miller <davem@davemloft.net>

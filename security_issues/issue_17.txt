@@ -1,0 +1,9 @@
+net: ethernet: mtk_eth_soc: use after free in __mtk_ppe_check_skb()
+
+The __mtk_foe_entry_clear() function frees "entry" so we have to use
+the _safe() version of hlist_for_each_entry() to prevent a use after
+free.
+
+Fixes: 33fc42de3327 ("net: ethernet: mtk_eth_soc: support creating mac address based offload entries")
+Signed-off-by: Dan Carpenter <dan.carpenter@oracle.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>

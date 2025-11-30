@@ -1,0 +1,10 @@
+net: wangxun: fix kernel panic due to null pointer
+
+When the device uses a custom subsystem vendor ID, the function
+wx_sw_init() returns before the memory of 'wx->mac_table' is allocated.
+The null pointer will causes the kernel panic.
+
+Fixes: 79625f45ca73 ("net: wangxun: Move MAC address handling to libwx")
+Signed-off-by: Jiawen Wu <jiawenwu@trustnetic.com>
+Reviewed-by: Simon Horman <horms@kernel.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>

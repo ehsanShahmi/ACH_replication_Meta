@@ -1,0 +1,16 @@
+media: em28xx: initialize refcount before kref_get
+
+The commit 47677e51e2a4("[media] em28xx: Only deallocate struct
+em28xx after finishing all extensions") adds kref_get to many init
+functions (e.g., em28xx_audio_init). However, kref_init is called too
+late in em28xx_usb_probe, since em28xx_init_dev before will invoke
+those init functions and call kref_get function. Then refcount bug
+occurs in my local syzkaller instance.
+
+Fix it by moving kref_init before em28xx_init_dev. This issue occurs
+not only in dev but also dev->dev_next.
+
+Fixes: 47677e51e2a4 ("[media] em28xx: Only deallocate struct em28xx after finishing all extensions")
+Reported-by: syzkaller <syzkaller@googlegroups.com>
+Signed-off-by: Dongliang Mu <mudongliangabcd@gmail.com>
+Signed-off-by: Hans Verkuil <hverkuil-cisco@xs4all.nl>

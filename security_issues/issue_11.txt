@@ -1,0 +1,8 @@
+eth: sp7021: fix use after free bug in spl2sw_nvmem_get_mac_address
+
+This frees "mac" and tries to display its address as part of the error
+message on the next line.  Swap the order.
+
+Fixes: fd3040b9394c ("net: ethernet: Add driver for Sunplus SP7021")
+Signed-off-by: Zheng Wang <zyytlz.wz@163.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>

@@ -1,0 +1,10 @@
+mfd: syscon: Fix null pointer dereference in of_syscon_register()
+
+kasprintf() returns a pointer to dynamically allocated memory
+which can be NULL upon failure.
+
+Fixes: e15d7f2b81d2 ("mfd: syscon: Use a unique name with regmap_config")
+Signed-off-by: Kunwu Chan <chentao@kylinos.cn>
+Reviewed-by: Arnd Bergmann <arnd@arndb.de>
+Link: https://lore.kernel.org/r/20231204092443.2462115-1-chentao@kylinos.cn
+Signed-off-by: Lee Jones <lee@kernel.org>

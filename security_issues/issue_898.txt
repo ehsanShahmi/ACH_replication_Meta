@@ -1,0 +1,24 @@
+nvme: move stopping keep-alive into nvme_uninit_ctrl()
+
+Commit 4733b65d82bd ("nvme: start keep-alive after admin queue setup")
+moves starting keep-alive from nvme_start_ctrl() into
+nvme_init_ctrl_finish(), but don't move stopping keep-alive into
+nvme_uninit_ctrl(), so keep-alive work can be started and keep pending
+after failing to start controller, finally use-after-free is triggered if
+nvme host driver is unloaded.
+
+This patch fixes kernel panic when running nvme/004 in case that connection
+failure is triggered, by moving stopping keep-alive into nvme_uninit_ctrl().
+
+This way is reasonable because keep-alive is now started in
+nvme_init_ctrl_finish().
+
+Fixes: 3af755a46881 ("nvme: move nvme_stop_keep_alive() back to original position")
+Cc: Hannes Reinecke <hare@suse.de>
+Cc: Mark O'Donovan <shiftee@posteo.net>
+Reported-by: Changhui Zhong <czhong@redhat.com>
+Reviewed-by: Christoph Hellwig <hch@lst.de>
+Reviewed-by: Sagi Grimberg <sagi@grimberg.me>
+Reviewed-by: Hannes Reinecke <hare@suse.de>
+Signed-off-by: Ming Lei <ming.lei@redhat.com>
+Signed-off-by: Keith Busch <kbusch@kernel.org>

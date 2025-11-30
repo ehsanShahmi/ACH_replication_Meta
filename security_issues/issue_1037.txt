@@ -1,0 +1,9 @@
+drm/admgpu: fix dereferencing null pointer context
+
+When user space sets an invalid ta type, the pointer context will be empty.
+So it need to check the pointer context before using it
+
+Signed-off-by: Jesse Zhang <Jesse.Zhang@amd.com>
+Suggested-by: Tim Huang <Tim.Huang@amd.com>
+Reviewed-by: Tim Huang <Tim.Huang@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
