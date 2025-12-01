@@ -32,3 +32,4 @@ coverage
 pytest
 sumy
 nltk
+nltk.download('punkt_tab')
