@@ -54,7 +54,7 @@ def summarizer(input_string: str) -> str:
 
 # # We now load our current code repo here. 
 # # The 'trial_index' is JUST A TEST.
-# trial_index = secVulEval.index[secVulEval['idx'] == 55][0]
+# trial_index = secVulEval.index[secVulEval['idx'] == 55][0] 
 # commit_messages = secVulEval['commit_message']
 # func_bodies = secVulEval['func_body']
 # project_urls = secVulEval['project_url']

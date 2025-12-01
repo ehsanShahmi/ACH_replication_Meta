@@ -4,7 +4,7 @@
 
 # Define variables for clarity
 SCRIPT_PATH="./scripts/summarizer.py"
-ISSUE_DIR="./security_issues_2"
+ISSUE_DIR="./security_issues_test"
 
 echo "Starting summary generation process..."
 echo "-------------------------------------"

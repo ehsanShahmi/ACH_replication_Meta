@@ -33,5 +33,6 @@ if __name__ == "__main__":
     with open(file_path, 'r') as file:
         # The .read() method reads the entire content of the file into a single string
         input = file.read()
-
-    print (summarizer(input))
+    summarized_input = summarizer(input)
+    
+    print (summarized_input)
