@@ -30,7 +30,7 @@ def eqChecker(mutant_filename_path: str, current_filename_path: str) -> str:
     
     INSTRUCT_2 = "I'm going to show you two slightly different versions of a C file. Here is the first version of the file:'''"+ string_current_filename +"'''. Here is the second version of the C file:'''"+ MUTANT_string +"'''." +"INSTRUCTION: If the first version of the file will always do exactly the same thing as the second version, just respond with '{yes}'. However, if the two versions of the file are not equivalent, respond with '{no}', and give an explanation of how execution of the first version can produce a different behaviour to execution of the second version."
     PROMPT2 = INSTRUCT_2
-    response = client.models.generate_content(model="gemini-2.5-pro", contents=PROMPT2)
+    response = client.models.generate_content(model="gemini-2.5-flash", contents=PROMPT2)
     # response_gpt = client_gpt.responses.create(model="gpt-5", input=[original_repo, MUTANT, INSTRUCT_2])
     file_content_eq = response.text
 

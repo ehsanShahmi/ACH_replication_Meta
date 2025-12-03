@@ -6,6 +6,7 @@
 Summarizer="./scripts/summarizer.py"
 ISSUE_DIR="./security_issues_test"
 INCLUDE_DIR="./includes"
+OUTPUT_DIR="./outputs"
 Mutator="./scripts/mutator.py"
 eqChecker="./scripts/eqChecker.py"
 sec_test_gen="./scripts/sec_test_gen.py"
@@ -35,7 +36,7 @@ for issue_file in "$ISSUE_DIR"/*.txt; do
         echo "<---STAGE 1 VALIDATION: whether mutant is buildable and whether mutant is passed with existing testcase:--->"
         echo "--------------------------------------------------------------------"
         # --- STEP 1: ATTEMPT TO COMPILE BOTH FILES ---
-        TEST_RUNNER_EXEC="test_runner"
+        TEST_RUNNER_EXEC="$OUTPUT_DIR/test_runner"
         echo "Check 1: Attempting to BUILD mutant code: $mutant_file and existing test_cases: $existing_test_cases"
         gcc -I"$INCLUDE_DIR" "$mutant_file" "$existing_test_cases" -o "$TEST_RUNNER_EXEC"
         if [ $? -ne 0 ]; then
@@ -88,8 +89,9 @@ for issue_file in "$ISSUE_DIR"/*.txt; do
             echo "<---STAGE 2 VALIDATION: whether new test cases are buildable, then if they are passed with original code and then if they are killed using mutant--->"
             echo "--------------------------------------------------------------------"
             # 1. Check if the new test cases are buildable with the *original* code. We need YES (i.e., exit code 0)
+            ORIGINAL_RUN_EXEC="$OUTPUT_DIR/original_test_run"
             echo "Check 1: Building original repo with new test cases..."
-            gcc -I"$INCLUDE_DIR" "$current_code" "$new_test_case_file" -o "original_test_run"
+            gcc -I"$INCLUDE_DIR" "$current_code" "$new_test_case_file" -o "$ORIGINAL_RUN_EXEC"
             if [ $? -ne 0 ]; then
                 echo "FAIL: The original code failed to compile with the new test cases. Aborting iteration."
                 continue
@@ -101,7 +103,7 @@ for issue_file in "$ISSUE_DIR"/*.txt; do
 
             # 2. Now we check if the new test cases *pass* on the *original* file. We need YES (i.e., exit code 0)
             echo "Check 2: Running new test cases on original code..."
-            ./"original_test_run"
+            ./"$ORIGINAL_RUN_EXEC"
             if [ $? -ne 0 ]; then
                 echo "FAIL: New test cases failed on original code. SO NEW TEST CASES ARE INCORRECTLY MADE. Aborting iteration."
                 continue
@@ -111,15 +113,16 @@ for issue_file in "$ISSUE_DIR"/*.txt; do
             echo
 
             # 3. Finally we check if the new test cases pass or fail on the *mutant* file. We need FAIL (i.e., exit code non-zero)
+            MUTANT_NEW_RUN_EXEC="$OUTPUT_DIR/mutant_new_test_run"
             echo "Check 3: Running new test cases on mutant code..."
             # We already compiled the mutant with the *original* test cases earlier (TEST_RUNNER_EXEC), we need a new binary:
-            gcc -I"$INCLUDE_DIR" "$mutant_file" "$new_test_case_file" -o "mutant_new_test_run"
+            gcc -I"$INCLUDE_DIR" "$mutant_file" "$new_test_case_file" -o "$MUTANT_NEW_RUN_EXEC"
             if [ $? -ne 0 ]; then
                 echo "FAIL: Mutant code failed to compile with new test cases. Aborting iteration. MUTANT AND NEW TEST CASE ARE DISCARDED."
                 continue
             fi
 
-            ./"mutant_new_test_run"
+            ./"$MUTANT_NEW_RUN_EXEC"
             if [ $? -eq 0 ]; then
                 # If exit code is 0, the test passed, which is the wrong outcome for a successful mutation.
                 echo "FAIL: Mutant passed the new security test case. No valid vulnerability found for this issue. SO THIS MUTANT AND NEW TEST CASES ARE DISCARDED."
@@ -139,7 +142,6 @@ for issue_file in "$ISSUE_DIR"/*.txt; do
         fi
 
     fi
-    break
 done
 echo
 echo "Process finished."

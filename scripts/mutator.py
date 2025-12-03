@@ -74,7 +74,7 @@ def mutator(SUMMARY: str, current_filename_path: str, test_case_filename_path: s
     INSTRUCT_1 = "INSTRUCTION: Here is a file under test and a file with some unit tests for the file under test.{"+all_header_content+string_current_filename+"}.{"+string_test_case_filename+"}. Write a new version of this file under test in which each function is replaced by a new version of that same function that contains a typical bug that introduces a SECURITY violation similar to context. Delimit the mutated part using the comment-pair '// MUTANT <START>' and '// MUTANT <END>'. [DO NOT INCLUDE MARKDOWN CODEBLOCKS (```c...```) AT THE START AND END OF THE FILE. WHEN GENERATING THE FINAL MUTANT CODE, ONLY USE STANDARD #include 'filename.h' STATEMENTS. DO NOT COPY THE CONTENTS OF THE HEADERS INTO THE FINAL CODE FILE.]"
 
     PROMPT1 = "CONTEXT: "+SUMMARY+" "+INSTRUCT_1
-    response = client.models.generate_content(model="gemini-2.5-pro", contents=PROMPT1)
+    response = client.models.generate_content(model="gemini-2.5-flash", contents=PROMPT1)
     # response_gpt = client_gpt.responses.create(model="gpt-5", input=[SUMMARY, EXISTING_TEST_CASES, current_code_repo, INSTRUCT_1])
     current_filename_basename = os.path.basename(current_filename_path) 
     current_filename_root, extension = os.path.splitext(current_filename_basename)
