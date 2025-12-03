@@ -1,6 +1,6 @@
     // test_my_functions.c
     #include <stdio.h> // For printing test results
-    #include "../my_functions.h" // Include the header of the file under test
+    #include "my_functions.h" // Include the header of the file under test
 
     // Simple assertion macro for demonstration
     #define ASSERT_EQUAL(expected, actual, message) \
