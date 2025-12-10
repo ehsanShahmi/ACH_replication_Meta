@@ -1,0 +1,38 @@
+[1mNAME[0m
+    generate.py --model gpt-3.5-turbo --temperature 0.2 --n 10 --eval_path ./results
+
+[1mSYNOPSIS[0m
+    generate.py --model gpt-3.5-turbo --temperature 0.2 --n 10 --eval_path ./results - [4mGROUP[0m | [4mCOMMAND[0m | [4mVALUE[0m
+
+[1mGROUPS[0m
+    [1m[4mGROUP[0m[0m is one of the following:
+
+     ai_kwargs
+
+     cases
+
+     exclude_path
+
+     include_path
+
+     langs
+
+[1mCOMMANDS[0m
+    [1m[4mCOMMAND[0m[0m is one of the following:
+
+     gen
+
+[1mVALUES[0m
+    [1m[4mVALUE[0m[0m is one of the following:
+
+     begin_prompt_anchor
+
+     begin_solution_anchor
+
+     eval_path
+
+     model
+
+     num_proc
+
+     ppt

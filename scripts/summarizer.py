@@ -1,3 +1,14 @@
+'''
+Why this works better-->>
+
+Scalability (The 20% Ratio): Research into automatic summarization often targets a compression rate (tau) of 15% to 30% as the optimal balance between brevity and information retention. If you have 200 commit messages, this script will return the top 40, giving you a comprehensive overview rather than a tiny snippet.
+
+Alternative Heuristic (Square Root): If your files are massive (e.g., 1,000+ messages), 20% (200 sentences) might still be too long. In that specific case, you can swap the formula to int(math.sqrt(total_sentences)). This scales much more aggressively (1000 input 31 output).
+
+Why Luhn fits Commit Logs: Since your file contains a list of distinct commit messages rather than a cohesive story, standard "narrative" summarizers (like TextRank) might struggle to find flow. Luhn is frequency-based; it will simply pick the sentences containing the most frequent "significant" words (e.g., "overflow", "fix", "leak"). This effectively acts as a filter for the most representative types of bugs in that cluster.
+
+'''
+
 import os
 import sys
 from sumy.parsers.plaintext import PlaintextParser

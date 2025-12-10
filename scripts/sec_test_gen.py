@@ -69,7 +69,7 @@ def sec_test_gen(current_filename_path: str, test_case_filename_path: str, mutan
     INSTRUCT_3 = "What follows is two versions of a C file under test. An original correct file and a mutated version of that file that contains one mutant per C function, each of which represents a bug. Each bug is delimited by the comment pair `// MUTANT <START>' and `// MUTANT <END>'. The original C file and its mutant are followed by a set of existing test cases that contains unit tests for the original correct file under test. This is the original version of the file under test:'''{" +all_header_content+string_current_filename+ "}'''."+" This is the mutated version of the file under test:'''{" +file_MUTANT+"}. Here is the existing test suite:'''{" +string_test_case_filename+"}'''."+" Write an extended version of the test class that contains extra test cases that MUST FAIL on the mutant version of the file, but MUST PASS on the correct version." +"[IN YOUR NEW TEST SUITE CLASS, THE FILE MUST RETURN FAILED IF ANY 1 TEST CASE FAILS ON THE MUTANT, NO NEED TO CHECK OTHER TEST CASES ANY MORE THEN. DO NOT INCLUDE MARKDOWN CODEBLOCKS (```c...```) AT THE START AND END OF THE FILE. WHEN GENERATING THE FINAL MUTANT CODE, ONLY USE STANDARD #include 'filename.h' STATEMENTS. DO NOT COPY THE CONTENTS OF THE HEADERS INTO THE FINAL CODE FILE. ]"
 
     PROMPT3 = INSTRUCT_3
-    response = client._models.generate_content(model="gemini-2.5-flash", contents=PROMPT3)
+    response = client._models.generate_content(model="gemini-3-pro-preview", contents=PROMPT3)
     # response_gpt = client_gpt.responses.create(model="gpt-4o", input=[current_code_repo, MUTANT, EXISTING_TEST_CASES, INSTRUCT_3])
     file_content_new_testcases = response.text
 
