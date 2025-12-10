@@ -211,3 +211,5 @@ __marimo__/
 
 # CWEval benchmark framework for evaluation
 ./CWEval
+
+./miniforge3
