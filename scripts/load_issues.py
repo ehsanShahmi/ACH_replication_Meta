@@ -53,7 +53,7 @@ def load_issues(issue_dataset: pd.DataFrame, output_dir: str='./output_issues'):
         
         # 2. Deduplicate using set(). 
         # Use list(dict.fromkeys(raw_messages)) if you need to preserve order.
-        unique_messages = set(raw_messages)
+        unique_messages = list(dict.fromkeys(raw_messages))
         # ----------------------
 
         with open(file_path, "w", encoding="utf-8") as f:
