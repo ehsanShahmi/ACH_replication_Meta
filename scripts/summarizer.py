@@ -9,19 +9,30 @@ import nltk
 # nltk.download('punkt_tab')
 
 
-def luhn_summarize(text, sentence_count=2):
-    # Parse the input text
+def luhn_summarize(text, ratio=0.2):
+    """
+    Summarizes text to a specific ratio (default 20% of original length).
+    """
+    # 1. Parse the text first to count available sentences
     parser = PlaintextParser.from_string(text, Tokenizer("english"))
-    # Initialize summarizer with stemmer
+    total_sentences = len(parser.document.sentences)
+    if total_sentences == 0:
+        return []
+    # 2. Dynamic Calculation: Use 20% of total, but ensure at least 1 sentence
+    # For massive logs (>100 lines), you might prefer square root: int(math.sqrt(total_sentences))
+    sentence_count = max(1, int(total_sentences * ratio))
+    # 3. Initialize Summarizer
     summarizer = LuhnSummarizer(Stemmer("english"))
     summarizer.stop_words = get_stop_words("english")
-    # Generate summary
+    # 4. Generate Summary
     summary = summarizer(parser.document, sentence_count)
     return summary
 
 
 def summarizer(input_string: str) -> str:
-    summary = luhn_summarize(input_string, 3)
+    # Pass the ratio here (e.g., 0.2 for 20%)
+    summary = luhn_summarize(input_string, 0.4)
+    # Join with spaces (or newlines for better readability)
     summary_as_string = " ".join(str(element) for element in summary)
     return summary_as_string
 

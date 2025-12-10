@@ -41,35 +41,27 @@ def load_issues(issue_dataset: pd.DataFrame, output_dir: str='./output_issues'):
         os.makedirs(output_dir)
         print(f"Created output directory: {output_dir}")
 
-    # # Iterate through the series using the index
-    # for index, message in issues.items():
-    #     # Define a unique filename using the index or row number
-    #     filename = f"issue_{index}.txt"
-    #     file_path = os.path.join(output_dir, filename)
-        
-    #     # Open and write the message to the file
-    #     try:
-    #         with open(file_path, 'w', encoding='utf-8') as f:
-    #             f.write(str(message)) # Ensure it's treated as a string
-    #         # print(f"Saved issue {index} to {file_path}")
-    #     except IOError as e:
-    #         print(f"Error saving file {file_path}: {e}")
-
     for index, row in issue_dataset.iterrows():
-        # Generate the filename from the CWE ID (e.g., "CWE-119.txt")
+        # Generate the filename from the CWE ID
         cwe_id = str(row['cwe_list']).strip()
         filename = f"{cwe_id}.txt"
         file_path = os.path.join(output_dir, filename)
-        # Get the list of messages for this CWE
-        messages = row['commit_message']
+        
+        # --- CHANGE IS HERE ---
+        # 1. Get the list of messages
+        raw_messages = row['commit_message']
+        
+        # 2. Deduplicate using set(). 
+        # Use list(dict.fromkeys(raw_messages)) if you need to preserve order.
+        unique_messages = set(raw_messages)
+        # ----------------------
+
         with open(file_path, "w", encoding="utf-8") as f:
-            for msg in messages:
-                f.write("A new commit message starts here: ")
-                # 3. Clean the message: Remove \n and \t from the content
-                # We replace them with a space to prevent words from sticking together
+            for msg in unique_messages:
+                # 3. Clean the message: Remove newlines and tabs
                 clean_msg = msg.replace("\n", " ").replace("\t", " ")
-                # 4. Write to file
-                # We add a single newline char at the end to keep messages on separate lines
+                
+                # 4. Write to file with a standard newline at the end
                 f.write(clean_msg + "\n")
 
     print(f"Successfully created {len(issue_dataset)} cluster files in '{output_dir}/'")

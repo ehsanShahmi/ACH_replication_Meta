@@ -3,7 +3,7 @@
 # master_script.sh
 
 # Define the DIRECTORIES for clarity
-ISSUE_DIR="./security_issues_test"
+ISSUE_DIR="./security_issue_cluster_test"
 INCLUDE_DIR="./includes"
 OUTPUT_DIR="./outputs"
 # The single base directory containing all code and the 'testcases' subdirectory
