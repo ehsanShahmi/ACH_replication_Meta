@@ -1,0 +1,172 @@
+The vulnerable issue: block, bfq: fix uaf for accessing waker_bfqq after splitting
+
+After commit 42c306ed7233 ("block, bfq: don't break merge chain in
+bfq_split_bfqq()"), if the current procress is the last holder of bfqq,
+the bfqq can be freed after bfq_split_bfqq(). Hence recored the bfqq and
+then access bfqq->waker_bfqq may trigger UAF. What's more, the waker_bfqq
+may in the merge chain of bfqq, hence just recored waker_bfqq is still
+not safe.
+
+Fix the problem by adding a helper bfq_waker_bfqq() to check if
+bfqq->waker_bfqq is in the merge chain, and current procress is the only
+holder.
+
+Fixes: 42c306ed7233 ("block, bfq: don't break merge chain in bfq_split_bfqq()")
+Signed-off-by: Yu Kuai <yukuai3@huawei.com>
+Link: https://lore.kernel.org/r/20240909134154.954924-2-yukuai1@huaweicloud.com
+Signed-off-by: Jens Axboe <axboe@kernel.dk>
+The vulnerable function: static struct bfq_queue *bfq_init_rq(struct request *rq)
+{
+	struct request_queue *q = rq->q;
+	struct bio *bio = rq->bio;
+	struct bfq_data *bfqd = q->elevator->elevator_data;
+	struct bfq_io_cq *bic;
+	const int is_sync = rq_is_sync(rq);
+	struct bfq_queue *bfqq;
+	bool new_queue = false;
+	bool bfqq_already_existing = false, split = false;
+	unsigned int a_idx = bfq_actuator_index(bfqd, bio);
+
+	if (unlikely(!rq->elv.icq))
+		return NULL;
+
+	/*
+	 * Assuming that RQ_BFQQ(rq) is set only if everything is set
+	 * for this rq. This holds true, because this function is
+	 * invoked only for insertion or merging, and, after such
+	 * events, a request cannot be manipulated any longer before
+	 * being removed from bfq.
+	 */
+	if (RQ_BFQQ(rq))
+		return RQ_BFQQ(rq);
+
+	bic = icq_to_bic(rq->elv.icq);
+
+	bfq_check_ioprio_change(bic, bio);
+
+	bfq_bic_update_cgroup(bic, bio);
+
+	bfqq = bfq_get_bfqq_handle_split(bfqd, bic, bio, false, is_sync,
+					 &new_queue);
+
+	if (likely(!new_queue)) {
+		/* If the queue was seeky for too long, break it apart. */
+		if (bfq_bfqq_coop(bfqq) && bfq_bfqq_split_coop(bfqq) &&
+			!bic->bfqq_data[a_idx].stably_merged) {
+			struct bfq_queue *old_bfqq = bfqq;
+
+			/* Update bic before losing reference to bfqq */
+			if (bfq_bfqq_in_large_burst(bfqq))
+				bic->bfqq_data[a_idx].saved_in_large_burst =
+					true;
+
+			bfqq = bfq_split_bfqq(bic, bfqq);
+			split = true;
+
+			if (!bfqq) {
+				bfqq = bfq_get_bfqq_handle_split(bfqd, bic, bio,
+								 true, is_sync,
+								 NULL);
+				if (unlikely(bfqq == &bfqd->oom_bfqq))
+					bfqq_already_existing = true;
+			} else
+				bfqq_already_existing = true;
+
+			if (!bfqq_already_existing) {
+				bfqq->waker_bfqq = old_bfqq->waker_bfqq;
+				bfqq->tentative_waker_bfqq = NULL;
+
+				/*
+				 * If the waker queue disappears, then
+				 * new_bfqq->waker_bfqq must be
+				 * reset. So insert new_bfqq into the
+				 * woken_list of the waker. See
+				 * bfq_check_waker for details.
+				 */
+				if (bfqq->waker_bfqq)
+					hlist_add_head(&bfqq->woken_list_node,
+						       &bfqq->waker_bfqq->woken_list);
+			}
+		}
+	}
+
+	bfqq_request_allocated(bfqq);
+	bfqq->ref++;
+	bic->requests++;
+	bfq_log_bfqq(bfqd, bfqq, "get_request %p: bfqq %p, %d",
+		     rq, bfqq, bfqq->ref);
+
+	rq->elv.priv[0] = bic;
+	rq->elv.priv[1] = bfqq;
+
+	/*
+	 * If a bfq_queue has only one process reference, it is owned
+	 * by only this bic: we can then set bfqq->bic = bic. in
+	 * addition, if the queue has also just been split, we have to
+	 * resume its state.
+	 */
+	if (likely(bfqq != &bfqd->oom_bfqq) && !bfqq->new_bfqq &&
+	    bfqq_process_refs(bfqq) == 1) {
+		bfqq->bic = bic;
+		if (split) {
+			/*
+			 * The queue has just been split from a shared
+			 * queue: restore the idle window and the
+			 * possible weight raising period.
+			 */
+			bfq_bfqq_resume_state(bfqq, bfqd, bic,
+					      bfqq_already_existing);
+		}
+	}
+
+	/*
+	 * Consider bfqq as possibly belonging to a burst of newly
+	 * created queues only if:
+	 * 1) A burst is actually happening (bfqd->burst_size > 0)
+	 * or
+	 * 2) There is no other active queue. In fact, if, in
+	 *    contrast, there are active queues not belonging to the
+	 *    possible burst bfqq may belong to, then there is no gain
+	 *    in considering bfqq as belonging to a burst, and
+	 *    therefore in not weight-raising bfqq. See comments on
+	 *    bfq_handle_burst().
+	 *
+	 * This filtering also helps eliminating false positives,
+	 * occurring when bfqq does not belong to an actual large
+	 * burst, but some background task (e.g., a service) happens
+	 * to trigger the creation of new queues very close to when
+	 * bfqq and its possible companion queues are created. See
+	 * comments on bfq_handle_burst() for further details also on
+	 * this issue.
+	 */
+	if (unlikely(bfq_bfqq_just_created(bfqq) &&
+		     (bfqd->burst_size > 0 ||
+		      bfq_tot_busy_queues(bfqd) == 0)))
+		bfq_handle_burst(bfqd, bfqq);
+
+	return bfqq;
+}
+The corrected function: static struct bfq_queue *bfq_waker_bfqq(struct bfq_queue *bfqq)
+{
+	struct bfq_queue *new_bfqq = bfqq->new_bfqq;
+	struct bfq_queue *waker_bfqq = bfqq->waker_bfqq;
+
+	if (!waker_bfqq)
+		return NULL;
+
+	while (new_bfqq) {
+		if (new_bfqq == waker_bfqq) {
+			/*
+			 * If waker_bfqq is in the merge chain, and current
+			 * is the only procress.
+			 */
+			if (bfqq_process_refs(waker_bfqq) == 1)
+				return NULL;
+			break;
+		}
+
+		new_bfqq = new_bfqq->new_bfqq;
+	}
+
+	return waker_bfqq;
+}

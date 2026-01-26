@@ -1,0 +1,1 @@
+inet: switch IP ID generator to siphash  According to Amit Klein and Benny Pinkas, IP ID generation is too weak and might be used by attackers. Signed-off-by: Eric Dumazet <edumazet@google.com> Reported-by: Amit Klein <aksecurity@gmail.com> Reported-by: Benny Pinkas <benny@pinkas.net> Signed-off-by: David S. Miller <davem@davemloft.net>

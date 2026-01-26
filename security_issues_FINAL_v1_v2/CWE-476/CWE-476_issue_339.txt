@@ -1,0 +1,14 @@
+eventfs: Fix a possible null pointer dereference in eventfs_find_events()
+
+In function eventfs_find_events,there is a potential null pointer
+that may be caused by calling update_events_attr which will perform
+some operations on the members of the ei struct when ei is NULL.
+
+Hence,When ei->is_freed is set,return NULL directly.
+
+Link: https://lore.kernel.org/linux-trace-kernel/20240513053338.63017-1-hao.ge@linux.dev
+
+Cc: stable@vger.kernel.org
+Fixes: 8186fff7ab64 ("tracefs/eventfs: Use root and instance inodes as default ownership")
+Signed-off-by: Hao Ge <gehao@kylinos.cn>
+Signed-off-by: Steven Rostedt (Google) <rostedt@goodmis.org>

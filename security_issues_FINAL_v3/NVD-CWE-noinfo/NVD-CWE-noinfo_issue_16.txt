@@ -1,0 +1,34 @@
+The vulnerable issue: NFSv4: Convert the open and close ops to use fmode
+
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+The vulnerable function: static struct nfs4_opendata *nfs4_open_recoverdata_alloc(struct nfs_open_context *ctx, struct nfs4_state *state)
+{
+	struct nfs4_opendata *opendata;
+
+	opendata = nfs4_opendata_alloc(&ctx->path, state->owner, 0, NULL);
+	if (opendata == NULL)
+		return ERR_PTR(-ENOMEM);
+	opendata->state = state;
+	atomic_inc(&state->count);
+	return opendata;
+}
+The corrected function: static void nfs4_open_release(void *calldata)
+{
+	struct nfs4_opendata *data = calldata;
+	struct nfs4_state *state = NULL;
+
+	/* If this request hasn't been cancelled, do nothing */
+	if (data->cancelled == 0)
+		goto out_free;
+	/* In case of error, no cleanup! */
+	if (data->rpc_status != 0 || !data->rpc_done)
+		goto out_free;
+	/* In case we need an open_confirm, no cleanup! */
+	if (data->o_res.rflags & NFS4_OPEN_RESULT_CONFIRM)
+		goto out_free;
+	state = nfs4_opendata_to_nfs4_state(data);
+	if (!IS_ERR(state))
+		nfs4_close_state(&data->path, state, data->o_arg.open_flags);
+out_free:
+	nfs4_opendata_put(data);
+}

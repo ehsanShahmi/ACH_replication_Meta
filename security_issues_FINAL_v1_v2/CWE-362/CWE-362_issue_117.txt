@@ -1,0 +1,14 @@
+tls: fix race between tx work scheduling and socket close
+
+Similarly to previous commit, the submitting thread (recvmsg/sendmsg)
+may exit as soon as the async crypto handler calls complete().
+Reorder scheduling the work before calling complete().
+This seems more logical in the first place, as it's
+the inverse order of what the submitting thread will do.
+
+Reported-by: valis <sec@valis.email>
+Fixes: a42055e8d2c3 ("net/tls: Add support for async encryption of records for performance")
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Reviewed-by: Simon Horman <horms@kernel.org>
+Reviewed-by: Sabrina Dubroca <sd@queasysnail.net>
+Signed-off-by: David S. Miller <davem@davemloft.net>

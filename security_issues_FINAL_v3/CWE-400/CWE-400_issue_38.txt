@@ -1,0 +1,130 @@
+The vulnerable issue: perf: Remove the nmi parameter from the swevent and overflow interface
+
+The nmi parameter indicated if we could do wakeups from the current
+context, if not, we would set some state and self-IPI and let the
+resulting interrupt do the wakeup.
+
+For the various event classes:
+
+  - hardware: nmi=0; PMI is in fact an NMI or we run irq_work_run from
+    the PMI-tail (ARM etc.)
+  - tracepoint: nmi=0; since tracepoint could be from NMI context.
+  - software: nmi=[0,1]; some, like the schedule thing cannot
+    perform wakeups, and hence need 0.
+
+As one can see, there is very little nmi=1 usage, and the down-side of
+not using it is that on some platforms some software events can have a
+jiffy delay in wakeup (when arch_irq_work_raise isn't implemented).
+
+The up-side however is that we can remove the nmi parameter and save a
+bunch of conditionals in fast paths.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: Michael Cree <mcree@orcon.net.nz>
+Cc: Will Deacon <will.deacon@arm.com>
+Cc: Deng-Cheng Zhu <dengcheng.zhu@gmail.com>
+Cc: Anton Blanchard <anton@samba.org>
+Cc: Eric B Munson <emunson@mgebm.net>
+Cc: Heiko Carstens <heiko.carstens@de.ibm.com>
+Cc: Paul Mundt <lethal@linux-sh.org>
+Cc: David S. Miller <davem@davemloft.net>
+Cc: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Jason Wessel <jason.wessel@windriver.com>
+Cc: Don Zickus <dzickus@redhat.com>
+Link: http://lkml.kernel.org/n/tip-agjev8eu666tvknpb3iaj0fg@git.kernel.org
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+The vulnerable function: asmlinkage void user_unaligned_trap(struct pt_regs *regs, unsigned int insn)
+{
+	enum direction dir;
+
+	if(!(current->thread.flags & SPARC_FLAG_UNALIGNED) ||
+	   (((insn >> 30) & 3) != 3))
+		goto kill_user;
+	dir = decode_direction(insn);
+	if(!ok_for_user(regs, insn, dir)) {
+		goto kill_user;
+	} else {
+		int err, size = decode_access_size(insn);
+		unsigned long addr;
+
+		if(floating_point_load_or_store_p(insn)) {
+			printk("User FPU load/store unaligned unsupported.\n");
+			goto kill_user;
+		}
+
+		addr = compute_effective_address(regs, insn);
+		perf_sw_event(PERF_COUNT_SW_ALIGNMENT_FAULTS, 1, 0, regs, addr);
+		switch(dir) {
+		case load:
+			err = do_int_load(fetch_reg_addr(((insn>>25)&0x1f),
+							 regs),
+					  size, (unsigned long *) addr,
+					  decode_signedness(insn));
+			break;
+
+		case store:
+			err = do_int_store(((insn>>25)&0x1f), size,
+					   (unsigned long *) addr, regs);
+			break;
+
+		case both:
+			/*
+			 * This was supported in 2.4. However, we question
+			 * the value of SWAP instruction across word boundaries.
+			 */
+			printk("Unaligned SWAP unsupported.\n");
+			err = -EFAULT;
+			break;
+
+		default:
+			unaligned_panic("Impossible user unaligned trap.");
+			goto out;
+		}
+		if (err)
+			goto kill_user;
+		else
+			advance(regs);
+		goto out;
+	}
+
+kill_user:
+	user_mna_trap_fault(regs, insn);
+out:
+	;
+}
+The corrected function: asmlinkage void kernel_unaligned_trap(struct pt_regs *regs, unsigned int insn)
+{
+	enum direction dir = decode_direction(insn);
+	int size = decode_access_size(insn);
+
+	if(!ok_for_kernel(insn) || dir == both) {
+		printk("Unsupported unaligned load/store trap for kernel at <%08lx>.\n",
+		       regs->pc);
+		unaligned_panic("Wheee. Kernel does fpu/atomic unaligned load/store.");
+	} else {
+		unsigned long addr = compute_effective_address(regs, insn);
+		int err;
+
+		perf_sw_event(PERF_COUNT_SW_ALIGNMENT_FAULTS, 1, regs, addr);
+		switch (dir) {
+		case load:
+			err = do_int_load(fetch_reg_addr(((insn>>25)&0x1f),
+							 regs),
+					  size, (unsigned long *) addr,
+					  decode_signedness(insn));
+			break;
+
+		case store:
+			err = do_int_store(((insn>>25)&0x1f), size,
+					   (unsigned long *) addr, regs);
+			break;
+		default:
+			panic("Impossible kernel unaligned trap.");
+			/* Not reached... */
+		}
+		if (err)
+			kernel_mna_trap_fault(regs, insn);
+		else
+			advance(regs);
+	}
+}

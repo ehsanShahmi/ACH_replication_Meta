@@ -1,0 +1,139 @@
+The vulnerable issue: udf: Check path length when reading symlink
+
+Symlink reading code does not check whether the resulting path fits into
+the page provided by the generic code. This isn't as easy as just
+checking the symlink size because of various encoding conversions we
+perform on path. So we have to check whether there is still enough space
+in the buffer on the fly.
+
+CC: stable@vger.kernel.org
+Reported-by: Carl Henrik Lunde <chlunde@ping.uio.no>
+Signed-off-by: Jan Kara <jack@suse.cz>
+The vulnerable function: static int udf_translate_to_linux(uint8_t *newName, uint8_t *udfName,
+				  int udfLen, uint8_t *fidName,
+				  int fidNameLen)
+{
+	int index, newIndex = 0, needsCRC = 0;
+	int extIndex = 0, newExtIndex = 0, hasExt = 0;
+	unsigned short valueCRC;
+	uint8_t curr;
+
+	if (udfName[0] == '.' &&
+	    (udfLen == 1 || (udfLen == 2 && udfName[1] == '.'))) {
+		needsCRC = 1;
+		newIndex = udfLen;
+		memcpy(newName, udfName, udfLen);
+	} else {
+		for (index = 0; index < udfLen; index++) {
+			curr = udfName[index];
+			if (curr == '/' || curr == 0) {
+				needsCRC = 1;
+				curr = ILLEGAL_CHAR_MARK;
+				while (index + 1 < udfLen &&
+						(udfName[index + 1] == '/' ||
+						 udfName[index + 1] == 0))
+					index++;
+			}
+			if (curr == EXT_MARK &&
+					(udfLen - index - 1) <= EXT_SIZE) {
+				if (udfLen == index + 1)
+					hasExt = 0;
+				else {
+					hasExt = 1;
+					extIndex = index;
+					newExtIndex = newIndex;
+				}
+			}
+			if (newIndex < 256)
+				newName[newIndex++] = curr;
+			else
+				needsCRC = 1;
+		}
+	}
+	if (needsCRC) {
+		uint8_t ext[EXT_SIZE];
+		int localExtIndex = 0;
+
+		if (hasExt) {
+			int maxFilenameLen;
+			for (index = 0;
+			     index < EXT_SIZE && extIndex + index + 1 < udfLen;
+			     index++) {
+				curr = udfName[extIndex + index + 1];
+
+				if (curr == '/' || curr == 0) {
+					needsCRC = 1;
+					curr = ILLEGAL_CHAR_MARK;
+					while (extIndex + index + 2 < udfLen &&
+					      (index + 1 < EXT_SIZE &&
+						(udfName[extIndex + index + 2] == '/' ||
+						 udfName[extIndex + index + 2] == 0)))
+						index++;
+				}
+				ext[localExtIndex++] = curr;
+			}
+			maxFilenameLen = 250 - localExtIndex;
+			if (newIndex > maxFilenameLen)
+				newIndex = maxFilenameLen;
+			else
+				newIndex = newExtIndex;
+		} else if (newIndex > 250)
+			newIndex = 250;
+		newName[newIndex++] = CRC_MARK;
+		valueCRC = crc_itu_t(0, fidName, fidNameLen);
+		newName[newIndex++] = hex_asc_upper_hi(valueCRC >> 8);
+		newName[newIndex++] = hex_asc_upper_lo(valueCRC >> 8);
+		newName[newIndex++] = hex_asc_upper_hi(valueCRC);
+		newName[newIndex++] = hex_asc_upper_lo(valueCRC);
+
+		if (hasExt) {
+			newName[newIndex++] = EXT_MARK;
+			for (index = 0; index < localExtIndex; index++)
+				newName[newIndex++] = ext[index];
+		}
+	}
+
+	return newIndex;
+}
+The corrected function: int udf_get_filename(struct super_block *sb, uint8_t *sname, int slen,
+		     uint8_t *dname, int dlen)
+{
+	struct ustr *filename, *unifilename;
+	int len = 0;
+
+	filename = kmalloc(sizeof(struct ustr), GFP_NOFS);
+	if (!filename)
+		return 0;
+
+	unifilename = kmalloc(sizeof(struct ustr), GFP_NOFS);
+	if (!unifilename)
+		goto out1;
+
+	if (udf_build_ustr_exact(unifilename, sname, slen))
+		goto out2;
+
+	if (UDF_QUERY_FLAG(sb, UDF_FLAG_UTF8)) {
+		if (!udf_CS0toUTF8(filename, unifilename)) {
+			udf_debug("Failed in udf_get_filename: sname = %s\n",
+				  sname);
+			goto out2;
+		}
+	} else if (UDF_QUERY_FLAG(sb, UDF_FLAG_NLS_MAP)) {
+		if (!udf_CS0toNLS(UDF_SB(sb)->s_nls_map, filename,
+				  unifilename)) {
+			udf_debug("Failed in udf_get_filename: sname = %s\n",
+				  sname);
+			goto out2;
+		}
+	} else
+		goto out2;
+
+	len = udf_translate_to_linux(dname, dlen,
+				     filename->u_name, filename->u_len,
+				     unifilename->u_name, unifilename->u_len);
+out2:
+	kfree(unifilename);
+out1:
+	kfree(filename);
+	return len;
+}

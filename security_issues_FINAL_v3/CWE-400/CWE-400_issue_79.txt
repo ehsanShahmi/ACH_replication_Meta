@@ -1,0 +1,91 @@
+The vulnerable issue: tunnels: Don't apply GRO to multiple layers of encapsulation.
+
+When drivers express support for TSO of encapsulated packets, they
+only mean that they can do it for one layer of encapsulation.
+Supporting additional levels would mean updating, at a minimum,
+more IP length fields and they are unaware of this.
+
+No encapsulation device expresses support for handling offloaded
+encapsulated packets, so we won't generate these types of frames
+in the transmit path. However, GRO doesn't have a check for
+multiple levels of encapsulation and will attempt to build them.
+
+UDP tunnel GRO actually does prevent this situation but it only
+handles multiple UDP tunnels stacked on top of each other. This
+generalizes that solution to prevent any kind of tunnel stacking
+that would cause problems.
+
+Fixes: bf5a755f ("net-gre-gro: Add GRE support to the GRO stack")
+Signed-off-by: Jesse Gross <jesse@kernel.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: struct sk_buff **udp_gro_receive(struct sk_buff **head, struct sk_buff *skb,
+				 struct udphdr *uh)
+{
+	struct udp_offload_priv *uo_priv;
+	struct sk_buff *p, **pp = NULL;
+	struct udphdr *uh2;
+	unsigned int off = skb_gro_offset(skb);
+	int flush = 1;
+
+	if (NAPI_GRO_CB(skb)->udp_mark ||
+	    (skb->ip_summed != CHECKSUM_PARTIAL &&
+	     NAPI_GRO_CB(skb)->csum_cnt == 0 &&
+	     !NAPI_GRO_CB(skb)->csum_valid))
+		goto out;
+
+	/* mark that this skb passed once through the udp gro layer */
+	NAPI_GRO_CB(skb)->udp_mark = 1;
+
+	rcu_read_lock();
+	uo_priv = rcu_dereference(udp_offload_base);
+	for (; uo_priv != NULL; uo_priv = rcu_dereference(uo_priv->next)) {
+		if (net_eq(read_pnet(&uo_priv->net), dev_net(skb->dev)) &&
+		    uo_priv->offload->port == uh->dest &&
+		    uo_priv->offload->callbacks.gro_receive)
+			goto unflush;
+	}
+	goto out_unlock;
+
+unflush:
+	flush = 0;
+
+	for (p = *head; p; p = p->next) {
+		if (!NAPI_GRO_CB(p)->same_flow)
+			continue;
+
+		uh2 = (struct udphdr   *)(p->data + off);
+
+		/* Match ports and either checksums are either both zero
+		 * or nonzero.
+		 */
+		if ((*(u32 *)&uh->source != *(u32 *)&uh2->source) ||
+		    (!uh->check ^ !uh2->check)) {
+			NAPI_GRO_CB(p)->same_flow = 0;
+			continue;
+		}
+	}
+
+	skb_gro_pull(skb, sizeof(struct udphdr)); /* pull encapsulating udp header */
+	skb_gro_postpull_rcsum(skb, uh, sizeof(struct udphdr));
+	NAPI_GRO_CB(skb)->proto = uo_priv->offload->ipproto;
+	pp = uo_priv->offload->callbacks.gro_receive(head, skb,
+						     uo_priv->offload);
+
+out_unlock:
+	rcu_read_unlock();
+out:
+	NAPI_GRO_CB(skb)->flush |= flush;
+	return pp;
+}
+The corrected function: static struct sk_buff **sit_gro_receive(struct sk_buff **head,
+					struct sk_buff *skb)
+{
+	if (NAPI_GRO_CB(skb)->encap_mark) {
+		NAPI_GRO_CB(skb)->flush = 1;
+		return NULL;
+	}
+
+	NAPI_GRO_CB(skb)->encap_mark = 1;
+
+	return ipv6_gro_receive(head, skb);
+}

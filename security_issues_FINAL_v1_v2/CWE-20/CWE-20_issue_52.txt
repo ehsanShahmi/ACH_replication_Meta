@@ -1,0 +1,11 @@
+rose: Add length checks to CALL_REQUEST parsing
+
+Define some constant offsets for CALL_REQUEST based on the description
+at <http://www.techfest.com/networking/wan/x25plp.htm> and the
+definition of ROSE as using 10-digit (5-byte) addresses.  Use them
+consistently.  Validate all implicit and explicit facilities lengths.
+Validate the address length byte rather than either trusting or
+assuming its value.
+
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+Signed-off-by: David S. Miller <davem@davemloft.net>

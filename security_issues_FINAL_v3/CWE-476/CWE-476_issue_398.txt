@@ -1,0 +1,420 @@
+The vulnerable issue: ice: Add netif_device_attach/detach into PF reset flow
+
+Ethtool callbacks can be executed while reset is in progress and try to
+access deleted resources, e.g. getting coalesce settings can result in a
+NULL pointer dereference seen below.
+
+Reproduction steps:
+Once the driver is fully initialized, trigger reset:
+	# echo 1 > /sys/class/net/<interface>/device/reset
+when reset is in progress try to get coalesce settings using ethtool:
+	# ethtool -c <interface>
+
+BUG: kernel NULL pointer dereference, address: 0000000000000020
+PGD 0 P4D 0
+Oops: Oops: 0000 [#1] PREEMPT SMP PTI
+CPU: 11 PID: 19713 Comm: ethtool Tainted: G S                 6.10.0-rc7+ #7
+RIP: 0010:ice_get_q_coalesce+0x2e/0xa0 [ice]
+RSP: 0018:ffffbab1e9bcf6a8 EFLAGS: 00010206
+RAX: 000000000000000c RBX: ffff94512305b028 RCX: 0000000000000000
+RDX: 0000000000000000 RSI: ffff9451c3f2e588 RDI: ffff9451c3f2e588
+RBP: 0000000000000000 R08: 0000000000000000 R09: 0000000000000000
+R10: ffff9451c3f2e580 R11: 000000000000001f R12: ffff945121fa9000
+R13: ffffbab1e9bcf760 R14: 0000000000000013 R15: ffffffff9e65dd40
+FS:  00007faee5fbe740(0000) GS:ffff94546fd80000(0000) knlGS:0000000000000000
+CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+CR2: 0000000000000020 CR3: 0000000106c2e005 CR4: 00000000001706f0
+Call Trace:
+<TASK>
+ice_get_coalesce+0x17/0x30 [ice]
+coalesce_prepare_data+0x61/0x80
+ethnl_default_doit+0xde/0x340
+genl_family_rcv_msg_doit+0xf2/0x150
+genl_rcv_msg+0x1b3/0x2c0
+netlink_rcv_skb+0x5b/0x110
+genl_rcv+0x28/0x40
+netlink_unicast+0x19c/0x290
+netlink_sendmsg+0x222/0x490
+__sys_sendto+0x1df/0x1f0
+__x64_sys_sendto+0x24/0x30
+do_syscall_64+0x82/0x160
+entry_SYSCALL_64_after_hwframe+0x76/0x7e
+RIP: 0033:0x7faee60d8e27
+
+Calling netif_device_detach() before reset makes the net core not call
+the driver when ethtool command is issued, the attempt to execute an
+ethtool command during reset will result in the following message:
+
+    netlink error: No such device
+
+instead of NULL pointer dereference. Once reset is done and
+ice_rebuild() is executing, the netif_device_attach() is called to allow
+for ethtool operations to occur again in a safe manner.
+
+Fixes: fcea6f3da546 ("ice: Add stats and ethtool support")
+Suggested-by: Jakub Kicinski <kuba@kernel.org>
+Reviewed-by: Igor Bagnucki <igor.bagnucki@intel.com>
+Signed-off-by: Dawid Osuchowski <dawid.osuchowski@linux.intel.com>
+Tested-by: Pucha Himasekhar Reddy <himasekharx.reddy.pucha@intel.com> (A Contingent worker at Intel)
+Reviewed-by: Michal Schmidt <mschmidt@redhat.com>
+Signed-off-by: Tony Nguyen <anthony.l.nguyen@intel.com>
+The vulnerable function: static void ice_rebuild(struct ice_pf *pf, enum ice_reset_req reset_type)
+{
+	struct device *dev = ice_pf_to_dev(pf);
+	struct ice_hw *hw = &pf->hw;
+	bool dvm;
+	int err;
+
+	if (test_bit(ICE_DOWN, pf->state))
+		goto clear_recovery;
+
+	dev_dbg(dev, "rebuilding PF after reset_type=%d\n", reset_type);
+
+#define ICE_EMP_RESET_SLEEP_MS 5000
+	if (reset_type == ICE_RESET_EMPR) {
+		/* If an EMP reset has occurred, any previously pending flash
+		 * update will have completed. We no longer know whether or
+		 * not the NVM update EMP reset is restricted.
+		 */
+		pf->fw_emp_reset_disabled = false;
+
+		msleep(ICE_EMP_RESET_SLEEP_MS);
+	}
+
+	err = ice_init_all_ctrlq(hw);
+	if (err) {
+		dev_err(dev, "control queues init failed %d\n", err);
+		goto err_init_ctrlq;
+	}
+
+	/* if DDP was previously loaded successfully */
+	if (!ice_is_safe_mode(pf)) {
+		/* reload the SW DB of filter tables */
+		if (reset_type == ICE_RESET_PFR)
+			ice_fill_blk_tbls(hw);
+		else
+			/* Reload DDP Package after CORER/GLOBR reset */
+			ice_load_pkg(NULL, pf);
+	}
+
+	err = ice_clear_pf_cfg(hw);
+	if (err) {
+		dev_err(dev, "clear PF configuration failed %d\n", err);
+		goto err_init_ctrlq;
+	}
+
+	ice_clear_pxe_mode(hw);
+
+	err = ice_init_nvm(hw);
+	if (err) {
+		dev_err(dev, "ice_init_nvm failed %d\n", err);
+		goto err_init_ctrlq;
+	}
+
+	err = ice_get_caps(hw);
+	if (err) {
+		dev_err(dev, "ice_get_caps failed %d\n", err);
+		goto err_init_ctrlq;
+	}
+
+	err = ice_aq_set_mac_cfg(hw, ICE_AQ_SET_MAC_FRAME_SIZE_MAX, NULL);
+	if (err) {
+		dev_err(dev, "set_mac_cfg failed %d\n", err);
+		goto err_init_ctrlq;
+	}
+
+	dvm = ice_is_dvm_ena(hw);
+
+	err = ice_aq_set_port_params(pf->hw.port_info, dvm, NULL);
+	if (err)
+		goto err_init_ctrlq;
+
+	err = ice_sched_init_port(hw->port_info);
+	if (err)
+		goto err_sched_init_port;
+
+	/* start misc vector */
+	err = ice_req_irq_msix_misc(pf);
+	if (err) {
+		dev_err(dev, "misc vector setup failed: %d\n", err);
+		goto err_sched_init_port;
+	}
+
+	if (test_bit(ICE_FLAG_FD_ENA, pf->flags)) {
+		wr32(hw, PFQF_FD_ENA, PFQF_FD_ENA_FD_ENA_M);
+		if (!rd32(hw, PFQF_FD_SIZE)) {
+			u16 unused, guar, b_effort;
+
+			guar = hw->func_caps.fd_fltr_guar;
+			b_effort = hw->func_caps.fd_fltr_best_effort;
+
+			/* force guaranteed filter pool for PF */
+			ice_alloc_fd_guar_item(hw, &unused, guar);
+			/* force shared filter pool for PF */
+			ice_alloc_fd_shrd_item(hw, &unused, b_effort);
+		}
+	}
+
+	if (test_bit(ICE_FLAG_DCB_ENA, pf->flags))
+		ice_dcb_rebuild(pf);
+
+	/* If the PF previously had enabled PTP, PTP init needs to happen before
+	 * the VSI rebuild. If not, this causes the PTP link status events to
+	 * fail.
+	 */
+	if (test_bit(ICE_FLAG_PTP_SUPPORTED, pf->flags))
+		ice_ptp_rebuild(pf, reset_type);
+
+	if (ice_is_feature_supported(pf, ICE_F_GNSS))
+		ice_gnss_init(pf);
+
+	/* rebuild PF VSI */
+	err = ice_vsi_rebuild_by_type(pf, ICE_VSI_PF);
+	if (err) {
+		dev_err(dev, "PF VSI rebuild failed: %d\n", err);
+		goto err_vsi_rebuild;
+	}
+
+	if (reset_type == ICE_RESET_PFR) {
+		err = ice_rebuild_channels(pf);
+		if (err) {
+			dev_err(dev, "failed to rebuild and replay ADQ VSIs, err %d\n",
+				err);
+			goto err_vsi_rebuild;
+		}
+	}
+
+	/* If Flow Director is active */
+	if (test_bit(ICE_FLAG_FD_ENA, pf->flags)) {
+		err = ice_vsi_rebuild_by_type(pf, ICE_VSI_CTRL);
+		if (err) {
+			dev_err(dev, "control VSI rebuild failed: %d\n", err);
+			goto err_vsi_rebuild;
+		}
+
+		/* replay HW Flow Director recipes */
+		if (hw->fdir_prof)
+			ice_fdir_replay_flows(hw);
+
+		/* replay Flow Director filters */
+		ice_fdir_replay_fltrs(pf);
+
+		ice_rebuild_arfs(pf);
+	}
+
+	ice_update_pf_netdev_link(pf);
+
+	/* tell the firmware we are up */
+	err = ice_send_version(pf);
+	if (err) {
+		dev_err(dev, "Rebuild failed due to error sending driver version: %d\n",
+			err);
+		goto err_vsi_rebuild;
+	}
+
+	ice_replay_post(hw);
+
+	/* if we get here, reset flow is successful */
+	clear_bit(ICE_RESET_FAILED, pf->state);
+
+	ice_plug_aux_dev(pf);
+	if (ice_is_feature_supported(pf, ICE_F_SRIOV_LAG))
+		ice_lag_rebuild(pf);
+
+	/* Restore timestamp mode settings after VSI rebuild */
+	ice_ptp_restore_timestamp_mode(pf);
+	return;
+
+err_vsi_rebuild:
+err_sched_init_port:
+	ice_sched_cleanup_all(hw);
+err_init_ctrlq:
+	ice_shutdown_all_ctrlq(hw, false);
+	set_bit(ICE_RESET_FAILED, pf->state);
+clear_recovery:
+	/* set this bit in PF state to control service task scheduling */
+	set_bit(ICE_NEEDS_RESTART, pf->state);
+	dev_err(dev, "Rebuild failed, unload and reload driver\n");
+}
+The corrected function: static void ice_rebuild(struct ice_pf *pf, enum ice_reset_req reset_type)
+{
+	struct ice_vsi *vsi = ice_get_main_vsi(pf);
+	struct device *dev = ice_pf_to_dev(pf);
+	struct ice_hw *hw = &pf->hw;
+	bool dvm;
+	int err;
+
+	if (test_bit(ICE_DOWN, pf->state))
+		goto clear_recovery;
+
+	dev_dbg(dev, "rebuilding PF after reset_type=%d\n", reset_type);
+
+#define ICE_EMP_RESET_SLEEP_MS 5000
+	if (reset_type == ICE_RESET_EMPR) {
+		/* If an EMP reset has occurred, any previously pending flash
+		 * update will have completed. We no longer know whether or
+		 * not the NVM update EMP reset is restricted.
+		 */
+		pf->fw_emp_reset_disabled = false;
+
+		msleep(ICE_EMP_RESET_SLEEP_MS);
+	}
+
+	err = ice_init_all_ctrlq(hw);
+	if (err) {
+		dev_err(dev, "control queues init failed %d\n", err);
+		goto err_init_ctrlq;
+	}
+
+	/* if DDP was previously loaded successfully */
+	if (!ice_is_safe_mode(pf)) {
+		/* reload the SW DB of filter tables */
+		if (reset_type == ICE_RESET_PFR)
+			ice_fill_blk_tbls(hw);
+		else
+			/* Reload DDP Package after CORER/GLOBR reset */
+			ice_load_pkg(NULL, pf);
+	}
+
+	err = ice_clear_pf_cfg(hw);
+	if (err) {
+		dev_err(dev, "clear PF configuration failed %d\n", err);
+		goto err_init_ctrlq;
+	}
+
+	ice_clear_pxe_mode(hw);
+
+	err = ice_init_nvm(hw);
+	if (err) {
+		dev_err(dev, "ice_init_nvm failed %d\n", err);
+		goto err_init_ctrlq;
+	}
+
+	err = ice_get_caps(hw);
+	if (err) {
+		dev_err(dev, "ice_get_caps failed %d\n", err);
+		goto err_init_ctrlq;
+	}
+
+	err = ice_aq_set_mac_cfg(hw, ICE_AQ_SET_MAC_FRAME_SIZE_MAX, NULL);
+	if (err) {
+		dev_err(dev, "set_mac_cfg failed %d\n", err);
+		goto err_init_ctrlq;
+	}
+
+	dvm = ice_is_dvm_ena(hw);
+
+	err = ice_aq_set_port_params(pf->hw.port_info, dvm, NULL);
+	if (err)
+		goto err_init_ctrlq;
+
+	err = ice_sched_init_port(hw->port_info);
+	if (err)
+		goto err_sched_init_port;
+
+	/* start misc vector */
+	err = ice_req_irq_msix_misc(pf);
+	if (err) {
+		dev_err(dev, "misc vector setup failed: %d\n", err);
+		goto err_sched_init_port;
+	}
+
+	if (test_bit(ICE_FLAG_FD_ENA, pf->flags)) {
+		wr32(hw, PFQF_FD_ENA, PFQF_FD_ENA_FD_ENA_M);
+		if (!rd32(hw, PFQF_FD_SIZE)) {
+			u16 unused, guar, b_effort;
+
+			guar = hw->func_caps.fd_fltr_guar;
+			b_effort = hw->func_caps.fd_fltr_best_effort;
+
+			/* force guaranteed filter pool for PF */
+			ice_alloc_fd_guar_item(hw, &unused, guar);
+			/* force shared filter pool for PF */
+			ice_alloc_fd_shrd_item(hw, &unused, b_effort);
+		}
+	}
+
+	if (test_bit(ICE_FLAG_DCB_ENA, pf->flags))
+		ice_dcb_rebuild(pf);
+
+	/* If the PF previously had enabled PTP, PTP init needs to happen before
+	 * the VSI rebuild. If not, this causes the PTP link status events to
+	 * fail.
+	 */
+	if (test_bit(ICE_FLAG_PTP_SUPPORTED, pf->flags))
+		ice_ptp_rebuild(pf, reset_type);
+
+	if (ice_is_feature_supported(pf, ICE_F_GNSS))
+		ice_gnss_init(pf);
+
+	/* rebuild PF VSI */
+	err = ice_vsi_rebuild_by_type(pf, ICE_VSI_PF);
+	if (err) {
+		dev_err(dev, "PF VSI rebuild failed: %d\n", err);
+		goto err_vsi_rebuild;
+	}
+
+	if (reset_type == ICE_RESET_PFR) {
+		err = ice_rebuild_channels(pf);
+		if (err) {
+			dev_err(dev, "failed to rebuild and replay ADQ VSIs, err %d\n",
+				err);
+			goto err_vsi_rebuild;
+		}
+	}
+
+	/* If Flow Director is active */
+	if (test_bit(ICE_FLAG_FD_ENA, pf->flags)) {
+		err = ice_vsi_rebuild_by_type(pf, ICE_VSI_CTRL);
+		if (err) {
+			dev_err(dev, "control VSI rebuild failed: %d\n", err);
+			goto err_vsi_rebuild;
+		}
+
+		/* replay HW Flow Director recipes */
+		if (hw->fdir_prof)
+			ice_fdir_replay_flows(hw);
+
+		/* replay Flow Director filters */
+		ice_fdir_replay_fltrs(pf);
+
+		ice_rebuild_arfs(pf);
+	}
+
+	if (vsi && vsi->netdev)
+		netif_device_attach(vsi->netdev);
+
+	ice_update_pf_netdev_link(pf);
+
+	/* tell the firmware we are up */
+	err = ice_send_version(pf);
+	if (err) {
+		dev_err(dev, "Rebuild failed due to error sending driver version: %d\n",
+			err);
+		goto err_vsi_rebuild;
+	}
+
+	ice_replay_post(hw);
+
+	/* if we get here, reset flow is successful */
+	clear_bit(ICE_RESET_FAILED, pf->state);
+
+	ice_plug_aux_dev(pf);
+	if (ice_is_feature_supported(pf, ICE_F_SRIOV_LAG))
+		ice_lag_rebuild(pf);
+
+	/* Restore timestamp mode settings after VSI rebuild */
+	ice_ptp_restore_timestamp_mode(pf);
+	return;
+
+err_vsi_rebuild:
+err_sched_init_port:
+	ice_sched_cleanup_all(hw);
+err_init_ctrlq:
+	ice_shutdown_all_ctrlq(hw, false);
+	set_bit(ICE_RESET_FAILED, pf->state);
+clear_recovery:
+	/* set this bit in PF state to control service task scheduling */
+	set_bit(ICE_NEEDS_RESTART, pf->state);
+	dev_err(dev, "Rebuild failed, unload and reload driver\n");
+}

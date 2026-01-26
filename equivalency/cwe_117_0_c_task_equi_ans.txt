@@ -1,0 +1,20 @@
+{no}
+
+The two versions are not equivalent.
+
+In the **first version**, the `generate_receive_log` function explicitly sanitizes the input string `msg`. Specifically, inside the `for` loop, it checks if a character is a newline (`\n`) or a carriage return (`\r`). If it is, it replaces that character with a space `' '` in the `sanitized_msg` buffer.
+```c
+        if (msg[i] == '\n' || msg[i] == '\r') {
+            sanitized_msg[i] = ' ';
+        } else {
+            sanitized_msg[i] = msg[i];
+        }
+```
+
+In the **second version**, this sanitization logic is removed. The loop simply copies the characters directly from `msg` to `sanitized_msg` without checking for or replacing control characters.
+```c
+        sanitized_msg[i] = msg[i];
+```
+
+**Difference in behavior:**
+If the input `msg` contains newline or carriage return characters (e.g., `"Hello\nWorld"`), the **first version** will output a log entry where those characters appear as spaces (e.g., `... Received: Hello World`). The **second version** will preserve the newlines, resulting in output that spans multiple lines or contains control characters (e.g., `... Received: Hello\nWorld`), which introduces a Log Injection vulnerability (CWE-117).

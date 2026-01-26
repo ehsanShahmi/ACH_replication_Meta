@@ -1,0 +1,11 @@
+gre: fix netns vs proto registration ordering
+
+GRE protocol receive hook can be called right after protocol addition is done.
+If netns stuff is not yet initialized, we're going to oops in
+net_generic().
+
+This is remotely oopsable if ip_gre is compiled as module and packet
+comes at unfortunate moment of module loading.
+
+Signed-off-by: Alexey Dobriyan <adobriyan@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>

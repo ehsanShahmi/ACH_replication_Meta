@@ -1,0 +1,116 @@
+The vulnerable issue: xfrm: clean up xfrm protocol checks
+
+In commit 6a53b7593233 ("xfrm: check id proto in validate_tmpl()")
+I introduced a check for xfrm protocol, but according to Herbert
+IPSEC_PROTO_ANY should only be used as a wildcard for lookup, so
+it should be removed from validate_tmpl().
+
+And, IPSEC_PROTO_ANY is expected to only match 3 IPSec-specific
+protocols, this is why xfrm_state_flush() could still miss
+IPPROTO_ROUTING, which leads that those entries are left in
+net->xfrm.state_all before exit net. Fix this by replacing
+IPSEC_PROTO_ANY with zero.
+
+This patch also extracts the check from validate_tmpl() to
+xfrm_id_proto_valid() and uses it in parse_ipsecrequest().
+With this, no other protocols should be added into xfrm.
+
+Fixes: 6a53b7593233 ("xfrm: check id proto in validate_tmpl()")
+Reported-by: syzbot+0bf0519d6e0de15914fe@syzkaller.appspotmail.com
+Cc: Steffen Klassert <steffen.klassert@secunet.com>
+Cc: Herbert Xu <herbert@gondor.apana.org.au>
+Signed-off-by: Cong Wang <xiyou.wangcong@gmail.com>
+Acked-by: Herbert Xu <herbert@gondor.apana.org.au>
+Signed-off-by: Steffen Klassert <steffen.klassert@secunet.com>
+The vulnerable function: static int
+parse_ipsecrequest(struct xfrm_policy *xp, struct sadb_x_ipsecrequest *rq)
+{
+	struct net *net = xp_net(xp);
+	struct xfrm_tmpl *t = xp->xfrm_vec + xp->xfrm_nr;
+	int mode;
+
+	if (xp->xfrm_nr >= XFRM_MAX_DEPTH)
+		return -ELOOP;
+
+	if (rq->sadb_x_ipsecrequest_mode == 0)
+		return -EINVAL;
+
+	t->id.proto = rq->sadb_x_ipsecrequest_proto; /* XXX check proto */
+	if ((mode = pfkey_mode_to_xfrm(rq->sadb_x_ipsecrequest_mode)) < 0)
+		return -EINVAL;
+	t->mode = mode;
+	if (rq->sadb_x_ipsecrequest_level == IPSEC_LEVEL_USE)
+		t->optional = 1;
+	else if (rq->sadb_x_ipsecrequest_level == IPSEC_LEVEL_UNIQUE) {
+		t->reqid = rq->sadb_x_ipsecrequest_reqid;
+		if (t->reqid > IPSEC_MANUAL_REQID_MAX)
+			t->reqid = 0;
+		if (!t->reqid && !(t->reqid = gen_reqid(net)))
+			return -ENOBUFS;
+	}
+
+	/* addresses present only in tunnel mode */
+	if (t->mode == XFRM_MODE_TUNNEL) {
+		int err;
+
+		err = parse_sockaddr_pair(
+			(struct sockaddr *)(rq + 1),
+			rq->sadb_x_ipsecrequest_len - sizeof(*rq),
+			&t->saddr, &t->id.daddr, &t->encap_family);
+		if (err)
+			return err;
+	} else
+		t->encap_family = xp->family;
+
+	/* No way to set this via kame pfkey */
+	t->allalgs = 1;
+	xp->xfrm_nr++;
+	return 0;
+}
+The corrected function: static int
+parse_ipsecrequest(struct xfrm_policy *xp, struct sadb_x_ipsecrequest *rq)
+{
+	struct net *net = xp_net(xp);
+	struct xfrm_tmpl *t = xp->xfrm_vec + xp->xfrm_nr;
+	int mode;
+
+	if (xp->xfrm_nr >= XFRM_MAX_DEPTH)
+		return -ELOOP;
+
+	if (rq->sadb_x_ipsecrequest_mode == 0)
+		return -EINVAL;
+	if (!xfrm_id_proto_valid(rq->sadb_x_ipsecrequest_proto))
+		return -EINVAL;
+
+	t->id.proto = rq->sadb_x_ipsecrequest_proto;
+	if ((mode = pfkey_mode_to_xfrm(rq->sadb_x_ipsecrequest_mode)) < 0)
+		return -EINVAL;
+	t->mode = mode;
+	if (rq->sadb_x_ipsecrequest_level == IPSEC_LEVEL_USE)
+		t->optional = 1;
+	else if (rq->sadb_x_ipsecrequest_level == IPSEC_LEVEL_UNIQUE) {
+		t->reqid = rq->sadb_x_ipsecrequest_reqid;
+		if (t->reqid > IPSEC_MANUAL_REQID_MAX)
+			t->reqid = 0;
+		if (!t->reqid && !(t->reqid = gen_reqid(net)))
+			return -ENOBUFS;
+	}
+
+	/* addresses present only in tunnel mode */
+	if (t->mode == XFRM_MODE_TUNNEL) {
+		int err;
+
+		err = parse_sockaddr_pair(
+			(struct sockaddr *)(rq + 1),
+			rq->sadb_x_ipsecrequest_len - sizeof(*rq),
+			&t->saddr, &t->id.daddr, &t->encap_family);
+		if (err)
+			return err;
+	} else
+		t->encap_family = xp->family;
+
+	/* No way to set this via kame pfkey */
+	t->allalgs = 1;
+	xp->xfrm_nr++;
+	return 0;
+}

@@ -1,0 +1,9 @@
+b43: allocate receive buffers big enough for max frame len + offset
+
+Otherwise, skb_put inside of dma_rx can fail...
+
+	https://bugzilla.kernel.org/show_bug.cgi?id=32042
+
+Signed-off-by: John W. Linville <linville@tuxdriver.com>
+Acked-by: Larry Finger <Larry.Finger@lwfinger.net>
+Cc: stable@kernel.org

@@ -1,0 +1,13 @@
+RDMA/restrack: Fix potential invalid address access
+
+struct rdma_restrack_entry's kern_name was set to KBUILD_MODNAME
+in ib_create_cq(), while if the module exited but forgot del this
+rdma_restrack_entry, it would cause a invalid address access in
+rdma_restrack_clean() when print the owner of this rdma_restrack_entry.
+
+These code is used to help find one forgotten PD release in one of the
+ULPs. But it is not needed anymore, so delete them.
+
+Signed-off-by: Wenchao Hao <haowenchao2@huawei.com>
+Link: https://lore.kernel.org/r/20240318092320.1215235-1-haowenchao2@huawei.com
+Signed-off-by: Leon Romanovsky <leon@kernel.org>

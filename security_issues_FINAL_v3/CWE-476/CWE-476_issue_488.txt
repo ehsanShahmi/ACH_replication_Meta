@@ -1,0 +1,136 @@
+The vulnerable issue: KEYS: fix dereferencing NULL payload with nonzero length
+
+sys_add_key() and the KEYCTL_UPDATE operation of sys_keyctl() allowed a
+NULL payload with nonzero length to be passed to the key type's
+->preparse(), ->instantiate(), and/or ->update() methods.  Various key
+types including asymmetric, cifs.idmap, cifs.spnego, and pkcs7_test did
+not handle this case, allowing an unprivileged user to trivially cause a
+NULL pointer dereference (kernel oops) if one of these key types was
+present.  Fix it by doing the copy_from_user() when 'plen' is nonzero
+rather than when '_payload' is non-NULL, causing the syscall to fail
+with EFAULT as expected when an invalid buffer is specified.
+
+Cc: stable@vger.kernel.org # 2.6.10+
+Signed-off-by: Eric Biggers <ebiggers@google.com>
+Signed-off-by: David Howells <dhowells@redhat.com>
+Signed-off-by: James Morris <james.l.morris@oracle.com>
+The vulnerable function: long keyctl_update_key(key_serial_t id,
+		       const void __user *_payload,
+		       size_t plen)
+{
+	key_ref_t key_ref;
+	void *payload;
+	long ret;
+
+	ret = -EINVAL;
+	if (plen > PAGE_SIZE)
+		goto error;
+
+	/* pull the payload in if one was supplied */
+	payload = NULL;
+	if (_payload) {
+		ret = -ENOMEM;
+		payload = kmalloc(plen, GFP_KERNEL);
+		if (!payload)
+			goto error;
+
+		ret = -EFAULT;
+		if (copy_from_user(payload, _payload, plen) != 0)
+			goto error2;
+	}
+
+	/* find the target key (which must be writable) */
+	key_ref = lookup_user_key(id, 0, KEY_NEED_WRITE);
+	if (IS_ERR(key_ref)) {
+		ret = PTR_ERR(key_ref);
+		goto error2;
+	}
+
+	/* update the key */
+	ret = key_update(key_ref, payload, plen);
+
+	key_ref_put(key_ref);
+error2:
+	kfree(payload);
+error:
+	return ret;
+}
+The corrected function: SYSCALL_DEFINE5(add_key, const char __user *, _type,
+		const char __user *, _description,
+		const void __user *, _payload,
+		size_t, plen,
+		key_serial_t, ringid)
+{
+	key_ref_t keyring_ref, key_ref;
+	char type[32], *description;
+	void *payload;
+	long ret;
+
+	ret = -EINVAL;
+	if (plen > 1024 * 1024 - 1)
+		goto error;
+
+	/* draw all the data into kernel space */
+	ret = key_get_type_from_user(type, _type, sizeof(type));
+	if (ret < 0)
+		goto error;
+
+	description = NULL;
+	if (_description) {
+		description = strndup_user(_description, KEY_MAX_DESC_SIZE);
+		if (IS_ERR(description)) {
+			ret = PTR_ERR(description);
+			goto error;
+		}
+		if (!*description) {
+			kfree(description);
+			description = NULL;
+		} else if ((description[0] == '.') &&
+			   (strncmp(type, "keyring", 7) == 0)) {
+			ret = -EPERM;
+			goto error2;
+		}
+	}
+
+	/* pull the payload in if one was supplied */
+	payload = NULL;
+
+	if (plen) {
+		ret = -ENOMEM;
+		payload = kvmalloc(plen, GFP_KERNEL);
+		if (!payload)
+			goto error2;
+
+		ret = -EFAULT;
+		if (copy_from_user(payload, _payload, plen) != 0)
+			goto error3;
+	}
+
+	/* find the target keyring (which must be writable) */
+	keyring_ref = lookup_user_key(ringid, KEY_LOOKUP_CREATE, KEY_NEED_WRITE);
+	if (IS_ERR(keyring_ref)) {
+		ret = PTR_ERR(keyring_ref);
+		goto error3;
+	}
+
+	/* create or update the requested key and add it to the target
+	 * keyring */
+	key_ref = key_create_or_update(keyring_ref, type, description,
+				       payload, plen, KEY_PERM_UNDEF,
+				       KEY_ALLOC_IN_QUOTA);
+	if (!IS_ERR(key_ref)) {
+		ret = key_ref_to_ptr(key_ref)->serial;
+		key_ref_put(key_ref);
+	}
+	else {
+		ret = PTR_ERR(key_ref);
+	}
+
+	key_ref_put(keyring_ref);
+ error3:
+	kvfree(payload);
+ error2:
+	kfree(description);
+ error:
+	return ret;
+}

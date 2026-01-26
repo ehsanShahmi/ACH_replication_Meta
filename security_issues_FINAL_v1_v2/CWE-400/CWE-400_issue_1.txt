@@ -1,0 +1,10 @@
+block: Fix io_context leak after clone with CLONE_IO
+
+With CLONE_IO, copy_io() increments both ioc->refcount and ioc->nr_tasks.
+However exit_io_context() only decrements ioc->refcount if ioc->nr_tasks
+reaches 0.
+
+Always call put_io_context() in exit_io_context().
+
+Signed-off-by: Louis Rilling <louis.rilling@kerlabs.com>
+Signed-off-by: Jens Axboe <jens.axboe@oracle.com>

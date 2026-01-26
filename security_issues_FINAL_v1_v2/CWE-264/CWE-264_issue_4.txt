@@ -1,0 +1,17 @@
+ACPI: Split out custom_method functionality into an own driver
+
+With /sys/kernel/debug/acpi/custom_method root can write
+to arbitrary memory and increase his priveleges, even if
+these are restricted.
+
+-> Make this an own debug .config option and warn about the
+security issue in the config description.
+
+-> Still keep acpi/debugfs.c which now only creates an empty
+   /sys/kernel/debug/acpi directory. There might be other
+   users of it later.
+
+Signed-off-by: Thomas Renninger <trenn@suse.de>
+Acked-by: Rafael J. Wysocki <rjw@sisk.pl>
+Acked-by: rui.zhang@intel.com
+Signed-off-by: Len Brown <len.brown@intel.com>

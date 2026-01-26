@@ -1,0 +1,20 @@
+Move "exit_robust_list" into mm_release()
+
+We don't want to get rid of the futexes just at exit() time, we want to
+drop them when doing an execve() too, since that gets rid of the
+previous VM image too.
+
+Doing it at mm_release() time means that we automatically always do it
+when we disassociate a VM map from the task.
+
+Reported-by: pageexec@freemail.hu
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Cc: Nick Piggin <npiggin@suse.de>
+Cc: Hugh Dickins <hugh@veritas.com>
+Cc: Ingo Molnar <mingo@elte.hu>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: Brad Spengler <spender@grsecurity.net>
+Cc: Alex Efros <powerman@powerman.name>
+Cc: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: Oleg Nesterov <oleg@redhat.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>

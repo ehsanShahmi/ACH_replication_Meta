@@ -1,3 +1,5 @@
+#  python3 eqChecker.py ./CWEval/benchmark/core/c/CWE-119/CWE-119_issue_1_math_task_mutant.c ./CWEval/benchmark/core/c/math_task.c ./CWEval/benchmark/core/c/CWE-119/
+
 from dotenv import load_dotenv
 load_dotenv()
 from google import genai
@@ -16,41 +18,72 @@ import sys
 import glob
 client = genai.Client()
 
-def eqChecker(mutant_filename_path: str, current_filename_path: str) -> str:
-    base_dir = 'current_code_repo'
-    equi_dir = "equivalency"
-    # code_repo_filename = f'{current_file}.c'
-    # code_repo_filename_path = os.path.join(base_dir, code_repo_filename)
-    with open(current_filename_path, 'r') as file:
-       string_current_filename = file.read()
-    MUTANT_filename_path = mutant_filename_path
-    with open(MUTANT_filename_path, 'r') as file:
-        MUTANT_string = file.read()
+import os
+from pathlib import Path
 
-    
-    INSTRUCT_2 = "I'm going to show you two slightly different versions of a C file. Here is the first version of the file:'''"+ string_current_filename +"'''. Here is the second version of the C file:'''"+ MUTANT_string +"'''." +"INSTRUCTION: If the first version of the file will always do exactly the same thing as the second version, just respond with '{yes}'. However, if the two versions of the file are not equivalent, respond with '{no}', and give an explanation of how execution of the first version can produce a different behaviour to execution of the second version."
-    PROMPT2 = INSTRUCT_2
-    response = client.models.generate_content(model="gemini-3-pro-preview", contents=PROMPT2)
-    # response_gpt = client_gpt.responses.create(model="gpt-5", input=[original_repo, MUTANT, INSTRUCT_2])
+def eqChecker(mutant_filename_path: str, current_filename_path: str, output_directory: str) -> str:
+    """
+    Compare an original C file and its mutant.
+    Store the equivalency answer in the output directory.
+
+    Output filename format:
+        <mutant_base_name>_eq_ans.txt
+    """
+    # --- Read both code files ---
+    with open(current_filename_path, 'r', encoding='utf-8') as f:
+        string_current_filename = f.read()
+
+    with open(mutant_filename_path, 'r', encoding='utf-8') as f:
+        string_mutant = f.read()
+
+    # --- Prompt for Gemini ---
+    INSTRUCT_2 = (
+        "I'm going to show you two slightly different versions of a C file. "
+        "Here is the first version of the file: '''" + string_current_filename + "'''. "
+        "Here is the second version of the C file: '''" + string_mutant + "'''. "
+        "INSTRUCTION: If the first version of the file will always do exactly the same thing "
+        "as the second version, just respond with '{yes}'. "
+        "However, if the two versions of the file are not equivalent, respond with '{no}', "
+        "and give an explanation of how execution of the first version can produce different behavior."
+    )
+
+    # --- LLM Call ---
+    response = client.models.generate_content(model="gemma-3-27b-it", contents=INSTRUCT_2)
     file_content_eq = response.text
 
-    current_filename_basename = os.path.basename(current_filename_path) 
-    current_filename_root, currentfile_extension = os.path.splitext(current_filename_basename)
-    mutant_filename_basename = os.path.basename(mutant_filename_path) 
-    mutant_filename_root, mutant_extension = os.path.splitext(current_filename_basename)
-    
-    equivalency_ans_filename = f"{current_filename_root}_equi_ans.txt"
-    equi_ans = os.path.join(equi_dir, equivalency_ans_filename)
-    os.makedirs(equi_dir, exist_ok=True)
-    with open(equi_ans, 'w', encoding='utf-8') as file:
+    # --- Ensure output directory exists ---
+    os.makedirs(output_directory, exist_ok=True)
+
+    # --- Construct equivalency answer filename ---
+    mutant_basename = os.path.basename(mutant_filename_path)
+    mutant_root, _ = os.path.splitext(mutant_basename)
+    output_filename = f"{mutant_root}_eq_ans.txt"
+    output_path = os.path.join(output_directory, output_filename)
+
+    # --- Write answer to file ---
+    with open(output_path, 'w', encoding='utf-8') as file:
         file.write(file_content_eq)
 
     return file_content_eq
 
 
 if __name__ == "__main__":
-    mutant_file = sys.argv[1]
-    current_file = sys.argv[2]
-    equi_ans = eqChecker(mutant_file, current_file)
+    if len(sys.argv) != 4:
+        print("Usage: python3 eqChecker.py <original_c_file> <mutant_c_file> <output_directory>")
+        sys.exit(1)
 
-    print (equi_ans)
+    current_file = sys.argv[1]      # original
+    mutant_file = sys.argv[2]       # mutant
+    output_directory = sys.argv[3]
+
+    if not os.path.exists(mutant_file):
+        print(f"Error: mutant file not found at '{mutant_file}'")
+        sys.exit(1)
+    if not os.path.exists(current_file):
+        print(f"Error: current file not found at '{current_file}'")
+        sys.exit(1)
+    os.makedirs(output_directory, exist_ok=True)
+
+    # Fix: swap current_file and mutant_file so mutant is first to eqChecker
+    eq_answer = eqChecker(mutant_file, current_file, output_directory)
+    print(eq_answer)

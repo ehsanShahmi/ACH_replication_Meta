@@ -1,0 +1,64 @@
+The vulnerable issue: x86/ioperm: Fix io bitmap invalidation on Xen PV
+
+tss_invalidate_io_bitmap() wasn't wired up properly through the pvop
+machinery, so the TSS and Xen's io bitmap would get out of sync
+whenever disabling a valid io bitmap.
+
+Add a new pvop for tss_invalidate_io_bitmap() to fix it.
+
+This is XSA-329.
+
+Fixes: 22fe5b0439dd ("x86/ioperm: Move TSS bitmap update to exit to user work")
+Signed-off-by: Andy Lutomirski <luto@kernel.org>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Reviewed-by: Juergen Gross <jgross@suse.com>
+Reviewed-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: stable@vger.kernel.org
+Link: https://lkml.kernel.org/r/d53075590e1f91c19f8af705059d3ff99424c020.1595030016.git.luto@kernel.org
+The vulnerable function: void native_tss_update_io_bitmap(void)
+{
+	struct tss_struct *tss = this_cpu_ptr(&cpu_tss_rw);
+	struct thread_struct *t = &current->thread;
+	u16 *base = &tss->x86_tss.io_bitmap_base;
+
+	if (!test_thread_flag(TIF_IO_BITMAP)) {
+		tss_invalidate_io_bitmap(tss);
+		return;
+	}
+
+	if (IS_ENABLED(CONFIG_X86_IOPL_IOPERM) && t->iopl_emul == 3) {
+		*base = IO_BITMAP_OFFSET_VALID_ALL;
+	} else {
+		struct io_bitmap *iobm = t->io_bitmap;
+
+		/*
+		 * Only copy bitmap data when the sequence number differs. The
+		 * update time is accounted to the incoming task.
+		 */
+		if (tss->io_bitmap.prev_sequence != iobm->sequence)
+			tss_copy_io_bitmap(tss, iobm);
+
+		/* Enable the bitmap */
+		*base = IO_BITMAP_OFFSET_VALID_MAP;
+	}
+
+	/*
+	 * Make sure that the TSS limit is covering the IO bitmap. It might have
+	 * been cut down by a VMEXIT to 0x67 which would cause a subsequent I/O
+	 * access from user space to trigger a #GP because tbe bitmap is outside
+	 * the TSS limit.
+	 */
+	refresh_tss_limit();
+}
+The corrected function: static inline void switch_to_bitmap(unsigned long tifp)
+{
+	/*
+	 * Invalidate I/O bitmap if the previous task used it. This prevents
+	 * any possible leakage of an active I/O bitmap.
+	 *
+	 * If the next task has an I/O bitmap it will handle it on exit to
+	 * user mode.
+	 */
+	if (tifp & _TIF_IO_BITMAP)
+		tss_invalidate_io_bitmap(this_cpu_ptr(&cpu_tss_rw));
+}

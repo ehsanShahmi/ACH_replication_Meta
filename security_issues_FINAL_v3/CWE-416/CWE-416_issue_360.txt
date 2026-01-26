@@ -1,0 +1,117 @@
+The vulnerable issue: block: free sched's request pool in blk_cleanup_queue
+
+In theory, IO scheduler belongs to request queue, and the request pool
+of sched tags belongs to the request queue too.
+
+However, the current tags allocation interfaces are re-used for both
+driver tags and sched tags, and driver tags is definitely host wide,
+and doesn't belong to any request queue, same with its request pool.
+So we need tagset instance for freeing request of sched tags.
+
+Meantime, blk_mq_free_tag_set() often follows blk_cleanup_queue() in case
+of non-BLK_MQ_F_TAG_SHARED, this way requires that request pool of sched
+tags to be freed before calling blk_mq_free_tag_set().
+
+Commit 47cdee29ef9d94e ("block: move blk_exit_queue into __blk_release_queue")
+moves blk_exit_queue into __blk_release_queue for simplying the fast
+path in generic_make_request(), then causes oops during freeing requests
+of sched tags in __blk_release_queue().
+
+Fix the above issue by move freeing request pool of sched tags into
+blk_cleanup_queue(), this way is safe becasue queue has been frozen and no any
+in-queue requests at that time. Freeing sched tags has to be kept in queue's
+release handler becasue there might be un-completed dispatch activity
+which might refer to sched tags.
+
+Cc: Bart Van Assche <bvanassche@acm.org>
+Cc: Christoph Hellwig <hch@lst.de>
+Fixes: 47cdee29ef9d94e485eb08f962c74943023a5271 ("block: move blk_exit_queue into __blk_release_queue")
+Tested-by: Yi Zhang <yi.zhang@redhat.com>
+Reported-by: kernel test robot <rong.a.chen@intel.com>
+Signed-off-by: Ming Lei <ming.lei@redhat.com>
+Signed-off-by: Jens Axboe <axboe@kernel.dk>
+The vulnerable function: void blk_cleanup_queue(struct request_queue *q)
+{
+	/* mark @q DYING, no new request or merges will be allowed afterwards */
+	mutex_lock(&q->sysfs_lock);
+	blk_set_queue_dying(q);
+
+	blk_queue_flag_set(QUEUE_FLAG_NOMERGES, q);
+	blk_queue_flag_set(QUEUE_FLAG_NOXMERGES, q);
+	blk_queue_flag_set(QUEUE_FLAG_DYING, q);
+	mutex_unlock(&q->sysfs_lock);
+
+	/*
+	 * Drain all requests queued before DYING marking. Set DEAD flag to
+	 * prevent that q->request_fn() gets invoked after draining finished.
+	 */
+	blk_freeze_queue(q);
+
+	rq_qos_exit(q);
+
+	blk_queue_flag_set(QUEUE_FLAG_DEAD, q);
+
+	/* for synchronous bio-based driver finish in-flight integrity i/o */
+	blk_flush_integrity();
+
+	/* @q won't process any more request, flush async actions */
+	del_timer_sync(&q->backing_dev_info->laptop_mode_wb_timer);
+	blk_sync_queue(q);
+
+	if (queue_is_mq(q))
+		blk_mq_exit_queue(q);
+
+	percpu_ref_exit(&q->q_usage_counter);
+
+	/* @q is and will stay empty, shutdown and put */
+	blk_put_queue(q);
+}
+The corrected function: void blk_cleanup_queue(struct request_queue *q)
+{
+	/* mark @q DYING, no new request or merges will be allowed afterwards */
+	mutex_lock(&q->sysfs_lock);
+	blk_set_queue_dying(q);
+
+	blk_queue_flag_set(QUEUE_FLAG_NOMERGES, q);
+	blk_queue_flag_set(QUEUE_FLAG_NOXMERGES, q);
+	blk_queue_flag_set(QUEUE_FLAG_DYING, q);
+	mutex_unlock(&q->sysfs_lock);
+
+	/*
+	 * Drain all requests queued before DYING marking. Set DEAD flag to
+	 * prevent that q->request_fn() gets invoked after draining finished.
+	 */
+	blk_freeze_queue(q);
+
+	rq_qos_exit(q);
+
+	blk_queue_flag_set(QUEUE_FLAG_DEAD, q);
+
+	/* for synchronous bio-based driver finish in-flight integrity i/o */
+	blk_flush_integrity();
+
+	/* @q won't process any more request, flush async actions */
+	del_timer_sync(&q->backing_dev_info->laptop_mode_wb_timer);
+	blk_sync_queue(q);
+
+	if (queue_is_mq(q))
+		blk_mq_exit_queue(q);
+
+	/*
+	 * In theory, request pool of sched_tags belongs to request queue.
+	 * However, the current implementation requires tag_set for freeing
+	 * requests, so free the pool now.
+	 *
+	 * Queue has become frozen, there can't be any in-queue requests, so
+	 * it is safe to free requests now.
+	 */
+	mutex_lock(&q->sysfs_lock);
+	if (q->elevator)
+		blk_mq_sched_free_requests(q);
+	mutex_unlock(&q->sysfs_lock);
+
+	percpu_ref_exit(&q->q_usage_counter);
+
+	/* @q is and will stay empty, shutdown and put */
+	blk_put_queue(q);
+}

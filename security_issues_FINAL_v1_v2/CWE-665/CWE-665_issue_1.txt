@@ -1,0 +1,14 @@
+bridge: reset IPCB in br_parse_ip_options
+
+Commit 462fb2af9788a82 (bridge : Sanitize skb before it enters the IP
+stack), missed one IPCB init before calling ip_options_compile()
+
+Thanks to Scot Doyle for his tests and bug reports.
+
+Reported-by: Scot Doyle <lkml@scotdoyle.com>
+Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+Cc: Hiroaki SHIMODA <shimoda.hiroaki@gmail.com>
+Acked-by: Bandan Das <bandan.das@stratus.com>
+Acked-by: Stephen Hemminger <shemminger@vyatta.com>
+Cc: Jan Lübbe <jluebbe@debian.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>

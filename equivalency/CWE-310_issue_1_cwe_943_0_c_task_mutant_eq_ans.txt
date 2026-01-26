@@ -1,0 +1,29 @@
+{no}
+The two versions are not equivalent due to a critical security vulnerability in the second version.
+
+The first version correctly uses a parameterized query (also known as a prepared statement). It provides the SQL query template `SELECT userInfo FROM users WHERE username = ? AND password = ?` to the database engine first, and then separately binds the `username` and `password` values. This ensures that the user-provided input is always treated as data and never as executable SQL code, thus preventing SQL injection attacks.
+
+The second version constructs the SQL query by directly embedding the `username` and `password` strings into the query using `snprintf`. This is a classic SQL injection vulnerability. An attacker can provide a specially crafted `username` or `password` that alters the logic of the SQL query.
+
+Here is an example of how their execution can differ:
+
+Suppose the database contains a user with the username `admin`. An attacker can run the program with the following arguments:
+
+`./program test.db "admin' --" "bogus_password"`
+
+**Execution of the first version:**
+
+1.  The query template is `SELECT userInfo FROM users WHERE username = ? AND password = ?`.
+2.  The first `?` is safely bound to the literal string `"admin' --"`.
+3.  The second `?` is safely bound to the literal string `"bogus_password"`.
+4.  The database will look for a user whose username is exactly `admin' --` and whose password is `bogus_password`.
+5.  Assuming no such user exists, the query will return no results, and the program will print nothing, correctly denying access.
+
+**Execution of the second version:**
+
+1.  `snprintf` constructs the following query string: `SELECT userInfo FROM users WHERE username = 'admin' --' AND password = 'bogus_password'`.
+2.  In SQL, `--` starts a line comment. The database engine will interpret this query as `SELECT userInfo FROM users WHERE username = 'admin'`. The rest of the line, including the password check, is ignored as a comment.
+3.  The query will find the user with the username `admin` and return their `userInfo`, completely bypassing the password check.
+4.  The program will print the `userInfo` for the `admin` account, incorrectly granting access.
+
+Because the second version is vulnerable to SQL injection and the first is not, they do not always do the same thing.

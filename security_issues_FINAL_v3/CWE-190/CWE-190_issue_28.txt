@@ -1,0 +1,257 @@
+The vulnerable issue: CDC-NCM: avoid overflow in sanity checking
+
+A broken device may give an extreme offset like 0xFFF0
+and a reasonable length for a fragment. In the sanity
+check as formulated now, this will create an integer
+overflow, defeating the sanity check. Both offset
+and offset + len need to be checked in such a manner
+that no overflow can occur.
+And those quantities should be unsigned.
+
+Signed-off-by: Oliver Neukum <oneukum@suse.com>
+Reviewed-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: int cdc_ncm_rx_fixup(struct usbnet *dev, struct sk_buff *skb_in)
+{
+	struct sk_buff *skb;
+	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
+	int len;
+	int nframes;
+	int x;
+	int offset;
+	union {
+		struct usb_cdc_ncm_ndp16 *ndp16;
+		struct usb_cdc_ncm_ndp32 *ndp32;
+	} ndp;
+	union {
+		struct usb_cdc_ncm_dpe16 *dpe16;
+		struct usb_cdc_ncm_dpe32 *dpe32;
+	} dpe;
+
+	int ndpoffset;
+	int loopcount = 50; /* arbitrary max preventing infinite loop */
+	u32 payload = 0;
+
+	if (ctx->is_ndp16)
+		ndpoffset = cdc_ncm_rx_verify_nth16(ctx, skb_in);
+	else
+		ndpoffset = cdc_ncm_rx_verify_nth32(ctx, skb_in);
+
+	if (ndpoffset < 0)
+		goto error;
+
+next_ndp:
+	if (ctx->is_ndp16) {
+		nframes = cdc_ncm_rx_verify_ndp16(skb_in, ndpoffset);
+		if (nframes < 0)
+			goto error;
+
+		ndp.ndp16 = (struct usb_cdc_ncm_ndp16 *)(skb_in->data + ndpoffset);
+
+		if (ndp.ndp16->dwSignature != cpu_to_le32(USB_CDC_NCM_NDP16_NOCRC_SIGN)) {
+			netif_dbg(dev, rx_err, dev->net,
+				  "invalid DPT16 signature <%#010x>\n",
+				  le32_to_cpu(ndp.ndp16->dwSignature));
+			goto err_ndp;
+		}
+		dpe.dpe16 = ndp.ndp16->dpe16;
+	} else {
+		nframes = cdc_ncm_rx_verify_ndp32(skb_in, ndpoffset);
+		if (nframes < 0)
+			goto error;
+
+		ndp.ndp32 = (struct usb_cdc_ncm_ndp32 *)(skb_in->data + ndpoffset);
+
+		if (ndp.ndp32->dwSignature != cpu_to_le32(USB_CDC_NCM_NDP32_NOCRC_SIGN)) {
+			netif_dbg(dev, rx_err, dev->net,
+				  "invalid DPT32 signature <%#010x>\n",
+				  le32_to_cpu(ndp.ndp32->dwSignature));
+			goto err_ndp;
+		}
+		dpe.dpe32 = ndp.ndp32->dpe32;
+	}
+
+	for (x = 0; x < nframes; x++) {
+		if (ctx->is_ndp16) {
+			offset = le16_to_cpu(dpe.dpe16->wDatagramIndex);
+			len = le16_to_cpu(dpe.dpe16->wDatagramLength);
+		} else {
+			offset = le32_to_cpu(dpe.dpe32->dwDatagramIndex);
+			len = le32_to_cpu(dpe.dpe32->dwDatagramLength);
+		}
+
+		/*
+		 * CDC NCM ch. 3.7
+		 * All entries after first NULL entry are to be ignored
+		 */
+		if ((offset == 0) || (len == 0)) {
+			if (!x)
+				goto err_ndp; /* empty NTB */
+			break;
+		}
+
+		/* sanity checking */
+		if (((offset + len) > skb_in->len) ||
+				(len > ctx->rx_max) || (len < ETH_HLEN)) {
+			netif_dbg(dev, rx_err, dev->net,
+				  "invalid frame detected (ignored) offset[%u]=%u, length=%u, skb=%p\n",
+				  x, offset, len, skb_in);
+			if (!x)
+				goto err_ndp;
+			break;
+
+		} else {
+			/* create a fresh copy to reduce truesize */
+			skb = netdev_alloc_skb_ip_align(dev->net,  len);
+			if (!skb)
+				goto error;
+			skb_put_data(skb, skb_in->data + offset, len);
+			usbnet_skb_return(dev, skb);
+			payload += len;	/* count payload bytes in this NTB */
+		}
+
+		if (ctx->is_ndp16)
+			dpe.dpe16++;
+		else
+			dpe.dpe32++;
+	}
+err_ndp:
+	/* are there more NDPs to process? */
+	if (ctx->is_ndp16)
+		ndpoffset = le16_to_cpu(ndp.ndp16->wNextNdpIndex);
+	else
+		ndpoffset = le32_to_cpu(ndp.ndp32->dwNextNdpIndex);
+
+	if (ndpoffset && loopcount--)
+		goto next_ndp;
+
+	/* update stats */
+	ctx->rx_overhead += skb_in->len - payload;
+	ctx->rx_ntbs++;
+
+	return 1;
+error:
+	return 0;
+}
+The corrected function: int cdc_ncm_rx_fixup(struct usbnet *dev, struct sk_buff *skb_in)
+{
+	struct sk_buff *skb;
+	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
+	unsigned int len;
+	int nframes;
+	int x;
+	unsigned int offset;
+	union {
+		struct usb_cdc_ncm_ndp16 *ndp16;
+		struct usb_cdc_ncm_ndp32 *ndp32;
+	} ndp;
+	union {
+		struct usb_cdc_ncm_dpe16 *dpe16;
+		struct usb_cdc_ncm_dpe32 *dpe32;
+	} dpe;
+
+	int ndpoffset;
+	int loopcount = 50; /* arbitrary max preventing infinite loop */
+	u32 payload = 0;
+
+	if (ctx->is_ndp16)
+		ndpoffset = cdc_ncm_rx_verify_nth16(ctx, skb_in);
+	else
+		ndpoffset = cdc_ncm_rx_verify_nth32(ctx, skb_in);
+
+	if (ndpoffset < 0)
+		goto error;
+
+next_ndp:
+	if (ctx->is_ndp16) {
+		nframes = cdc_ncm_rx_verify_ndp16(skb_in, ndpoffset);
+		if (nframes < 0)
+			goto error;
+
+		ndp.ndp16 = (struct usb_cdc_ncm_ndp16 *)(skb_in->data + ndpoffset);
+
+		if (ndp.ndp16->dwSignature != cpu_to_le32(USB_CDC_NCM_NDP16_NOCRC_SIGN)) {
+			netif_dbg(dev, rx_err, dev->net,
+				  "invalid DPT16 signature <%#010x>\n",
+				  le32_to_cpu(ndp.ndp16->dwSignature));
+			goto err_ndp;
+		}
+		dpe.dpe16 = ndp.ndp16->dpe16;
+	} else {
+		nframes = cdc_ncm_rx_verify_ndp32(skb_in, ndpoffset);
+		if (nframes < 0)
+			goto error;
+
+		ndp.ndp32 = (struct usb_cdc_ncm_ndp32 *)(skb_in->data + ndpoffset);
+
+		if (ndp.ndp32->dwSignature != cpu_to_le32(USB_CDC_NCM_NDP32_NOCRC_SIGN)) {
+			netif_dbg(dev, rx_err, dev->net,
+				  "invalid DPT32 signature <%#010x>\n",
+				  le32_to_cpu(ndp.ndp32->dwSignature));
+			goto err_ndp;
+		}
+		dpe.dpe32 = ndp.ndp32->dpe32;
+	}
+
+	for (x = 0; x < nframes; x++) {
+		if (ctx->is_ndp16) {
+			offset = le16_to_cpu(dpe.dpe16->wDatagramIndex);
+			len = le16_to_cpu(dpe.dpe16->wDatagramLength);
+		} else {
+			offset = le32_to_cpu(dpe.dpe32->dwDatagramIndex);
+			len = le32_to_cpu(dpe.dpe32->dwDatagramLength);
+		}
+
+		/*
+		 * CDC NCM ch. 3.7
+		 * All entries after first NULL entry are to be ignored
+		 */
+		if ((offset == 0) || (len == 0)) {
+			if (!x)
+				goto err_ndp; /* empty NTB */
+			break;
+		}
+
+		/* sanity checking - watch out for integer wrap*/
+		if ((offset > skb_in->len) || (len > skb_in->len - offset) ||
+				(len > ctx->rx_max) || (len < ETH_HLEN)) {
+			netif_dbg(dev, rx_err, dev->net,
+				  "invalid frame detected (ignored) offset[%u]=%u, length=%u, skb=%p\n",
+				  x, offset, len, skb_in);
+			if (!x)
+				goto err_ndp;
+			break;
+
+		} else {
+			/* create a fresh copy to reduce truesize */
+			skb = netdev_alloc_skb_ip_align(dev->net,  len);
+			if (!skb)
+				goto error;
+			skb_put_data(skb, skb_in->data + offset, len);
+			usbnet_skb_return(dev, skb);
+			payload += len;	/* count payload bytes in this NTB */
+		}
+
+		if (ctx->is_ndp16)
+			dpe.dpe16++;
+		else
+			dpe.dpe32++;
+	}
+err_ndp:
+	/* are there more NDPs to process? */
+	if (ctx->is_ndp16)
+		ndpoffset = le16_to_cpu(ndp.ndp16->wNextNdpIndex);
+	else
+		ndpoffset = le32_to_cpu(ndp.ndp32->dwNextNdpIndex);
+
+	if (ndpoffset && loopcount--)
+		goto next_ndp;
+
+	/* update stats */
+	ctx->rx_overhead += skb_in->len - payload;
+	ctx->rx_ntbs++;
+
+	return 1;
+error:
+	return 0;
+}

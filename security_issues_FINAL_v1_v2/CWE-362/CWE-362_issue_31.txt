@@ -1,0 +1,57 @@
+ksm: fix NULL pointer dereference in scan_get_next_rmap_item()
+
+Andrea Righi reported a case where an exiting task can race against
+ksmd::scan_get_next_rmap_item (http://lkml.org/lkml/2011/6/1/742) easily
+triggering a NULL pointer dereference in ksmd.
+
+ksm_scan.mm_slot == &ksm_mm_head with only one registered mm
+
+CPU 1 (__ksm_exit)		CPU 2 (scan_get_next_rmap_item)
+ 				list_empty() is false
+lock				slot == &ksm_mm_head
+list_del(slot->mm_list)
+(list now empty)
+unlock
+				lock
+				slot = list_entry(slot->mm_list.next)
+				(list is empty, so slot is still ksm_mm_head)
+				unlock
+				slot->mm == NULL ... Oops
+
+Close this race by revalidating that the new slot is not simply the list
+head again.
+
+Andrea's test case:
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/mman.h>
+
+#define BUFSIZE getpagesize()
+
+int main(int argc, char **argv)
+{
+	void *ptr;
+
+	if (posix_memalign(&ptr, getpagesize(), BUFSIZE) < 0) {
+		perror("posix_memalign");
+		exit(1);
+	}
+	if (madvise(ptr, BUFSIZE, MADV_MERGEABLE) < 0) {
+		perror("madvise");
+		exit(1);
+	}
+	*(char *)NULL = 0;
+
+	return 0;
+}
+
+Reported-by: Andrea Righi <andrea@betterlinux.com>
+Tested-by: Andrea Righi <andrea@betterlinux.com>
+Cc: Andrea Arcangeli <aarcange@redhat.com>
+Signed-off-by: Hugh Dickins <hughd@google.com>
+Signed-off-by: Chris Wright <chrisw@sous-sol.org>
+Cc: <stable@kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>

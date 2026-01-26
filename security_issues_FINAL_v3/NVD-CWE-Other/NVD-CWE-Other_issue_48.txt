@@ -1,0 +1,39 @@
+The vulnerable issue: iw_cxgb3: Fix incorrectly returning error on success
+
+The cxgb3_*_send() functions return NET_XMIT_ values, which are
+positive integers values. So don't treat positive return values
+as an error.
+
+Signed-off-by: Steve Wise <swise@opengridcomputing.com>
+Signed-off-by: Hariprasad Shenai <hariprasad@chelsio.com>
+Signed-off-by: Doug Ledford <dledford@redhat.com>
+The vulnerable function: int iwch_cxgb3_ofld_send(struct t3cdev *tdev, struct sk_buff *skb)
+{
+	int	error = 0;
+	struct cxio_rdev *rdev;
+
+	rdev = (struct cxio_rdev *)tdev->ulp;
+	if (cxio_fatal_error(rdev)) {
+		kfree_skb(skb);
+		return -EIO;
+	}
+	error = cxgb3_ofld_send(tdev, skb);
+	if (error < 0)
+		kfree_skb(skb);
+	return error;
+}
+The corrected function: static int iwch_l2t_send(struct t3cdev *tdev, struct sk_buff *skb, struct l2t_entry *l2e)
+{
+	int	error = 0;
+	struct cxio_rdev *rdev;
+
+	rdev = (struct cxio_rdev *)tdev->ulp;
+	if (cxio_fatal_error(rdev)) {
+		kfree_skb(skb);
+		return -EIO;
+	}
+	error = l2t_send(tdev, skb, l2e);
+	if (error < 0)
+		kfree_skb(skb);
+	return error;
+}

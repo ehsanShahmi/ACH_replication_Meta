@@ -1,0 +1,199 @@
+The vulnerable issue: [media] dw2102: don't do DMA on stack
+
+On Kernel 4.9, WARNINGs about doing DMA on stack are hit at
+the dw2102 driver: one in su3000_power_ctrl() and the other in tt_s2_4600_frontend_attach().
+
+Both were due to the use of buffers on the stack as parameters to
+dvb_usb_generic_rw() and the resulting attempt to do DMA with them.
+
+The device was non-functional as a result.
+
+So, switch this driver over to use a buffer within the device state
+structure, as has been done with other DVB-USB drivers.
+
+Tested with TechnoTrend TT-connect S2-4600.
+
+[mchehab@osg.samsung.com: fixed a warning at su3000_i2c_transfer() that
+ state var were dereferenced before check 'd']
+Signed-off-by: Jonathan McDowell <noodles@earth.li>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@s-opensource.com>
+The vulnerable function: static int tt_s2_4600_frontend_attach(struct dvb_usb_adapter *adap)
+{
+	struct dvb_usb_device *d = adap->dev;
+	struct dw2102_state *state = d->priv;
+	u8 obuf[3] = { 0xe, 0x80, 0 };
+	u8 ibuf[] = { 0 };
+	struct i2c_adapter *i2c_adapter;
+	struct i2c_client *client;
+	struct i2c_board_info board_info;
+	struct m88ds3103_platform_data m88ds3103_pdata = {};
+	struct ts2020_config ts2020_config = {};
+
+	if (dvb_usb_generic_rw(d, obuf, 3, ibuf, 1, 0) < 0)
+		err("command 0x0e transfer failed.");
+
+	obuf[0] = 0xe;
+	obuf[1] = 0x02;
+	obuf[2] = 1;
+
+	if (dvb_usb_generic_rw(d, obuf, 3, ibuf, 1, 0) < 0)
+		err("command 0x0e transfer failed.");
+	msleep(300);
+
+	obuf[0] = 0xe;
+	obuf[1] = 0x83;
+	obuf[2] = 0;
+
+	if (dvb_usb_generic_rw(d, obuf, 3, ibuf, 1, 0) < 0)
+		err("command 0x0e transfer failed.");
+
+	obuf[0] = 0xe;
+	obuf[1] = 0x83;
+	obuf[2] = 1;
+
+	if (dvb_usb_generic_rw(d, obuf, 3, ibuf, 1, 0) < 0)
+		err("command 0x0e transfer failed.");
+
+	obuf[0] = 0x51;
+
+	if (dvb_usb_generic_rw(d, obuf, 1, ibuf, 1, 0) < 0)
+		err("command 0x51 transfer failed.");
+
+	/* attach demod */
+	m88ds3103_pdata.clk = 27000000;
+	m88ds3103_pdata.i2c_wr_max = 33;
+	m88ds3103_pdata.ts_mode = M88DS3103_TS_CI;
+	m88ds3103_pdata.ts_clk = 16000;
+	m88ds3103_pdata.ts_clk_pol = 0;
+	m88ds3103_pdata.spec_inv = 0;
+	m88ds3103_pdata.agc = 0x99;
+	m88ds3103_pdata.agc_inv = 0;
+	m88ds3103_pdata.clk_out = M88DS3103_CLOCK_OUT_ENABLED;
+	m88ds3103_pdata.envelope_mode = 0;
+	m88ds3103_pdata.lnb_hv_pol = 1;
+	m88ds3103_pdata.lnb_en_pol = 0;
+	memset(&board_info, 0, sizeof(board_info));
+	strlcpy(board_info.type, "m88ds3103", I2C_NAME_SIZE);
+	board_info.addr = 0x68;
+	board_info.platform_data = &m88ds3103_pdata;
+	request_module("m88ds3103");
+	client = i2c_new_device(&d->i2c_adap, &board_info);
+	if (client == NULL || client->dev.driver == NULL)
+		return -ENODEV;
+	if (!try_module_get(client->dev.driver->owner)) {
+		i2c_unregister_device(client);
+		return -ENODEV;
+	}
+	adap->fe_adap[0].fe = m88ds3103_pdata.get_dvb_frontend(client);
+	i2c_adapter = m88ds3103_pdata.get_i2c_adapter(client);
+
+	state->i2c_client_demod = client;
+
+	/* attach tuner */
+	ts2020_config.fe = adap->fe_adap[0].fe;
+	memset(&board_info, 0, sizeof(board_info));
+	strlcpy(board_info.type, "ts2022", I2C_NAME_SIZE);
+	board_info.addr = 0x60;
+	board_info.platform_data = &ts2020_config;
+	request_module("ts2020");
+	client = i2c_new_device(i2c_adapter, &board_info);
+
+	if (client == NULL || client->dev.driver == NULL) {
+		dvb_frontend_detach(adap->fe_adap[0].fe);
+		return -ENODEV;
+	}
+
+	if (!try_module_get(client->dev.driver->owner)) {
+		i2c_unregister_device(client);
+		dvb_frontend_detach(adap->fe_adap[0].fe);
+		return -ENODEV;
+	}
+
+	/* delegate signal strength measurement to tuner */
+	adap->fe_adap[0].fe->ops.read_signal_strength =
+			adap->fe_adap[0].fe->ops.tuner_ops.get_rf_strength;
+
+	state->i2c_client_tuner = client;
+
+	/* hook fe: need to resync the slave fifo when signal locks */
+	state->fe_read_status = adap->fe_adap[0].fe->ops.read_status;
+	adap->fe_adap[0].fe->ops.read_status = tt_s2_4600_read_status;
+
+	state->last_lock = 0;
+
+	return 0;
+}
+The corrected function: static int su3000_i2c_transfer(struct i2c_adapter *adap, struct i2c_msg msg[],
+								int num)
+{
+	struct dvb_usb_device *d = i2c_get_adapdata(adap);
+	struct dw2102_state *state;
+
+	if (!d)
+		return -ENODEV;
+
+	state = d->priv;
+
+	if (mutex_lock_interruptible(&d->i2c_mutex) < 0)
+		return -EAGAIN;
+	if (mutex_lock_interruptible(&d->data_mutex) < 0) {
+		mutex_unlock(&d->i2c_mutex);
+		return -EAGAIN;
+	}
+
+	switch (num) {
+	case 1:
+		switch (msg[0].addr) {
+		case SU3000_STREAM_CTRL:
+			state->data[0] = msg[0].buf[0] + 0x36;
+			state->data[1] = 3;
+			state->data[2] = 0;
+			if (dvb_usb_generic_rw(d, state->data, 3,
+					state->data, 0, 0) < 0)
+				err("i2c transfer failed.");
+			break;
+		case DW2102_RC_QUERY:
+			state->data[0] = 0x10;
+			if (dvb_usb_generic_rw(d, state->data, 1,
+					state->data, 2, 0) < 0)
+				err("i2c transfer failed.");
+			msg[0].buf[1] = state->data[0];
+			msg[0].buf[0] = state->data[1];
+			break;
+		default:
+			/* always i2c write*/
+			state->data[0] = 0x08;
+			state->data[1] = msg[0].addr;
+			state->data[2] = msg[0].len;
+
+			memcpy(&state->data[3], msg[0].buf, msg[0].len);
+
+			if (dvb_usb_generic_rw(d, state->data, msg[0].len + 3,
+						state->data, 1, 0) < 0)
+				err("i2c transfer failed.");
+
+		}
+		break;
+	case 2:
+		/* always i2c read */
+		state->data[0] = 0x09;
+		state->data[1] = msg[0].len;
+		state->data[2] = msg[1].len;
+		state->data[3] = msg[0].addr;
+		memcpy(&state->data[4], msg[0].buf, msg[0].len);
+
+		if (dvb_usb_generic_rw(d, state->data, msg[0].len + 4,
+					state->data, msg[1].len + 1, 0) < 0)
+			err("i2c transfer failed.");
+
+		memcpy(msg[1].buf, &state->data[1], msg[1].len);
+		break;
+	default:
+		warn("more than 2 i2c messages at a time is not handled yet.");
+		break;
+	}
+	mutex_unlock(&d->data_mutex);
+	mutex_unlock(&d->i2c_mutex);
+	return num;
+}

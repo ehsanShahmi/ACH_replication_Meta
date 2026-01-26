@@ -1,0 +1,12 @@
+firmware: arm_scmi: Fix double free in OPTEE transport
+
+Channels can be shared between protocols, avoid freeing the same channel
+descriptors twice when unloading the stack.
+
+Fixes: 5f90f189a052 ("firmware: arm_scmi: Add optee transport")
+Signed-off-by: Cristian Marussi <cristian.marussi@arm.com>
+Tested-by: Peng Fan <peng.fan@nxp.com>  #i.MX95 19x19 EVK
+Reviewed-by: Peng Fan <peng.fan@nxp.com>
+Tested-by: Florian Fainelli <florian.fainelli@broadcom.com>
+Message-Id: <20240812173340.3912830-2-cristian.marussi@arm.com>
+Signed-off-by: Sudeep Holla <sudeep.holla@arm.com>

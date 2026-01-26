@@ -1,0 +1,48 @@
+The vulnerable issue: netfilter: ipset: fix performance regression in swap operation
+
+The patch "netfilter: ipset: fix race condition between swap/destroy
+and kernel side add/del/test", commit 28628fa9 fixes a race condition.
+But the synchronize_rcu() added to the swap function unnecessarily slows
+it down: it can safely be moved to destroy and use call_rcu() instead.
+
+Eric Dumazet pointed out that simply calling the destroy functions as
+rcu callback does not work: sets with timeout use garbage collectors
+which need cancelling at destroy which can wait. Therefore the destroy
+functions are split into two: cancelling garbage collectors safely at
+executing the command received by netlink and moving the remaining
+part only into the rcu callback.
+
+Link: https://lore.kernel.org/lkml/C0829B10-EAA6-4809-874E-E1E9C05A8D84@automattic.com/
+Fixes: 28628fa952fe ("netfilter: ipset: fix race condition between swap/destroy and kernel side add/del/test")
+Reported-by: Ale Crismani <ale.crismani@automattic.com>
+Reported-by: David Wang <00107082@163.com>
+Tested-by: David Wang <00107082@163.com>
+Signed-off-by: Jozsef Kadlecsik <kadlec@netfilter.org>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+The vulnerable function: static void
+list_set_destroy(struct ip_set *set)
+{
+	struct list_set *map = set->data;
+	struct set_elem *e, *n;
+
+	if (SET_WITH_TIMEOUT(set))
+		timer_shutdown_sync(&map->gc);
+
+	list_for_each_entry_safe(e, n, &map->members, list) {
+		list_del(&e->list);
+		ip_set_put_byindex(map->net, e->id);
+		ip_set_ext_destroy(set, e);
+		kfree(e);
+	}
+	kfree(map);
+
+	set->data = NULL;
+}
+The corrected function: static void
+list_set_cancel_gc(struct ip_set *set)
+{
+	struct list_set *map = set->data;
+
+	if (SET_WITH_TIMEOUT(set))
+		timer_shutdown_sync(&map->gc);
+}

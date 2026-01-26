@@ -1,0 +1,150 @@
+The vulnerable issue: mnt: Correct permission checks in do_remount
+
+While invesgiating the issue where in "mount --bind -oremount,ro ..."
+would result in later "mount --bind -oremount,rw" succeeding even if
+the mount started off locked I realized that there are several
+additional mount flags that should be locked and are not.
+
+In particular MNT_NOSUID, MNT_NODEV, MNT_NOEXEC, and the atime
+flags in addition to MNT_READONLY should all be locked.  These
+flags are all per superblock, can all be changed with MS_BIND,
+and should not be changable if set by a more privileged user.
+
+The following additions to the current logic are added in this patch.
+- nosuid may not be clearable by a less privileged user.
+- nodev  may not be clearable by a less privielged user.
+- noexec may not be clearable by a less privileged user.
+- atime flags may not be changeable by a less privileged user.
+
+The logic with atime is that always setting atime on access is a
+global policy and backup software and auditing software could break if
+atime bits are not updated (when they are configured to be updated),
+and serious performance degradation could result (DOS attack) if atime
+updates happen when they have been explicitly disabled.  Therefore an
+unprivileged user should not be able to mess with the atime bits set
+by a more privileged user.
+
+The additional restrictions are implemented with the addition of
+MNT_LOCK_NOSUID, MNT_LOCK_NODEV, MNT_LOCK_NOEXEC, and MNT_LOCK_ATIME
+mnt flags.
+
+Taken together these changes and the fixes for MNT_LOCK_READONLY
+should make it safe for an unprivileged user to create a user
+namespace and to call "mount --bind -o remount,... ..." without
+the danger of mount flags being changed maliciously.
+
+Cc: stable@vger.kernel.org
+Acked-by: Serge E. Hallyn <serge.hallyn@ubuntu.com>
+Signed-off-by: "Eric W. Biederman" <ebiederm@xmission.com>
+The vulnerable function: static struct mount *clone_mnt(struct mount *old, struct dentry *root,
+					int flag)
+{
+	struct super_block *sb = old->mnt.mnt_sb;
+	struct mount *mnt;
+	int err;
+
+	mnt = alloc_vfsmnt(old->mnt_devname);
+	if (!mnt)
+		return ERR_PTR(-ENOMEM);
+
+	if (flag & (CL_SLAVE | CL_PRIVATE | CL_SHARED_TO_SLAVE))
+		mnt->mnt_group_id = 0; /* not a peer of original */
+	else
+		mnt->mnt_group_id = old->mnt_group_id;
+
+	if ((flag & CL_MAKE_SHARED) && !mnt->mnt_group_id) {
+		err = mnt_alloc_group_id(mnt);
+		if (err)
+			goto out_free;
+	}
+
+	mnt->mnt.mnt_flags = old->mnt.mnt_flags & ~(MNT_WRITE_HOLD|MNT_MARKED);
+	/* Don't allow unprivileged users to change mount flags */
+	if ((flag & CL_UNPRIVILEGED) && (mnt->mnt.mnt_flags & MNT_READONLY))
+		mnt->mnt.mnt_flags |= MNT_LOCK_READONLY;
+
+	/* Don't allow unprivileged users to reveal what is under a mount */
+	if ((flag & CL_UNPRIVILEGED) && list_empty(&old->mnt_expire))
+		mnt->mnt.mnt_flags |= MNT_LOCKED;
+
+	atomic_inc(&sb->s_active);
+	mnt->mnt.mnt_sb = sb;
+	mnt->mnt.mnt_root = dget(root);
+	mnt->mnt_mountpoint = mnt->mnt.mnt_root;
+	mnt->mnt_parent = mnt;
+	lock_mount_hash();
+	list_add_tail(&mnt->mnt_instance, &sb->s_mounts);
+	unlock_mount_hash();
+
+	if ((flag & CL_SLAVE) ||
+	    ((flag & CL_SHARED_TO_SLAVE) && IS_MNT_SHARED(old))) {
+		list_add(&mnt->mnt_slave, &old->mnt_slave_list);
+		mnt->mnt_master = old;
+		CLEAR_MNT_SHARED(mnt);
+	} else if (!(flag & CL_PRIVATE)) {
+		if ((flag & CL_MAKE_SHARED) || IS_MNT_SHARED(old))
+			list_add(&mnt->mnt_share, &old->mnt_share);
+		if (IS_MNT_SLAVE(old))
+			list_add(&mnt->mnt_slave, &old->mnt_slave);
+		mnt->mnt_master = old->mnt_master;
+	}
+	if (flag & CL_MAKE_SHARED)
+		set_mnt_shared(mnt);
+
+	/* stick the duplicate mount on the same expiry list
+	 * as the original if that was on one */
+	if (flag & CL_EXPIRE) {
+		if (!list_empty(&old->mnt_expire))
+			list_add(&mnt->mnt_expire, &old->mnt_expire);
+	}
+
+	return mnt;
+
+ out_free:
+	mnt_free_id(mnt);
+	free_vfsmnt(mnt);
+	return ERR_PTR(err);
+}
+The corrected function: static int do_new_mount(struct path *path, const char *fstype, int flags,
+			int mnt_flags, const char *name, void *data)
+{
+	struct file_system_type *type;
+	struct user_namespace *user_ns = current->nsproxy->mnt_ns->user_ns;
+	struct vfsmount *mnt;
+	int err;
+
+	if (!fstype)
+		return -EINVAL;
+
+	type = get_fs_type(fstype);
+	if (!type)
+		return -ENODEV;
+
+	if (user_ns != &init_user_ns) {
+		if (!(type->fs_flags & FS_USERNS_MOUNT)) {
+			put_filesystem(type);
+			return -EPERM;
+		}
+		/* Only in special cases allow devices from mounts
+		 * created outside the initial user namespace.
+		 */
+		if (!(type->fs_flags & FS_USERNS_DEV_MOUNT)) {
+			flags |= MS_NODEV;
+			mnt_flags |= MNT_NODEV;
+		}
+	}
+
+	mnt = vfs_kern_mount(type, flags, name, data);
+	if (!IS_ERR(mnt) && (type->fs_flags & FS_HAS_SUBTYPE) &&
+	    !mnt->mnt_sb->s_subtype)
+		mnt = fs_set_subtype(mnt, fstype);
+
+	put_filesystem(type);
+	if (IS_ERR(mnt))
+		return PTR_ERR(mnt);
+
+	err = do_add_mount(real_mount(mnt), path, mnt_flags);
+	if (err)
+		mntput(mnt);
+	return err;
+}

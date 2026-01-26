@@ -1,0 +1,150 @@
+The vulnerable issue: net: rework recvmsg handler msg_name and msg_namelen logic
+
+This patch now always passes msg->msg_namelen as 0. recvmsg handlers must
+set msg_namelen to the proper size <= sizeof(struct sockaddr_storage)
+to return msg_name to the user.
+
+This prevents numerous uninitialized memory leaks we had in the
+recvmsg handlers and makes it harder for new code to accidentally leak
+uninitialized memory.
+
+Optimize for the case recvfrom is called with NULL as address. We don't
+need to copy the address at all, so set it to NULL before invoking the
+recvmsg handler. We can do so, because all the recvmsg handlers must
+cope with the case a plain read() is called on them. read() also sets
+msg_name to NULL.
+
+Also document these changes in include/linux/net.h as suggested by David
+Miller.
+
+Changes since RFC:
+
+Set msg->msg_name = NULL if user specified a NULL in msg_name but had a
+non-null msg_namelen in verify_iovec/verify_compat_iovec. This doesn't
+affect sendto as it would bail out earlier while trying to copy-in the
+address. It also more naturally reflects the logic by the callers of
+verify_iovec.
+
+With this change in place I could remove "
+if (!uaddr || msg_sys->msg_namelen == 0)
+	msg->msg_name = NULL
+".
+
+This change does not alter the user visible error logic as we ignore
+msg_namelen as long as msg_name is NULL.
+
+Also remove two unnecessary curly brackets in ___sys_recvmsg and change
+comments to netdev style.
+
+Cc: David Miller <davem@davemloft.net>
+Suggested-by: Eric Dumazet <eric.dumazet@gmail.com>
+Signed-off-by: Hannes Frederic Sowa <hannes@stressinduktion.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: static void unix_copy_addr(struct msghdr *msg, struct sock *sk)
+{
+	struct unix_sock *u = unix_sk(sk);
+
+	msg->msg_namelen = 0;
+	if (u->addr) {
+		msg->msg_namelen = u->addr->len;
+		memcpy(msg->msg_name, u->addr->name, u->addr->len);
+	}
+}
+The corrected function: static int unix_dgram_recvmsg(struct kiocb *iocb, struct socket *sock,
+			      struct msghdr *msg, size_t size,
+			      int flags)
+{
+	struct sock_iocb *siocb = kiocb_to_siocb(iocb);
+	struct scm_cookie tmp_scm;
+	struct sock *sk = sock->sk;
+	struct unix_sock *u = unix_sk(sk);
+	int noblock = flags & MSG_DONTWAIT;
+	struct sk_buff *skb;
+	int err;
+	int peeked, skip;
+
+	err = -EOPNOTSUPP;
+	if (flags&MSG_OOB)
+		goto out;
+
+	msg->msg_namelen = 0;
+
+	err = mutex_lock_interruptible(&u->readlock);
+	if (err) {
+		err = sock_intr_errno(sock_rcvtimeo(sk, noblock));
+		goto out;
+	}
+
+	skip = sk_peek_offset(sk, flags);
+
+	skb = __skb_recv_datagram(sk, flags, &peeked, &skip, &err);
+	if (!skb) {
+		unix_state_lock(sk);
+		/* Signal EOF on disconnected non-blocking SEQPACKET socket. */
+		if (sk->sk_type == SOCK_SEQPACKET && err == -EAGAIN &&
+		    (sk->sk_shutdown & RCV_SHUTDOWN))
+			err = 0;
+		unix_state_unlock(sk);
+		goto out_unlock;
+	}
+
+	wake_up_interruptible_sync_poll(&u->peer_wait,
+					POLLOUT | POLLWRNORM | POLLWRBAND);
+
+	if (msg->msg_name)
+		unix_copy_addr(msg, skb->sk);
+
+	if (size > skb->len - skip)
+		size = skb->len - skip;
+	else if (size < skb->len - skip)
+		msg->msg_flags |= MSG_TRUNC;
+
+	err = skb_copy_datagram_iovec(skb, skip, msg->msg_iov, size);
+	if (err)
+		goto out_free;
+
+	if (sock_flag(sk, SOCK_RCVTSTAMP))
+		__sock_recv_timestamp(msg, sk, skb);
+
+	if (!siocb->scm) {
+		siocb->scm = &tmp_scm;
+		memset(&tmp_scm, 0, sizeof(tmp_scm));
+	}
+	scm_set_cred(siocb->scm, UNIXCB(skb).pid, UNIXCB(skb).uid, UNIXCB(skb).gid);
+	unix_set_secdata(siocb->scm, skb);
+
+	if (!(flags & MSG_PEEK)) {
+		if (UNIXCB(skb).fp)
+			unix_detach_fds(siocb->scm, skb);
+
+		sk_peek_offset_bwd(sk, skb->len);
+	} else {
+		/* It is questionable: on PEEK we could:
+		   - do not return fds - good, but too simple 8)
+		   - return fds, and do not return them on read (old strategy,
+		     apparently wrong)
+		   - clone fds (I chose it for now, it is the most universal
+		     solution)
+
+		   POSIX 1003.1g does not actually define this clearly
+		   at all. POSIX 1003.1g doesn't define a lot of things
+		   clearly however!
+
+		*/
+
+		sk_peek_offset_fwd(sk, size);
+
+		if (UNIXCB(skb).fp)
+			siocb->scm->fp = scm_fp_dup(UNIXCB(skb).fp);
+	}
+	err = (flags & MSG_TRUNC) ? skb->len - skip : size;
+
+	scm_recv(sock, msg, siocb->scm, flags);
+
+out_free:
+	skb_free_datagram(sk, skb);
+out_unlock:
+	mutex_unlock(&u->readlock);
+out:
+	return err;
+}

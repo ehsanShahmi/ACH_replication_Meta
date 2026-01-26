@@ -1,0 +1,31 @@
+The vulnerable issue: HID: fix a couple of off-by-ones
+
+There are a few very theoretical off-by-one bugs in report descriptor size
+checking when performing a pre-parsing fixup. Fix those.
+
+Cc: stable@vger.kernel.org
+Reported-by: Ben Hawkes <hawkes@google.com>
+Reviewed-by: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+The vulnerable function: static __u8 *sp_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+		unsigned int *rsize)
+{
+	if (*rsize >= 107 && rdesc[104] == 0x26 && rdesc[105] == 0x80 &&
+			rdesc[106] == 0x03) {
+		hid_info(hdev, "fixing up Sunplus Wireless Desktop report descriptor\n");
+		rdesc[105] = rdesc[110] = 0x03;
+		rdesc[106] = rdesc[111] = 0x21;
+	}
+	return rdesc;
+}
+The corrected function: static __u8 *sp_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+		unsigned int *rsize)
+{
+	if (*rsize >= 112 && rdesc[104] == 0x26 && rdesc[105] == 0x80 &&
+			rdesc[106] == 0x03) {
+		hid_info(hdev, "fixing up Sunplus Wireless Desktop report descriptor\n");
+		rdesc[105] = rdesc[110] = 0x03;
+		rdesc[106] = rdesc[111] = 0x21;
+	}
+	return rdesc;
+}

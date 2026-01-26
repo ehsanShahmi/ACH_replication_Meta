@@ -1,0 +1,184 @@
+The vulnerable issue: ext4: use ext4_get_block_write in buffer write
+
+Allocate uninitialized extent before ext4 buffer write and
+convert the extent to initialized after io completes.
+The purpose is to make sure an extent can only be marked
+initialized after it has been written with new data so
+we can safely drop the i_mutex lock in ext4 DIO read without
+exposing stale data. This helps to improve multi-thread DIO
+read performance on high-speed disks.
+
+Skip the nobh and data=journal mount cases to make things simple for now.
+
+Signed-off-by: Jiaying Zhang <jiayingz@google.com>
+Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+The vulnerable function: static int ext4_write_begin(struct file *file, struct address_space *mapping,
+			    loff_t pos, unsigned len, unsigned flags,
+			    struct page **pagep, void **fsdata)
+{
+	struct inode *inode = mapping->host;
+	int ret, needed_blocks;
+	handle_t *handle;
+	int retries = 0;
+	struct page *page;
+	pgoff_t index;
+	unsigned from, to;
+
+	trace_ext4_write_begin(inode, pos, len, flags);
+	/*
+	 * Reserve one block more for addition to orphan list in case
+	 * we allocate blocks but write fails for some reason
+	 */
+	needed_blocks = ext4_writepage_trans_blocks(inode) + 1;
+	index = pos >> PAGE_CACHE_SHIFT;
+	from = pos & (PAGE_CACHE_SIZE - 1);
+	to = from + len;
+
+retry:
+	handle = ext4_journal_start(inode, needed_blocks);
+	if (IS_ERR(handle)) {
+		ret = PTR_ERR(handle);
+		goto out;
+	}
+
+	/* We cannot recurse into the filesystem as the transaction is already
+	 * started */
+	flags |= AOP_FLAG_NOFS;
+
+	page = grab_cache_page_write_begin(mapping, index, flags);
+	if (!page) {
+		ext4_journal_stop(handle);
+		ret = -ENOMEM;
+		goto out;
+	}
+	*pagep = page;
+
+	ret = block_write_begin(file, mapping, pos, len, flags, pagep, fsdata,
+				ext4_get_block);
+
+	if (!ret && ext4_should_journal_data(inode)) {
+		ret = walk_page_buffers(handle, page_buffers(page),
+				from, to, NULL, do_journal_get_write_access);
+	}
+
+	if (ret) {
+		unlock_page(page);
+		page_cache_release(page);
+		/*
+		 * block_write_begin may have instantiated a few blocks
+		 * outside i_size.  Trim these off again. Don't need
+		 * i_size_read because we hold i_mutex.
+		 *
+		 * Add inode to orphan list in case we crash before
+		 * truncate finishes
+		 */
+		if (pos + len > inode->i_size && ext4_can_truncate(inode))
+			ext4_orphan_add(handle, inode);
+
+		ext4_journal_stop(handle);
+		if (pos + len > inode->i_size) {
+			ext4_truncate_failed_write(inode);
+			/*
+			 * If truncate failed early the inode might
+			 * still be on the orphan list; we need to
+			 * make sure the inode is removed from the
+			 * orphan list in that case.
+			 */
+			if (inode->i_nlink)
+				ext4_orphan_del(NULL, inode);
+		}
+	}
+
+	if (ret == -ENOSPC && ext4_should_retry_alloc(inode->i_sb, &retries))
+		goto retry;
+out:
+	return ret;
+}
+The corrected function: static int ext4_writepage(struct page *page,
+			  struct writeback_control *wbc)
+{
+	int ret = 0;
+	loff_t size;
+	unsigned int len;
+	struct buffer_head *page_bufs;
+	struct inode *inode = page->mapping->host;
+
+	trace_ext4_writepage(inode, page);
+	size = i_size_read(inode);
+	if (page->index == size >> PAGE_CACHE_SHIFT)
+		len = size & ~PAGE_CACHE_MASK;
+	else
+		len = PAGE_CACHE_SIZE;
+
+	if (page_has_buffers(page)) {
+		page_bufs = page_buffers(page);
+		if (walk_page_buffers(NULL, page_bufs, 0, len, NULL,
+					ext4_bh_delay_or_unwritten)) {
+			/*
+			 * We don't want to do  block allocation
+			 * So redirty the page and return
+			 * We may reach here when we do a journal commit
+			 * via journal_submit_inode_data_buffers.
+			 * If we don't have mapping block we just ignore
+			 * them. We can also reach here via shrink_page_list
+			 */
+			redirty_page_for_writepage(wbc, page);
+			unlock_page(page);
+			return 0;
+		}
+	} else {
+		/*
+		 * The test for page_has_buffers() is subtle:
+		 * We know the page is dirty but it lost buffers. That means
+		 * that at some moment in time after write_begin()/write_end()
+		 * has been called all buffers have been clean and thus they
+		 * must have been written at least once. So they are all
+		 * mapped and we can happily proceed with mapping them
+		 * and writing the page.
+		 *
+		 * Try to initialize the buffer_heads and check whether
+		 * all are mapped and non delay. We don't want to
+		 * do block allocation here.
+		 */
+		ret = block_prepare_write(page, 0, len,
+					  noalloc_get_block_write);
+		if (!ret) {
+			page_bufs = page_buffers(page);
+			/* check whether all are mapped and non delay */
+			if (walk_page_buffers(NULL, page_bufs, 0, len, NULL,
+						ext4_bh_delay_or_unwritten)) {
+				redirty_page_for_writepage(wbc, page);
+				unlock_page(page);
+				return 0;
+			}
+		} else {
+			/*
+			 * We can't do block allocation here
+			 * so just redity the page and unlock
+			 * and return
+			 */
+			redirty_page_for_writepage(wbc, page);
+			unlock_page(page);
+			return 0;
+		}
+		/* now mark the buffer_heads as dirty and uptodate */
+		block_commit_write(page, 0, len);
+	}
+
+	if (PageChecked(page) && ext4_should_journal_data(inode)) {
+		/*
+		 * It's mmapped pagecache.  Add buffers and journal it.  There
+		 * doesn't seem much point in redirtying the page here.
+		 */
+		ClearPageChecked(page);
+		return __ext4_journalled_writepage(page, len);
+	}
+
+	if (test_opt(inode->i_sb, NOBH) && ext4_should_writeback_data(inode))
+		ret = nobh_writepage(page, noalloc_get_block_write, wbc);
+	else
+		ret = block_write_full_page(page, noalloc_get_block_write,
+					    wbc);
+
+	return ret;
+}

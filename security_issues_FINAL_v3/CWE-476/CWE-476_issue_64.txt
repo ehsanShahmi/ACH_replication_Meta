@@ -1,0 +1,90 @@
+The vulnerable issue: drm/amdgpu: fix the waring dereferencing hive
+
+Check the amdgpu_hive_info *hive that maybe is NULL.
+
+Signed-off-by: Jesse Zhang <Jesse.Zhang@amd.com>
+Reviewed-by: Tim Huang <Tim.Huang@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+The vulnerable function: static void psp_xgmi_reflect_topology_info(struct psp_context *psp,
+					struct psp_xgmi_node_info node_info)
+{
+	struct amdgpu_device *mirror_adev;
+	struct amdgpu_hive_info *hive;
+	uint64_t src_node_id = psp->adev->gmc.xgmi.node_id;
+	uint64_t dst_node_id = node_info.node_id;
+	uint8_t dst_num_hops = node_info.num_hops;
+	uint8_t dst_num_links = node_info.num_links;
+
+	hive = amdgpu_get_xgmi_hive(psp->adev);
+	list_for_each_entry(mirror_adev, &hive->device_list, gmc.xgmi.head) {
+		struct psp_xgmi_topology_info *mirror_top_info;
+		int j;
+
+		if (mirror_adev->gmc.xgmi.node_id != dst_node_id)
+			continue;
+
+		mirror_top_info = &mirror_adev->psp.xgmi_context.top_info;
+		for (j = 0; j < mirror_top_info->num_nodes; j++) {
+			if (mirror_top_info->nodes[j].node_id != src_node_id)
+				continue;
+
+			mirror_top_info->nodes[j].num_hops = dst_num_hops;
+			/*
+			 * prevent 0 num_links value re-reflection since reflection
+			 * criteria is based on num_hops (direct or indirect).
+			 *
+			 */
+			if (dst_num_links)
+				mirror_top_info->nodes[j].num_links = dst_num_links;
+
+			break;
+		}
+
+		break;
+	}
+
+	amdgpu_put_xgmi_hive(hive);
+}
+The corrected function: static void psp_xgmi_reflect_topology_info(struct psp_context *psp,
+					struct psp_xgmi_node_info node_info)
+{
+	struct amdgpu_device *mirror_adev;
+	struct amdgpu_hive_info *hive;
+	uint64_t src_node_id = psp->adev->gmc.xgmi.node_id;
+	uint64_t dst_node_id = node_info.node_id;
+	uint8_t dst_num_hops = node_info.num_hops;
+	uint8_t dst_num_links = node_info.num_links;
+
+	hive = amdgpu_get_xgmi_hive(psp->adev);
+	if (WARN_ON(!hive))
+		return;
+
+	list_for_each_entry(mirror_adev, &hive->device_list, gmc.xgmi.head) {
+		struct psp_xgmi_topology_info *mirror_top_info;
+		int j;
+
+		if (mirror_adev->gmc.xgmi.node_id != dst_node_id)
+			continue;
+
+		mirror_top_info = &mirror_adev->psp.xgmi_context.top_info;
+		for (j = 0; j < mirror_top_info->num_nodes; j++) {
+			if (mirror_top_info->nodes[j].node_id != src_node_id)
+				continue;
+
+			mirror_top_info->nodes[j].num_hops = dst_num_hops;
+			/*
+			 * prevent 0 num_links value re-reflection since reflection
+			 * criteria is based on num_hops (direct or indirect).
+			 *
+			 */
+			if (dst_num_links)
+				mirror_top_info->nodes[j].num_links = dst_num_links;
+
+			break;
+		}
+
+		break;
+	}
+
+	amdgpu_put_xgmi_hive(hive);
+}

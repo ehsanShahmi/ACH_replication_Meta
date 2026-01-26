@@ -1,0 +1,45 @@
+The vulnerable issue: NFSv4: Convert the open and close ops to use fmode
+
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+The vulnerable function: static int nfs4_intent_set_file(struct nameidata *nd, struct path *path, struct nfs4_state *state)
+{
+	struct file *filp;
+	int ret;
+
+	/* If the open_intent is for execute, we have an extra check to make */
+	if (nd->intent.open.flags & FMODE_EXEC) {
+		ret = nfs_may_open(state->inode,
+				state->owner->so_cred,
+				nd->intent.open.flags);
+		if (ret < 0)
+			goto out_close;
+	}
+	filp = lookup_instantiate_filp(nd, path->dentry, NULL);
+	if (!IS_ERR(filp)) {
+		struct nfs_open_context *ctx;
+		ctx = nfs_file_open_context(filp);
+		ctx->state = state;
+		return 0;
+	}
+	ret = PTR_ERR(filp);
+out_close:
+	nfs4_close_sync(path, state, nd->intent.open.flags);
+	return ret;
+}
+The corrected function: static void nfs4_open_confirm_release(void *calldata)
+{
+	struct nfs4_opendata *data = calldata;
+	struct nfs4_state *state = NULL;
+
+	/* If this request hasn't been cancelled, do nothing */
+	if (data->cancelled == 0)
+		goto out_free;
+	/* In case of error, no cleanup! */
+	if (!data->rpc_done)
+		goto out_free;
+	state = nfs4_opendata_to_nfs4_state(data);
+	if (!IS_ERR(state))
+		nfs4_close_state(&data->path, state, data->o_arg.open_flags);
+out_free:
+	nfs4_opendata_put(data);
+}

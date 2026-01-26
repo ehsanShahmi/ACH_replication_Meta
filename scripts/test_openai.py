@@ -24,7 +24,7 @@ client = openai.OpenAI()
 
 response = client.responses.create(
   model="gpt-5",
-  input="Write a realistic five-sentence bedtime story about a unicorn."
+  input="Write a realistic five-sentence bedtime story about a time-machine fully operated using an AI."
 )
 
 print(response.output_text)

@@ -1,0 +1,181 @@
+The vulnerable issue: s390/dasd: fix error checks in dasd_copy_pair_store()
+
+dasd_add_busid() can return an error via ERR_PTR() if an allocation
+fails. However, two callsites in dasd_copy_pair_store() do not check
+the result, potentially resulting in a NULL pointer dereference. Fix
+this by checking the result with IS_ERR() and returning the error up
+the stack.
+
+Fixes: a91ff09d39f9b ("s390/dasd: add copy pair setup")
+Signed-off-by: Carlos López <clopez@suse.de>
+Signed-off-by: Stefan Haberland <sth@linux.ibm.com>
+Link: https://lore.kernel.org/r/20240715112434.2111291-3-sth@linux.ibm.com
+Signed-off-by: Jens Axboe <axboe@kernel.dk>
+The vulnerable function: static ssize_t dasd_copy_pair_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct dasd_devmap *prim_devmap, *sec_devmap;
+	char prim_busid[DASD_BUS_ID_SIZE];
+	char sec_busid[DASD_BUS_ID_SIZE];
+	struct dasd_copy_relation *copy;
+	struct dasd_device *device;
+	bool pprc_enabled;
+	int rc;
+
+	if (strncmp(buf, "clear", strlen("clear")) == 0) {
+		if (dasd_devmap_clear_copy_relation(dev))
+			return -EINVAL;
+		return count;
+	}
+
+	rc = dasd_devmap_parse_busid(buf, prim_busid, sec_busid);
+	if (rc)
+		return rc;
+
+	if (strncmp(dev_name(dev), prim_busid, DASD_BUS_ID_SIZE) != 0 &&
+	    strncmp(dev_name(dev), sec_busid, DASD_BUS_ID_SIZE) != 0)
+		return -EINVAL;
+
+	/* allocate primary devmap if needed */
+	prim_devmap = dasd_find_busid(prim_busid);
+	if (IS_ERR(prim_devmap))
+		prim_devmap = dasd_add_busid(prim_busid, DASD_FEATURE_DEFAULT);
+
+	/* allocate secondary devmap if needed */
+	sec_devmap = dasd_find_busid(sec_busid);
+	if (IS_ERR(sec_devmap))
+		sec_devmap = dasd_add_busid(sec_busid, DASD_FEATURE_DEFAULT);
+
+	/* setting copy relation is only allowed for offline secondary */
+	if (sec_devmap->device)
+		return -EINVAL;
+
+	if (prim_devmap->copy) {
+		copy = prim_devmap->copy;
+	} else if (sec_devmap->copy) {
+		copy = sec_devmap->copy;
+	} else {
+		copy = kzalloc(sizeof(*copy), GFP_KERNEL);
+		if (!copy)
+			return -ENOMEM;
+	}
+	spin_lock(&dasd_devmap_lock);
+	rc = dasd_devmap_set_copy_relation(prim_devmap, copy, prim_busid, true);
+	if (rc) {
+		spin_unlock(&dasd_devmap_lock);
+		return rc;
+	}
+	rc = dasd_devmap_set_copy_relation(sec_devmap, copy, sec_busid, false);
+	if (rc) {
+		spin_unlock(&dasd_devmap_lock);
+		return rc;
+	}
+	spin_unlock(&dasd_devmap_lock);
+
+	/* if primary device is already online call device setup directly */
+	if (prim_devmap->device && !prim_devmap->device->copy) {
+		device = prim_devmap->device;
+		if (device->discipline->pprc_enabled) {
+			pprc_enabled = device->discipline->pprc_enabled(device);
+			rc = dasd_devmap_set_device_copy_relation(device->cdev,
+								  pprc_enabled);
+		} else {
+			rc = -EOPNOTSUPP;
+		}
+	}
+	if (rc) {
+		dasd_devmap_del_copy_relation(copy, prim_busid);
+		dasd_devmap_del_copy_relation(copy, sec_busid);
+		count = rc;
+	}
+
+	return count;
+}
+The corrected function: static ssize_t dasd_copy_pair_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct dasd_devmap *prim_devmap, *sec_devmap;
+	char prim_busid[DASD_BUS_ID_SIZE];
+	char sec_busid[DASD_BUS_ID_SIZE];
+	struct dasd_copy_relation *copy;
+	struct dasd_device *device;
+	bool pprc_enabled;
+	int rc;
+
+	if (strncmp(buf, "clear", strlen("clear")) == 0) {
+		if (dasd_devmap_clear_copy_relation(dev))
+			return -EINVAL;
+		return count;
+	}
+
+	rc = dasd_devmap_parse_busid(buf, prim_busid, sec_busid);
+	if (rc)
+		return rc;
+
+	if (strncmp(dev_name(dev), prim_busid, DASD_BUS_ID_SIZE) != 0 &&
+	    strncmp(dev_name(dev), sec_busid, DASD_BUS_ID_SIZE) != 0)
+		return -EINVAL;
+
+	/* allocate primary devmap if needed */
+	prim_devmap = dasd_find_busid(prim_busid);
+	if (IS_ERR(prim_devmap)) {
+		prim_devmap = dasd_add_busid(prim_busid, DASD_FEATURE_DEFAULT);
+		if (IS_ERR(prim_devmap))
+			return PTR_ERR(prim_devmap);
+	}
+
+	/* allocate secondary devmap if needed */
+	sec_devmap = dasd_find_busid(sec_busid);
+	if (IS_ERR(sec_devmap)) {
+		sec_devmap = dasd_add_busid(sec_busid, DASD_FEATURE_DEFAULT);
+		if (IS_ERR(sec_devmap))
+			return PTR_ERR(sec_devmap);
+	}
+
+	/* setting copy relation is only allowed for offline secondary */
+	if (sec_devmap->device)
+		return -EINVAL;
+
+	if (prim_devmap->copy) {
+		copy = prim_devmap->copy;
+	} else if (sec_devmap->copy) {
+		copy = sec_devmap->copy;
+	} else {
+		copy = kzalloc(sizeof(*copy), GFP_KERNEL);
+		if (!copy)
+			return -ENOMEM;
+	}
+	spin_lock(&dasd_devmap_lock);
+	rc = dasd_devmap_set_copy_relation(prim_devmap, copy, prim_busid, true);
+	if (rc) {
+		spin_unlock(&dasd_devmap_lock);
+		return rc;
+	}
+	rc = dasd_devmap_set_copy_relation(sec_devmap, copy, sec_busid, false);
+	if (rc) {
+		spin_unlock(&dasd_devmap_lock);
+		return rc;
+	}
+	spin_unlock(&dasd_devmap_lock);
+
+	/* if primary device is already online call device setup directly */
+	if (prim_devmap->device && !prim_devmap->device->copy) {
+		device = prim_devmap->device;
+		if (device->discipline->pprc_enabled) {
+			pprc_enabled = device->discipline->pprc_enabled(device);
+			rc = dasd_devmap_set_device_copy_relation(device->cdev,
+								  pprc_enabled);
+		} else {
+			rc = -EOPNOTSUPP;
+		}
+	}
+	if (rc) {
+		dasd_devmap_del_copy_relation(copy, prim_busid);
+		dasd_devmap_del_copy_relation(copy, sec_busid);
+		count = rc;
+	}
+
+	return count;
+}

@@ -1,0 +1,14 @@
+[SCTP]: Fix assertion (!atomic_read(&sk->sk_rmem_alloc)) failed message
+
+In current implementation, LKSCTP does receive buffer accounting for
+data in sctp_receive_queue and pd_lobby. However, LKSCTP don't do
+accounting for data in frag_list when data is fragmented. In addition,
+LKSCTP doesn't do accounting for data in reasm and lobby queue in
+structure sctp_ulpq.
+When there are date in these queue, assertion failed message is printed
+in inet_sock_destruct because sk_rmem_alloc of oldsk does not become 0
+when socket is destroyed.
+
+Signed-off-by: Tsutomu Fujii <t-fujii@nb.jp.nec.com>
+Signed-off-by: Vlad Yasevich <vladislav.yasevich@hp.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>

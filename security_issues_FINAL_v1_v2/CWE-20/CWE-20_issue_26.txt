@@ -1,0 +1,19 @@
+cifs: always do is_path_accessible check in cifs_mount
+
+Currently, we skip doing the is_path_accessible check in cifs_mount if
+there is no prefixpath. I have a report of at least one server however
+that allows a TREE_CONNECT to a share that has a DFS referral at its
+root. The reporter in this case was using a UNC that had no prefixpath,
+so the is_path_accessible check was not triggered and the box later hit
+a BUG() because we were chasing a DFS referral on the root dentry for
+the mount.
+
+This patch fixes this by removing the check for a zero-length
+prefixpath.  That should make the is_path_accessible check be done in
+this situation and should allow the client to chase the DFS referral at
+mount time instead.
+
+Cc: stable@kernel.org
+Reported-and-Tested-by: Yogesh Sharma <ysharma@cymer.com>
+Signed-off-by: Jeff Layton <jlayton@redhat.com>
+Signed-off-by: Steve French <sfrench@us.ibm.com>

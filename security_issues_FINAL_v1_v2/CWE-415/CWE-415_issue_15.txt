@@ -1,0 +1,9 @@
+drm/amdgpu: fix double free err_addr pointer warnings
+
+In amdgpu_umc_bad_page_polling_timeout, the amdgpu_umc_handle_bad_pages
+will be run many times so that double free err_addr in some special case.
+So set the err_addr to NULL to avoid the warnings.
+
+Signed-off-by: Bob Zhou <bob.zhou@amd.com>
+Acked-by: Alex Deucher <alexander.deucher@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>

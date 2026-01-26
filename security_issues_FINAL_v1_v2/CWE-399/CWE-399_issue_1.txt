@@ -1,0 +1,10 @@
+[PATCH] xacct_add_tsk: fix pure theoretical ->mm use-after-free
+
+Paranoid fix. The task can free its ->mm after the 'if (p->mm)' check.
+
+Signed-off-by: Oleg Nesterov <oleg@tv-sign.ru>
+Cc: Shailabh Nagar <nagar@watson.ibm.com>
+Cc: Balbir Singh <balbir@in.ibm.com>
+Cc: Jay Lan <jlan@sgi.com>
+Signed-off-by: Andrew Morton <akpm@osdl.org>
+Signed-off-by: Linus Torvalds <torvalds@osdl.org>

@@ -1,0 +1,12 @@
+Bluetooth: MGMT: Add error handling to pair_device()
+
+hci_conn_params_add() never checks for a NULL value and could lead to a NULL
+pointer dereference causing a crash.
+
+Fixed by adding error handling in the function.
+
+Cc: Stable <stable@kernel.org>
+Fixes: 5157b8a503fa ("Bluetooth: Fix initializing conn_params in scan phase")
+Signed-off-by: Griffin Kroah-Hartman <griffin@kroah.com>
+Reported-by: Yiwei Zhang <zhan4630@purdue.edu>
+Signed-off-by: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>

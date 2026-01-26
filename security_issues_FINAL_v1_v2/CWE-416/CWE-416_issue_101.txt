@@ -1,0 +1,13 @@
+ipv6: prevent possible UAF in ip6_xmit()
+
+If skb_expand_head() returns NULL, skb has been freed
+and the associated dst/idev could also have been freed.
+
+We must use rcu_read_lock() to prevent a possible UAF.
+
+Fixes: 0c9f227bee11 ("ipv6: use skb_expand_head in ip6_xmit")
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Cc: Vasily Averin <vasily.averin@linux.dev>
+Reviewed-by: David Ahern <dsahern@kernel.org>
+Link: https://patch.msgid.link/20240820160859.3786976-4-edumazet@google.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>

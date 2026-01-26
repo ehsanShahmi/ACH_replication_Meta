@@ -1,0 +1,185 @@
+The vulnerable issue: scsi: qla2xxx: validate nvme_local_port correctly
+
+The driver load failed with error message,
+
+qla2xxx [0000:04:00.0]-ffff:0: register_localport failed: ret=ffffffef
+
+and with a kernel crash,
+
+	BUG: unable to handle kernel NULL pointer dereference at 0000000000000070
+	Workqueue: events_unbound qla_register_fcport_fn [qla2xxx]
+	RIP: 0010:nvme_fc_register_remoteport+0x16/0x430 [nvme_fc]
+	RSP: 0018:ffffaaa040eb3d98 EFLAGS: 00010282
+	RAX: 0000000000000000 RBX: ffff9dfb46b78c00 RCX: 0000000000000000
+	RDX: ffff9dfb46b78da8 RSI: ffffaaa040eb3e08 RDI: 0000000000000000
+	RBP: ffff9dfb612a0a58 R08: ffffffffaf1d6270 R09: 3a34303a30303030
+	R10: 34303a303030305b R11: 2078787832616c71 R12: ffff9dfb46b78dd4
+	R13: ffff9dfb46b78c24 R14: ffff9dfb41525300 R15: ffff9dfb46b78da8
+	FS:  0000000000000000(0000) GS:ffff9dfc67c00000(0000) knlGS:0000000000000000
+	CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+	CR2: 0000000000000070 CR3: 000000018da10004 CR4: 00000000000206f0
+	Call Trace:
+	qla_nvme_register_remote+0xeb/0x1f0 [qla2xxx]
+	? qla2x00_dfs_create_rport+0x231/0x270 [qla2xxx]
+	qla2x00_update_fcport+0x2a1/0x3c0 [qla2xxx]
+	qla_register_fcport_fn+0x54/0xc0 [qla2xxx]
+
+Exit the qla_nvme_register_remote() function when qla_nvme_register_hba()
+fails and correctly validate nvme_local_port.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Nilesh Javali <njavali@marvell.com>
+Link: https://lore.kernel.org/r/20240710171057.35066-3-njavali@marvell.com
+Reviewed-by: Himanshu Madhani <himanshu.madhani@oracle.com>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+The vulnerable function: int qla_nvme_register_remote(struct scsi_qla_host *vha, struct fc_port *fcport)
+{
+	struct qla_nvme_rport *rport;
+	struct nvme_fc_port_info req;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_NVME_FC))
+		return 0;
+
+	if (!vha->flags.nvme_enabled) {
+		ql_log(ql_log_info, vha, 0x2100,
+		    "%s: Not registering target since Host NVME is not enabled\n",
+		    __func__);
+		return 0;
+	}
+
+	if (!vha->nvme_local_port && qla_nvme_register_hba(vha))
+		return 0;
+
+	if (!(fcport->nvme_prli_service_param &
+	    (NVME_PRLI_SP_TARGET | NVME_PRLI_SP_DISCOVERY)) ||
+		(fcport->nvme_flag & NVME_FLAG_REGISTERED))
+		return 0;
+
+	fcport->nvme_flag &= ~NVME_FLAG_RESETTING;
+
+	memset(&req, 0, sizeof(struct nvme_fc_port_info));
+	req.port_name = wwn_to_u64(fcport->port_name);
+	req.node_name = wwn_to_u64(fcport->node_name);
+	req.port_role = 0;
+	req.dev_loss_tmo = fcport->dev_loss_tmo;
+
+	if (fcport->nvme_prli_service_param & NVME_PRLI_SP_INITIATOR)
+		req.port_role = FC_PORT_ROLE_NVME_INITIATOR;
+
+	if (fcport->nvme_prli_service_param & NVME_PRLI_SP_TARGET)
+		req.port_role |= FC_PORT_ROLE_NVME_TARGET;
+
+	if (fcport->nvme_prli_service_param & NVME_PRLI_SP_DISCOVERY)
+		req.port_role |= FC_PORT_ROLE_NVME_DISCOVERY;
+
+	req.port_id = fcport->d_id.b24;
+
+	ql_log(ql_log_info, vha, 0x2102,
+	    "%s: traddr=nn-0x%016llx:pn-0x%016llx PortID:%06x\n",
+	    __func__, req.node_name, req.port_name,
+	    req.port_id);
+
+	ret = nvme_fc_register_remoteport(vha->nvme_local_port, &req,
+	    &fcport->nvme_remote_port);
+	if (ret) {
+		ql_log(ql_log_warn, vha, 0x212e,
+		    "Failed to register remote port. Transport returned %d\n",
+		    ret);
+		return ret;
+	}
+
+	nvme_fc_set_remoteport_devloss(fcport->nvme_remote_port,
+				       fcport->dev_loss_tmo);
+
+	if (fcport->nvme_prli_service_param & NVME_PRLI_SP_SLER)
+		ql_log(ql_log_info, vha, 0x212a,
+		       "PortID:%06x Supports SLER\n", req.port_id);
+
+	if (fcport->nvme_prli_service_param & NVME_PRLI_SP_PI_CTRL)
+		ql_log(ql_log_info, vha, 0x212b,
+		       "PortID:%06x Supports PI control\n", req.port_id);
+
+	rport = fcport->nvme_remote_port->private;
+	rport->fcport = fcport;
+
+	fcport->nvme_flag |= NVME_FLAG_REGISTERED;
+	return 0;
+}
+The corrected function: int qla_nvme_register_remote(struct scsi_qla_host *vha, struct fc_port *fcport)
+{
+	struct qla_nvme_rport *rport;
+	struct nvme_fc_port_info req;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_NVME_FC))
+		return 0;
+
+	if (!vha->flags.nvme_enabled) {
+		ql_log(ql_log_info, vha, 0x2100,
+		    "%s: Not registering target since Host NVME is not enabled\n",
+		    __func__);
+		return 0;
+	}
+
+	if (qla_nvme_register_hba(vha))
+		return 0;
+
+	if (!vha->nvme_local_port)
+		return 0;
+
+	if (!(fcport->nvme_prli_service_param &
+	    (NVME_PRLI_SP_TARGET | NVME_PRLI_SP_DISCOVERY)) ||
+		(fcport->nvme_flag & NVME_FLAG_REGISTERED))
+		return 0;
+
+	fcport->nvme_flag &= ~NVME_FLAG_RESETTING;
+
+	memset(&req, 0, sizeof(struct nvme_fc_port_info));
+	req.port_name = wwn_to_u64(fcport->port_name);
+	req.node_name = wwn_to_u64(fcport->node_name);
+	req.port_role = 0;
+	req.dev_loss_tmo = fcport->dev_loss_tmo;
+
+	if (fcport->nvme_prli_service_param & NVME_PRLI_SP_INITIATOR)
+		req.port_role = FC_PORT_ROLE_NVME_INITIATOR;
+
+	if (fcport->nvme_prli_service_param & NVME_PRLI_SP_TARGET)
+		req.port_role |= FC_PORT_ROLE_NVME_TARGET;
+
+	if (fcport->nvme_prli_service_param & NVME_PRLI_SP_DISCOVERY)
+		req.port_role |= FC_PORT_ROLE_NVME_DISCOVERY;
+
+	req.port_id = fcport->d_id.b24;
+
+	ql_log(ql_log_info, vha, 0x2102,
+	    "%s: traddr=nn-0x%016llx:pn-0x%016llx PortID:%06x\n",
+	    __func__, req.node_name, req.port_name,
+	    req.port_id);
+
+	ret = nvme_fc_register_remoteport(vha->nvme_local_port, &req,
+	    &fcport->nvme_remote_port);
+	if (ret) {
+		ql_log(ql_log_warn, vha, 0x212e,
+		    "Failed to register remote port. Transport returned %d\n",
+		    ret);
+		return ret;
+	}
+
+	nvme_fc_set_remoteport_devloss(fcport->nvme_remote_port,
+				       fcport->dev_loss_tmo);
+
+	if (fcport->nvme_prli_service_param & NVME_PRLI_SP_SLER)
+		ql_log(ql_log_info, vha, 0x212a,
+		       "PortID:%06x Supports SLER\n", req.port_id);
+
+	if (fcport->nvme_prli_service_param & NVME_PRLI_SP_PI_CTRL)
+		ql_log(ql_log_info, vha, 0x212b,
+		       "PortID:%06x Supports PI control\n", req.port_id);
+
+	rport = fcport->nvme_remote_port->private;
+	rport->fcport = fcport;
+
+	fcport->nvme_flag |= NVME_FLAG_REGISTERED;
+	return 0;
+}

@@ -1,0 +1,115 @@
+The vulnerable issue: thermal/drivers/mediatek/lvts_thermal: Check NULL ptr on lvts_data
+
+Verify that lvts_data is not NULL before using it.
+
+Signed-off-by: Julien Panis <jpanis@baylibre.com>
+Signed-off-by: Daniel Lezcano <daniel.lezcano@linaro.org>
+Link: https://lore.kernel.org/r/20240502-mtk-thermal-lvts-data-v1-1-65f1b0bfad37@baylibre.com
+The vulnerable function: static int lvts_probe(struct platform_device *pdev)
+{
+	const struct lvts_data *lvts_data;
+	struct lvts_domain *lvts_td;
+	struct device *dev = &pdev->dev;
+	struct resource *res;
+	int irq, ret;
+
+	lvts_td = devm_kzalloc(dev, sizeof(*lvts_td), GFP_KERNEL);
+	if (!lvts_td)
+		return -ENOMEM;
+
+	lvts_data = of_device_get_match_data(dev);
+
+	lvts_td->clk = devm_clk_get_enabled(dev, NULL);
+	if (IS_ERR(lvts_td->clk))
+		return dev_err_probe(dev, PTR_ERR(lvts_td->clk), "Failed to retrieve clock\n");
+
+	res = platform_get_mem_or_io(pdev, 0);
+	if (!res)
+		return dev_err_probe(dev, (-ENXIO), "No IO resource\n");
+
+	lvts_td->base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+	if (IS_ERR(lvts_td->base))
+		return dev_err_probe(dev, PTR_ERR(lvts_td->base), "Failed to map io resource\n");
+
+	lvts_td->reset = devm_reset_control_get_by_index(dev, 0);
+	if (IS_ERR(lvts_td->reset))
+		return dev_err_probe(dev, PTR_ERR(lvts_td->reset), "Failed to get reset control\n");
+
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return irq;
+
+	golden_temp_offset = lvts_data->temp_offset;
+
+	ret = lvts_domain_init(dev, lvts_td, lvts_data);
+	if (ret)
+		return dev_err_probe(dev, ret, "Failed to initialize the lvts domain\n");
+
+	/*
+	 * At this point the LVTS is initialized and enabled. We can
+	 * safely enable the interrupt.
+	 */
+	ret = devm_request_threaded_irq(dev, irq, NULL, lvts_irq_handler,
+					IRQF_ONESHOT, dev_name(dev), lvts_td);
+	if (ret)
+		return dev_err_probe(dev, ret, "Failed to request interrupt\n");
+
+	platform_set_drvdata(pdev, lvts_td);
+
+	return 0;
+}
+The corrected function: static int lvts_probe(struct platform_device *pdev)
+{
+	const struct lvts_data *lvts_data;
+	struct lvts_domain *lvts_td;
+	struct device *dev = &pdev->dev;
+	struct resource *res;
+	int irq, ret;
+
+	lvts_td = devm_kzalloc(dev, sizeof(*lvts_td), GFP_KERNEL);
+	if (!lvts_td)
+		return -ENOMEM;
+
+	lvts_data = of_device_get_match_data(dev);
+	if (!lvts_data)
+		return -ENODEV;
+
+	lvts_td->clk = devm_clk_get_enabled(dev, NULL);
+	if (IS_ERR(lvts_td->clk))
+		return dev_err_probe(dev, PTR_ERR(lvts_td->clk), "Failed to retrieve clock\n");
+
+	res = platform_get_mem_or_io(pdev, 0);
+	if (!res)
+		return dev_err_probe(dev, (-ENXIO), "No IO resource\n");
+
+	lvts_td->base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+	if (IS_ERR(lvts_td->base))
+		return dev_err_probe(dev, PTR_ERR(lvts_td->base), "Failed to map io resource\n");
+
+	lvts_td->reset = devm_reset_control_get_by_index(dev, 0);
+	if (IS_ERR(lvts_td->reset))
+		return dev_err_probe(dev, PTR_ERR(lvts_td->reset), "Failed to get reset control\n");
+
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return irq;
+
+	golden_temp_offset = lvts_data->temp_offset;
+
+	ret = lvts_domain_init(dev, lvts_td, lvts_data);
+	if (ret)
+		return dev_err_probe(dev, ret, "Failed to initialize the lvts domain\n");
+
+	/*
+	 * At this point the LVTS is initialized and enabled. We can
+	 * safely enable the interrupt.
+	 */
+	ret = devm_request_threaded_irq(dev, irq, NULL, lvts_irq_handler,
+					IRQF_ONESHOT, dev_name(dev), lvts_td);
+	if (ret)
+		return dev_err_probe(dev, ret, "Failed to request interrupt\n");
+
+	platform_set_drvdata(pdev, lvts_td);
+
+	return 0;
+}

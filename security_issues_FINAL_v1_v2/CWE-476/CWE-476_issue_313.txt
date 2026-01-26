@@ -1,0 +1,10 @@
+netfilter: nft_inner: validate mandatory meta and payload
+
+Check for mandatory netlink attributes in payload and meta expression
+when used embedded from the inner expression, otherwise NULL pointer
+dereference is possible from userspace.
+
+Fixes: a150d122b6bd ("netfilter: nft_meta: add inner match support")
+Fixes: 3a07327d10a0 ("netfilter: nft_inner: support for inner tunnel header matching")
+Signed-off-by: Davide Ornaghi <d.ornaghi97@gmail.com>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>

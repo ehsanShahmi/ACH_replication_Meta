@@ -1,0 +1,13 @@
+staging: r8188eu: add check for kzalloc
+
+As kzalloc() may return null pointer, it should be better to
+check the return value and return error if fails in order
+to avoid dereference of null pointer.
+Moreover, the return value of rtw_alloc_hwxmits() should also
+be dealt with.
+
+Fixes: 15865124feed ("staging: r8188eu: introduce new core dir for RTL8188eu driver")
+Reviewed-by: Dan Carpenter <dan.carpenter@oracle.com>
+Signed-off-by: Jiasheng Jiang <jiasheng@iscas.ac.cn>
+Link: https://lore.kernel.org/r/20220518075957.514603-1-jiasheng@iscas.ac.cn
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>

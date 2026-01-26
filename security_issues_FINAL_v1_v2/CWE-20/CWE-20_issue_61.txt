@@ -1,0 +1,22 @@
+fix writev regression: pan hanging unkillable and un-straceable
+
+Frederik Himpe reported an unkillable and un-straceable pan process.
+
+Zero length iovecs can go into an infinite loop in writev, because the
+iovec iterator does not always advance over them.
+
+The sequence required to trigger this is not trivial. I think it
+requires that a zero-length iovec be followed by a non-zero-length iovec
+which causes a pagefault in the atomic usercopy. This causes the writev
+code to drop back into single-segment copy mode, which then tries to
+copy the 0 bytes of the zero-length iovec; a zero length copy looks like
+a failure though, so it loops.
+
+Put a test into iov_iter_advance to catch zero-length iovecs. We could
+just put the test in the fallback path, but I feel it is more robust to
+skip over zero-length iovecs throughout the code (iovec iterator may be
+used in filesystems too, so it should be robust).
+
+Signed-off-by: Nick Piggin <npiggin@suse.de>
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>

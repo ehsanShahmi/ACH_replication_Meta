@@ -1,0 +1,401 @@
+The vulnerable issue: atm: idt77252: prevent use after free in dequeue_rx()
+
+We can't dereference "skb" after calling vcc->push() because the skb
+is released.
+
+Fixes: 1da177e4c3f4 ("Linux-2.6.12-rc2")
+Signed-off-by: Dan Carpenter <dan.carpenter@linaro.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: static void
+dequeue_rx(struct idt77252_dev *card, struct rsq_entry *rsqe)
+{
+	struct atm_vcc *vcc;
+	struct sk_buff *skb;
+	struct rx_pool *rpp;
+	struct vc_map *vc;
+	u32 header, vpi, vci;
+	u32 stat;
+	int i;
+
+	stat = le32_to_cpu(rsqe->word_4);
+
+	if (stat & SAR_RSQE_IDLE) {
+		RXPRINTK("%s: message about inactive connection.\n",
+			 card->name);
+		return;
+	}
+
+	skb = sb_pool_skb(card, le32_to_cpu(rsqe->word_2));
+	if (skb == NULL) {
+		printk("%s: NULL skb in %s, rsqe: %08x %08x %08x %08x\n",
+		       card->name, __func__,
+		       le32_to_cpu(rsqe->word_1), le32_to_cpu(rsqe->word_2),
+		       le32_to_cpu(rsqe->word_3), le32_to_cpu(rsqe->word_4));
+		return;
+	}
+
+	header = le32_to_cpu(rsqe->word_1);
+	vpi = (header >> 16) & 0x00ff;
+	vci = (header >>  0) & 0xffff;
+
+	RXPRINTK("%s: SDU for %d.%d received in buffer 0x%p (data 0x%p).\n",
+		 card->name, vpi, vci, skb, skb->data);
+
+	if ((vpi >= (1 << card->vpibits)) || (vci != (vci & card->vcimask))) {
+		printk("%s: SDU received for out-of-range vc %u.%u\n",
+		       card->name, vpi, vci);
+		recycle_rx_skb(card, skb);
+		return;
+	}
+
+	vc = card->vcs[VPCI2VC(card, vpi, vci)];
+	if (!vc || !test_bit(VCF_RX, &vc->flags)) {
+		printk("%s: SDU received on non RX vc %u.%u\n",
+		       card->name, vpi, vci);
+		recycle_rx_skb(card, skb);
+		return;
+	}
+
+	vcc = vc->rx_vcc;
+
+	dma_sync_single_for_cpu(&card->pcidev->dev, IDT77252_PRV_PADDR(skb),
+				skb_end_pointer(skb) - skb->data,
+				DMA_FROM_DEVICE);
+
+	if ((vcc->qos.aal == ATM_AAL0) ||
+	    (vcc->qos.aal == ATM_AAL34)) {
+		struct sk_buff *sb;
+		unsigned char *cell;
+		u32 aal0;
+
+		cell = skb->data;
+		for (i = (stat & SAR_RSQE_CELLCNT); i; i--) {
+			if ((sb = dev_alloc_skb(64)) == NULL) {
+				printk("%s: Can't allocate buffers for aal0.\n",
+				       card->name);
+				atomic_add(i, &vcc->stats->rx_drop);
+				break;
+			}
+			if (!atm_charge(vcc, sb->truesize)) {
+				RXPRINTK("%s: atm_charge() dropped aal0 packets.\n",
+					 card->name);
+				atomic_add(i - 1, &vcc->stats->rx_drop);
+				dev_kfree_skb(sb);
+				break;
+			}
+			aal0 = (vpi << ATM_HDR_VPI_SHIFT) |
+			       (vci << ATM_HDR_VCI_SHIFT);
+			aal0 |= (stat & SAR_RSQE_EPDU) ? 0x00000002 : 0;
+			aal0 |= (stat & SAR_RSQE_CLP)  ? 0x00000001 : 0;
+
+			*((u32 *) sb->data) = aal0;
+			skb_put(sb, sizeof(u32));
+			skb_put_data(sb, cell, ATM_CELL_PAYLOAD);
+
+			ATM_SKB(sb)->vcc = vcc;
+			__net_timestamp(sb);
+			vcc->push(vcc, sb);
+			atomic_inc(&vcc->stats->rx);
+
+			cell += ATM_CELL_PAYLOAD;
+		}
+
+		recycle_rx_skb(card, skb);
+		return;
+	}
+	if (vcc->qos.aal != ATM_AAL5) {
+		printk("%s: Unexpected AAL type in dequeue_rx(): %d.\n",
+		       card->name, vcc->qos.aal);
+		recycle_rx_skb(card, skb);
+		return;
+	}
+	skb->len = (stat & SAR_RSQE_CELLCNT) * ATM_CELL_PAYLOAD;
+
+	rpp = &vc->rcv.rx_pool;
+
+	__skb_queue_tail(&rpp->queue, skb);
+	rpp->len += skb->len;
+
+	if (stat & SAR_RSQE_EPDU) {
+		unsigned char *l1l2;
+		unsigned int len;
+
+		l1l2 = (unsigned char *) ((unsigned long) skb->data + skb->len - 6);
+
+		len = (l1l2[0] << 8) | l1l2[1];
+		len = len ? len : 0x10000;
+
+		RXPRINTK("%s: PDU has %d bytes.\n", card->name, len);
+
+		if ((len + 8 > rpp->len) || (len + (47 + 8) < rpp->len)) {
+			RXPRINTK("%s: AAL5 PDU size mismatch: %d != %d. "
+			         "(CDC: %08x)\n",
+			         card->name, len, rpp->len, readl(SAR_REG_CDC));
+			recycle_rx_pool_skb(card, rpp);
+			atomic_inc(&vcc->stats->rx_err);
+			return;
+		}
+		if (stat & SAR_RSQE_CRC) {
+			RXPRINTK("%s: AAL5 CRC error.\n", card->name);
+			recycle_rx_pool_skb(card, rpp);
+			atomic_inc(&vcc->stats->rx_err);
+			return;
+		}
+		if (skb_queue_len(&rpp->queue) > 1) {
+			struct sk_buff *sb;
+
+			skb = dev_alloc_skb(rpp->len);
+			if (!skb) {
+				RXPRINTK("%s: Can't alloc RX skb.\n",
+					 card->name);
+				recycle_rx_pool_skb(card, rpp);
+				atomic_inc(&vcc->stats->rx_err);
+				return;
+			}
+			if (!atm_charge(vcc, skb->truesize)) {
+				recycle_rx_pool_skb(card, rpp);
+				dev_kfree_skb(skb);
+				return;
+			}
+			skb_queue_walk(&rpp->queue, sb)
+				skb_put_data(skb, sb->data, sb->len);
+
+			recycle_rx_pool_skb(card, rpp);
+
+			skb_trim(skb, len);
+			ATM_SKB(skb)->vcc = vcc;
+			__net_timestamp(skb);
+
+			vcc->push(vcc, skb);
+			atomic_inc(&vcc->stats->rx);
+
+			return;
+		}
+
+		flush_rx_pool(card, rpp);
+
+		if (!atm_charge(vcc, skb->truesize)) {
+			recycle_rx_skb(card, skb);
+			return;
+		}
+
+		dma_unmap_single(&card->pcidev->dev, IDT77252_PRV_PADDR(skb),
+				 skb_end_pointer(skb) - skb->data,
+				 DMA_FROM_DEVICE);
+		sb_pool_remove(card, skb);
+
+		skb_trim(skb, len);
+		ATM_SKB(skb)->vcc = vcc;
+		__net_timestamp(skb);
+
+		vcc->push(vcc, skb);
+		atomic_inc(&vcc->stats->rx);
+
+		if (skb->truesize > SAR_FB_SIZE_3)
+			add_rx_skb(card, 3, SAR_FB_SIZE_3, 1);
+		else if (skb->truesize > SAR_FB_SIZE_2)
+			add_rx_skb(card, 2, SAR_FB_SIZE_2, 1);
+		else if (skb->truesize > SAR_FB_SIZE_1)
+			add_rx_skb(card, 1, SAR_FB_SIZE_1, 1);
+		else
+			add_rx_skb(card, 0, SAR_FB_SIZE_0, 1);
+		return;
+	}
+}
+The corrected function: static void
+dequeue_rx(struct idt77252_dev *card, struct rsq_entry *rsqe)
+{
+	struct atm_vcc *vcc;
+	struct sk_buff *skb;
+	struct rx_pool *rpp;
+	struct vc_map *vc;
+	u32 header, vpi, vci;
+	u32 stat;
+	int i;
+
+	stat = le32_to_cpu(rsqe->word_4);
+
+	if (stat & SAR_RSQE_IDLE) {
+		RXPRINTK("%s: message about inactive connection.\n",
+			 card->name);
+		return;
+	}
+
+	skb = sb_pool_skb(card, le32_to_cpu(rsqe->word_2));
+	if (skb == NULL) {
+		printk("%s: NULL skb in %s, rsqe: %08x %08x %08x %08x\n",
+		       card->name, __func__,
+		       le32_to_cpu(rsqe->word_1), le32_to_cpu(rsqe->word_2),
+		       le32_to_cpu(rsqe->word_3), le32_to_cpu(rsqe->word_4));
+		return;
+	}
+
+	header = le32_to_cpu(rsqe->word_1);
+	vpi = (header >> 16) & 0x00ff;
+	vci = (header >>  0) & 0xffff;
+
+	RXPRINTK("%s: SDU for %d.%d received in buffer 0x%p (data 0x%p).\n",
+		 card->name, vpi, vci, skb, skb->data);
+
+	if ((vpi >= (1 << card->vpibits)) || (vci != (vci & card->vcimask))) {
+		printk("%s: SDU received for out-of-range vc %u.%u\n",
+		       card->name, vpi, vci);
+		recycle_rx_skb(card, skb);
+		return;
+	}
+
+	vc = card->vcs[VPCI2VC(card, vpi, vci)];
+	if (!vc || !test_bit(VCF_RX, &vc->flags)) {
+		printk("%s: SDU received on non RX vc %u.%u\n",
+		       card->name, vpi, vci);
+		recycle_rx_skb(card, skb);
+		return;
+	}
+
+	vcc = vc->rx_vcc;
+
+	dma_sync_single_for_cpu(&card->pcidev->dev, IDT77252_PRV_PADDR(skb),
+				skb_end_pointer(skb) - skb->data,
+				DMA_FROM_DEVICE);
+
+	if ((vcc->qos.aal == ATM_AAL0) ||
+	    (vcc->qos.aal == ATM_AAL34)) {
+		struct sk_buff *sb;
+		unsigned char *cell;
+		u32 aal0;
+
+		cell = skb->data;
+		for (i = (stat & SAR_RSQE_CELLCNT); i; i--) {
+			if ((sb = dev_alloc_skb(64)) == NULL) {
+				printk("%s: Can't allocate buffers for aal0.\n",
+				       card->name);
+				atomic_add(i, &vcc->stats->rx_drop);
+				break;
+			}
+			if (!atm_charge(vcc, sb->truesize)) {
+				RXPRINTK("%s: atm_charge() dropped aal0 packets.\n",
+					 card->name);
+				atomic_add(i - 1, &vcc->stats->rx_drop);
+				dev_kfree_skb(sb);
+				break;
+			}
+			aal0 = (vpi << ATM_HDR_VPI_SHIFT) |
+			       (vci << ATM_HDR_VCI_SHIFT);
+			aal0 |= (stat & SAR_RSQE_EPDU) ? 0x00000002 : 0;
+			aal0 |= (stat & SAR_RSQE_CLP)  ? 0x00000001 : 0;
+
+			*((u32 *) sb->data) = aal0;
+			skb_put(sb, sizeof(u32));
+			skb_put_data(sb, cell, ATM_CELL_PAYLOAD);
+
+			ATM_SKB(sb)->vcc = vcc;
+			__net_timestamp(sb);
+			vcc->push(vcc, sb);
+			atomic_inc(&vcc->stats->rx);
+
+			cell += ATM_CELL_PAYLOAD;
+		}
+
+		recycle_rx_skb(card, skb);
+		return;
+	}
+	if (vcc->qos.aal != ATM_AAL5) {
+		printk("%s: Unexpected AAL type in dequeue_rx(): %d.\n",
+		       card->name, vcc->qos.aal);
+		recycle_rx_skb(card, skb);
+		return;
+	}
+	skb->len = (stat & SAR_RSQE_CELLCNT) * ATM_CELL_PAYLOAD;
+
+	rpp = &vc->rcv.rx_pool;
+
+	__skb_queue_tail(&rpp->queue, skb);
+	rpp->len += skb->len;
+
+	if (stat & SAR_RSQE_EPDU) {
+		unsigned int len, truesize;
+		unsigned char *l1l2;
+
+		l1l2 = (unsigned char *) ((unsigned long) skb->data + skb->len - 6);
+
+		len = (l1l2[0] << 8) | l1l2[1];
+		len = len ? len : 0x10000;
+
+		RXPRINTK("%s: PDU has %d bytes.\n", card->name, len);
+
+		if ((len + 8 > rpp->len) || (len + (47 + 8) < rpp->len)) {
+			RXPRINTK("%s: AAL5 PDU size mismatch: %d != %d. "
+			         "(CDC: %08x)\n",
+			         card->name, len, rpp->len, readl(SAR_REG_CDC));
+			recycle_rx_pool_skb(card, rpp);
+			atomic_inc(&vcc->stats->rx_err);
+			return;
+		}
+		if (stat & SAR_RSQE_CRC) {
+			RXPRINTK("%s: AAL5 CRC error.\n", card->name);
+			recycle_rx_pool_skb(card, rpp);
+			atomic_inc(&vcc->stats->rx_err);
+			return;
+		}
+		if (skb_queue_len(&rpp->queue) > 1) {
+			struct sk_buff *sb;
+
+			skb = dev_alloc_skb(rpp->len);
+			if (!skb) {
+				RXPRINTK("%s: Can't alloc RX skb.\n",
+					 card->name);
+				recycle_rx_pool_skb(card, rpp);
+				atomic_inc(&vcc->stats->rx_err);
+				return;
+			}
+			if (!atm_charge(vcc, skb->truesize)) {
+				recycle_rx_pool_skb(card, rpp);
+				dev_kfree_skb(skb);
+				return;
+			}
+			skb_queue_walk(&rpp->queue, sb)
+				skb_put_data(skb, sb->data, sb->len);
+
+			recycle_rx_pool_skb(card, rpp);
+
+			skb_trim(skb, len);
+			ATM_SKB(skb)->vcc = vcc;
+			__net_timestamp(skb);
+
+			vcc->push(vcc, skb);
+			atomic_inc(&vcc->stats->rx);
+
+			return;
+		}
+
+		flush_rx_pool(card, rpp);
+
+		if (!atm_charge(vcc, skb->truesize)) {
+			recycle_rx_skb(card, skb);
+			return;
+		}
+
+		dma_unmap_single(&card->pcidev->dev, IDT77252_PRV_PADDR(skb),
+				 skb_end_pointer(skb) - skb->data,
+				 DMA_FROM_DEVICE);
+		sb_pool_remove(card, skb);
+
+		skb_trim(skb, len);
+		ATM_SKB(skb)->vcc = vcc;
+		__net_timestamp(skb);
+
+		truesize = skb->truesize;
+		vcc->push(vcc, skb);
+		atomic_inc(&vcc->stats->rx);
+
+		if (truesize > SAR_FB_SIZE_3)
+			add_rx_skb(card, 3, SAR_FB_SIZE_3, 1);
+		else if (truesize > SAR_FB_SIZE_2)
+			add_rx_skb(card, 2, SAR_FB_SIZE_2, 1);
+		else if (truesize > SAR_FB_SIZE_1)
+			add_rx_skb(card, 1, SAR_FB_SIZE_1, 1);
+		else
+			add_rx_skb(card, 0, SAR_FB_SIZE_0, 1);
+		return;
+	}
+}

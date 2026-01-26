@@ -1,0 +1,13 @@
+tty: serial: ma35d1: Add a NULL check for of_node
+
+The pdev->dev.of_node can be NULL if the "serial" node is absent.
+Add a NULL check to return an error in such cases.
+
+Fixes: 930cbf92db01 ("tty: serial: Add Nuvoton ma35d1 serial driver support")
+Reported-by: Dan Carpenter <dan.carpenter@linaro.org>
+Closes: https://lore.kernel.org/all/8df7ce45-fd58-4235-88f7-43fe7cd67e8f@moroto.mountain/
+Signed-off-by: Jacky Huang <ychuang3@nuvoton.com>
+Reviewed-by: Dan Carpenter <dan.carpenter@linaro.org>
+Cc: stable <stable@kernel.org>
+Link: https://lore.kernel.org/r/20240625064128.127-1-ychuang570808@gmail.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>

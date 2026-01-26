@@ -1,0 +1,14 @@
+ALSA: hda: cs35l41: Possible null pointer dereference in cs35l41_hda_unbind()
+
+The cs35l41_hda_unbind() function clears the hda_component entry
+matching it's index and then dereferences the codec pointer held in the
+first element of the hda_component array, this is an issue when the
+device index was 0.
+
+Instead use the codec pointer stashed in the cs35l41_hda structure as it
+will still be valid.
+
+Fixes: 7cf5ce66dfda ("ALSA: hda: cs35l41: Add device_link between HDA and cs35l41_hda")
+Signed-off-by: Simon Trimmer <simont@opensource.cirrus.com>
+Link: https://lore.kernel.org/r/20240531120820.35367-1-simont@opensource.cirrus.com
+Signed-off-by: Takashi Iwai <tiwai@suse.de>

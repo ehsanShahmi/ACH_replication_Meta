@@ -1,0 +1,21 @@
+Prevent rt_sigqueueinfo and rt_tgsigqueueinfo from spoofing the signal code
+
+Userland should be able to trust the pid and uid of the sender of a
+signal if the si_code is SI_TKILL.
+
+Unfortunately, the kernel has historically allowed sigqueueinfo() to
+send any si_code at all (as long as it was negative - to distinguish it
+from kernel-generated signals like SIGILL etc), so it could spoof a
+SI_TKILL with incorrect siginfo values.
+
+Happily, it looks like glibc has always set si_code to the appropriate
+SI_QUEUE, so there are probably no actual user code that ever uses
+anything but the appropriate SI_QUEUE flag.
+
+So just tighten the check for si_code (we used to allow any negative
+value), and add a (one-time) warning in case there are binaries out
+there that might depend on using other si_code values.
+
+Signed-off-by: Julien Tinnes <jln@google.com>
+Acked-by: Oleg Nesterov <oleg@redhat.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>

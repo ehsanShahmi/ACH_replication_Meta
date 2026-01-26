@@ -1,0 +1,10 @@
+nfsd: call cache_put if xdr_reserve_space returns NULL
+
+If not enough buffer space available, but idmap_lookup has triggered
+lookup_fn which calls cache_get and returns successfully. Then we
+missed to call cache_put here which pairs with cache_get.
+
+Fixes: ddd1ea563672 ("nfsd4: use xdr_reserve_space in attribute encoding")
+Signed-off-by: Guoqing Jiang <guoqing.jiang@linux.dev>
+Reviwed-by: Jeff Layton <jlayton@kernel.org>
+Signed-off-by: Chuck Lever <chuck.lever@oracle.com>

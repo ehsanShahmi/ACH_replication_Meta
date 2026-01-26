@@ -1,0 +1,268 @@
+The vulnerable issue: media: ov519: add missing endpoint sanity checks
+
+Make sure to check that we have at least one endpoint before accessing
+the endpoint array to avoid dereferencing a NULL-pointer on stream
+start.
+
+Note that these sanity checks are not redundant as the driver is mixing
+looking up altsettings by index and by number, which need not coincide.
+
+Fixes: 1876bb923c98 ("V4L/DVB (12079): gspca_ov519: add support for the ov511 bridge")
+Fixes: b282d87332f5 ("V4L/DVB (12080): gspca_ov519: Fix ov518+ with OV7620AE (Trust spacecam 320)")
+Cc: stable <stable@vger.kernel.org>     # 2.6.31
+Cc: Hans de Goede <hdegoede@redhat.com>
+Signed-off-by: Johan Hovold <johan@kernel.org>
+Signed-off-by: Hans Verkuil <hverkuil-cisco@xs4all.nl>
+Signed-off-by: Mauro Carvalho Chehab <mchehab+huawei@kernel.org>
+The vulnerable function: static void ov511_mode_init_regs(struct sd *sd)
+{
+	struct gspca_dev *gspca_dev = (struct gspca_dev *)sd;
+	int hsegs, vsegs, packet_size, fps, needed;
+	int interlaced = 0;
+	struct usb_host_interface *alt;
+	struct usb_interface *intf;
+
+	intf = usb_ifnum_to_if(sd->gspca_dev.dev, sd->gspca_dev.iface);
+	alt = usb_altnum_to_altsetting(intf, sd->gspca_dev.alt);
+	if (!alt) {
+		gspca_err(gspca_dev, "Couldn't get altsetting\n");
+		sd->gspca_dev.usb_err = -EIO;
+		return;
+	}
+
+	packet_size = le16_to_cpu(alt->endpoint[0].desc.wMaxPacketSize);
+	reg_w(sd, R51x_FIFO_PSIZE, packet_size >> 5);
+
+	reg_w(sd, R511_CAM_UV_EN, 0x01);
+	reg_w(sd, R511_SNAP_UV_EN, 0x01);
+	reg_w(sd, R511_SNAP_OPTS, 0x03);
+
+	/* Here I'm assuming that snapshot size == image size.
+	 * I hope that's always true. --claudio
+	 */
+	hsegs = (sd->gspca_dev.pixfmt.width >> 3) - 1;
+	vsegs = (sd->gspca_dev.pixfmt.height >> 3) - 1;
+
+	reg_w(sd, R511_CAM_PXCNT, hsegs);
+	reg_w(sd, R511_CAM_LNCNT, vsegs);
+	reg_w(sd, R511_CAM_PXDIV, 0x00);
+	reg_w(sd, R511_CAM_LNDIV, 0x00);
+
+	/* YUV420, low pass filter on */
+	reg_w(sd, R511_CAM_OPTS, 0x03);
+
+	/* Snapshot additions */
+	reg_w(sd, R511_SNAP_PXCNT, hsegs);
+	reg_w(sd, R511_SNAP_LNCNT, vsegs);
+	reg_w(sd, R511_SNAP_PXDIV, 0x00);
+	reg_w(sd, R511_SNAP_LNDIV, 0x00);
+
+	/******** Set the framerate ********/
+	if (frame_rate > 0)
+		sd->frame_rate = frame_rate;
+
+	switch (sd->sensor) {
+	case SEN_OV6620:
+		/* No framerate control, doesn't like higher rates yet */
+		sd->clockdiv = 3;
+		break;
+
+	/* Note once the FIXME's in mode_init_ov_sensor_regs() are fixed
+	   for more sensors we need to do this for them too */
+	case SEN_OV7620:
+	case SEN_OV7620AE:
+	case SEN_OV7640:
+	case SEN_OV7648:
+	case SEN_OV76BE:
+		if (sd->gspca_dev.pixfmt.width == 320)
+			interlaced = 1;
+		/* Fall through */
+	case SEN_OV6630:
+	case SEN_OV7610:
+	case SEN_OV7670:
+		switch (sd->frame_rate) {
+		case 30:
+		case 25:
+			/* Not enough bandwidth to do 640x480 @ 30 fps */
+			if (sd->gspca_dev.pixfmt.width != 640) {
+				sd->clockdiv = 0;
+				break;
+			}
+			/* For 640x480 case */
+			/* fall through */
+		default:
+/*		case 20: */
+/*		case 15: */
+			sd->clockdiv = 1;
+			break;
+		case 10:
+			sd->clockdiv = 2;
+			break;
+		case 5:
+			sd->clockdiv = 5;
+			break;
+		}
+		if (interlaced) {
+			sd->clockdiv = (sd->clockdiv + 1) * 2 - 1;
+			/* Higher then 10 does not work */
+			if (sd->clockdiv > 10)
+				sd->clockdiv = 10;
+		}
+		break;
+
+	case SEN_OV8610:
+		/* No framerate control ?? */
+		sd->clockdiv = 0;
+		break;
+	}
+
+	/* Check if we have enough bandwidth to disable compression */
+	fps = (interlaced ? 60 : 30) / (sd->clockdiv + 1) + 1;
+	needed = fps * sd->gspca_dev.pixfmt.width *
+			sd->gspca_dev.pixfmt.height * 3 / 2;
+	/* 1000 isoc packets/sec */
+	if (needed > 1000 * packet_size) {
+		/* Enable Y and UV quantization and compression */
+		reg_w(sd, R511_COMP_EN, 0x07);
+		reg_w(sd, R511_COMP_LUT_EN, 0x03);
+	} else {
+		reg_w(sd, R511_COMP_EN, 0x06);
+		reg_w(sd, R511_COMP_LUT_EN, 0x00);
+	}
+
+	reg_w(sd, R51x_SYS_RESET, OV511_RESET_OMNICE);
+	reg_w(sd, R51x_SYS_RESET, 0);
+}
+The corrected function: static void ov518_mode_init_regs(struct sd *sd)
+{
+	struct gspca_dev *gspca_dev = (struct gspca_dev *)sd;
+	int hsegs, vsegs, packet_size;
+	struct usb_host_interface *alt;
+	struct usb_interface *intf;
+
+	intf = usb_ifnum_to_if(sd->gspca_dev.dev, sd->gspca_dev.iface);
+	alt = usb_altnum_to_altsetting(intf, sd->gspca_dev.alt);
+	if (!alt) {
+		gspca_err(gspca_dev, "Couldn't get altsetting\n");
+		sd->gspca_dev.usb_err = -EIO;
+		return;
+	}
+
+	packet_size = le16_to_cpu(alt->endpoint[0].desc.wMaxPacketSize);
+	ov518_reg_w32(sd, R51x_FIFO_PSIZE, packet_size & ~7, 2);
+
+	/******** Set the mode ********/
+	reg_w(sd, 0x2b, 0);
+	reg_w(sd, 0x2c, 0);
+	reg_w(sd, 0x2d, 0);
+	reg_w(sd, 0x2e, 0);
+	reg_w(sd, 0x3b, 0);
+	reg_w(sd, 0x3c, 0);
+	reg_w(sd, 0x3d, 0);
+	reg_w(sd, 0x3e, 0);
+
+	if (sd->bridge == BRIDGE_OV518) {
+		/* Set 8-bit (YVYU) input format */
+		reg_w_mask(sd, 0x20, 0x08, 0x08);
+
+		/* Set 12-bit (4:2:0) output format */
+		reg_w_mask(sd, 0x28, 0x80, 0xf0);
+		reg_w_mask(sd, 0x38, 0x80, 0xf0);
+	} else {
+		reg_w(sd, 0x28, 0x80);
+		reg_w(sd, 0x38, 0x80);
+	}
+
+	hsegs = sd->gspca_dev.pixfmt.width / 16;
+	vsegs = sd->gspca_dev.pixfmt.height / 4;
+
+	reg_w(sd, 0x29, hsegs);
+	reg_w(sd, 0x2a, vsegs);
+
+	reg_w(sd, 0x39, hsegs);
+	reg_w(sd, 0x3a, vsegs);
+
+	/* Windows driver does this here; who knows why */
+	reg_w(sd, 0x2f, 0x80);
+
+	/******** Set the framerate ********/
+	if (sd->bridge == BRIDGE_OV518PLUS && sd->revision == 0 &&
+					      sd->sensor == SEN_OV7620AE)
+		sd->clockdiv = 0;
+	else
+		sd->clockdiv = 1;
+
+	/* Mode independent, but framerate dependent, regs */
+	/* 0x51: Clock divider; Only works on some cams which use 2 crystals */
+	reg_w(sd, 0x51, 0x04);
+	reg_w(sd, 0x22, 0x18);
+	reg_w(sd, 0x23, 0xff);
+
+	if (sd->bridge == BRIDGE_OV518PLUS) {
+		switch (sd->sensor) {
+		case SEN_OV7620AE:
+			/*
+			 * HdG: 640x480 needs special handling on device
+			 * revision 2, we check for device revision > 0 to
+			 * avoid regressions, as we don't know the correct
+			 * thing todo for revision 1.
+			 *
+			 * Also this likely means we don't need to
+			 * differentiate between the OV7620 and OV7620AE,
+			 * earlier testing hitting this same problem likely
+			 * happened to be with revision < 2 cams using an
+			 * OV7620 and revision 2 cams using an OV7620AE.
+			 */
+			if (sd->revision > 0 &&
+					sd->gspca_dev.pixfmt.width == 640) {
+				reg_w(sd, 0x20, 0x60);
+				reg_w(sd, 0x21, 0x1f);
+			} else {
+				reg_w(sd, 0x20, 0x00);
+				reg_w(sd, 0x21, 0x19);
+			}
+			break;
+		case SEN_OV7620:
+			reg_w(sd, 0x20, 0x00);
+			reg_w(sd, 0x21, 0x19);
+			break;
+		default:
+			reg_w(sd, 0x21, 0x19);
+		}
+	} else
+		reg_w(sd, 0x71, 0x17);	/* Compression-related? */
+
+	/* FIXME: Sensor-specific */
+	/* Bit 5 is what matters here. Of course, it is "reserved" */
+	i2c_w(sd, 0x54, 0x23);
+
+	reg_w(sd, 0x2f, 0x80);
+
+	if (sd->bridge == BRIDGE_OV518PLUS) {
+		reg_w(sd, 0x24, 0x94);
+		reg_w(sd, 0x25, 0x90);
+		ov518_reg_w32(sd, 0xc4,    400, 2);	/* 190h   */
+		ov518_reg_w32(sd, 0xc6,    540, 2);	/* 21ch   */
+		ov518_reg_w32(sd, 0xc7,    540, 2);	/* 21ch   */
+		ov518_reg_w32(sd, 0xc8,    108, 2);	/* 6ch    */
+		ov518_reg_w32(sd, 0xca, 131098, 3);	/* 2001ah */
+		ov518_reg_w32(sd, 0xcb,    532, 2);	/* 214h   */
+		ov518_reg_w32(sd, 0xcc,   2400, 2);	/* 960h   */
+		ov518_reg_w32(sd, 0xcd,     32, 2);	/* 20h    */
+		ov518_reg_w32(sd, 0xce,    608, 2);	/* 260h   */
+	} else {
+		reg_w(sd, 0x24, 0x9f);
+		reg_w(sd, 0x25, 0x90);
+		ov518_reg_w32(sd, 0xc4,    400, 2);	/* 190h   */
+		ov518_reg_w32(sd, 0xc6,    381, 2);	/* 17dh   */
+		ov518_reg_w32(sd, 0xc7,    381, 2);	/* 17dh   */
+		ov518_reg_w32(sd, 0xc8,    128, 2);	/* 80h    */
+		ov518_reg_w32(sd, 0xca, 183331, 3);	/* 2cc23h */
+		ov518_reg_w32(sd, 0xcb,    746, 2);	/* 2eah   */
+		ov518_reg_w32(sd, 0xcc,   1750, 2);	/* 6d6h   */
+		ov518_reg_w32(sd, 0xcd,     45, 2);	/* 2dh    */
+		ov518_reg_w32(sd, 0xce,    851, 2);	/* 353h   */
+	}
+
+	reg_w(sd, 0x2f, 0x80);
+}

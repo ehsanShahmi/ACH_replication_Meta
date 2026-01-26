@@ -1,0 +1,9 @@
+drm/amd/display: Add NULL pointer check for kzalloc
+
+[Why & How]
+Check return pointer of kzalloc before using it.
+
+Reviewed-by: Alex Hung <alex.hung@amd.com>
+Acked-by: Wayne Lin <wayne.lin@amd.com>
+Signed-off-by: Hersen Wu <hersenxs.wu@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>

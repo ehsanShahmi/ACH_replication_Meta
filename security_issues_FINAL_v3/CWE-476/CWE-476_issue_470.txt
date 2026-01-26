@@ -1,0 +1,32 @@
+The vulnerable issue: crypto: rng - Remove old low-level rng interface
+
+Now that all rng implementations have switched over to the new
+interface, we can remove the old low-level interface.
+
+Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+The vulnerable function: static int generate(struct crypto_rng *tfm, const u8 *src, unsigned int slen,
+		    u8 *dst, unsigned int dlen)
+{
+	return crypto_old_rng_alg(tfm)->rng_make_random(tfm, dst, dlen);
+}
+The corrected function: static int rngapi_reset(struct crypto_rng *tfm, const u8 *seed,
+			unsigned int slen)
+{
+	u8 *buf = NULL;
+	u8 *src = (u8 *)seed;
+	int err;
+
+	if (slen) {
+		buf = kmalloc(slen, GFP_KERNEL);
+		if (!buf)
+			return -ENOMEM;
+
+		memcpy(buf, seed, slen);
+		src = buf;
+	}
+
+	err = crypto_old_rng_alg(tfm)->rng_reset(tfm, src, slen);
+
+	kzfree(buf);
+	return err;
+}

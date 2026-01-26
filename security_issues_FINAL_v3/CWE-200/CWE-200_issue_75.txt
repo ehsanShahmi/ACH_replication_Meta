@@ -1,0 +1,58 @@
+The vulnerable issue: cdrom: fix improper type cast, which can leat to information leak.
+
+There is another cast from unsigned long to int which causes
+a bounds check to fail with specially crafted input. The value is
+then used as an index in the slot array in cdrom_slot_status().
+
+This issue is similar to CVE-2018-16658 and CVE-2018-10940.
+
+Signed-off-by: Young_X <YangX92@hotmail.com>
+Signed-off-by: Jens Axboe <axboe@kernel.dk>
+The vulnerable function: static int cdrom_ioctl_select_disc(struct cdrom_device_info *cdi,
+		unsigned long arg)
+{
+	cd_dbg(CD_DO_IOCTL, "entering CDROM_SELECT_DISC\n");
+
+	if (!CDROM_CAN(CDC_SELECT_DISC))
+ 		return -ENOSYS;
+ 
+ 	if (arg != CDSL_CURRENT && arg != CDSL_NONE) {
+		if ((int)arg >= cdi->capacity)
+ 			return -EINVAL;
+ 	}
+ 
+	/*
+	 * ->select_disc is a hook to allow a driver-specific way of
+	 * seleting disc.  However, since there is no equivalent hook for
+	 * cdrom_slot_status this may not actually be useful...
+	 */
+	if (cdi->ops->select_disc)
+		return cdi->ops->select_disc(cdi, arg);
+
+	cd_dbg(CD_CHANGER, "Using generic cdrom_select_disc()\n");
+	return cdrom_select_disc(cdi, arg);
+}
+The corrected function: static int cdrom_ioctl_select_disc(struct cdrom_device_info *cdi,
+		unsigned long arg)
+{
+	cd_dbg(CD_DO_IOCTL, "entering CDROM_SELECT_DISC\n");
+
+	if (!CDROM_CAN(CDC_SELECT_DISC))
+ 		return -ENOSYS;
+ 
+ 	if (arg != CDSL_CURRENT && arg != CDSL_NONE) {
+		if (arg >= cdi->capacity)
+ 			return -EINVAL;
+ 	}
+ 
+	/*
+	 * ->select_disc is a hook to allow a driver-specific way of
+	 * seleting disc.  However, since there is no equivalent hook for
+	 * cdrom_slot_status this may not actually be useful...
+	 */
+	if (cdi->ops->select_disc)
+		return cdi->ops->select_disc(cdi, arg);
+
+	cd_dbg(CD_CHANGER, "Using generic cdrom_select_disc()\n");
+	return cdrom_select_disc(cdi, arg);
+}

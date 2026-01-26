@@ -1,0 +1,15 @@
+net/dpaa2: Avoid explicit cpumask var allocation on stack
+
+For CONFIG_CPUMASK_OFFSTACK=y kernel, explicit allocation of cpumask
+variable on stack is not recommended since it can cause potential stack
+overflow.
+
+Instead, kernel code should always use *cpumask_var API(s) to allocate
+cpumask var in config-neutral way, leaving allocation strategy to
+CONFIG_CPUMASK_OFFSTACK.
+
+Use *cpumask_var API(s) to address it.
+
+Signed-off-by: Dawei Li <dawei.li@shingroup.cn>
+Link: https://lore.kernel.org/r/20240331053441.1276826-3-dawei.li@shingroup.cn
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>

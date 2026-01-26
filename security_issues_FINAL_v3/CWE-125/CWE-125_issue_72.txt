@@ -1,0 +1,310 @@
+The vulnerable issue: ksmbd: prevent out of bound read for SMB2_WRITE
+
+OOB read memory can be written to a file,
+if DataOffset is 0 and Length is too large
+in SMB2_WRITE request of compound request.
+
+To prevent this, when checking the length of
+the data area of SMB2_WRITE in smb2_get_data_area_len(),
+let the minimum of DataOffset be the size of
+SMB2 header + the size of SMB2_WRITE header.
+
+This bug can lead an oops looking something like:
+
+[  798.008715] BUG: KASAN: slab-out-of-bounds in copy_page_from_iter_atomic+0xd3d/0x14b0
+[  798.008724] Read of size 252 at addr ffff88800f863e90 by task kworker/0:2/2859
+...
+[  798.008754] Call Trace:
+[  798.008756]  <TASK>
+[  798.008759]  dump_stack_lvl+0x49/0x5f
+[  798.008764]  print_report.cold+0x5e/0x5cf
+[  798.008768]  ? __filemap_get_folio+0x285/0x6d0
+[  798.008774]  ? copy_page_from_iter_atomic+0xd3d/0x14b0
+[  798.008777]  kasan_report+0xaa/0x120
+[  798.008781]  ? copy_page_from_iter_atomic+0xd3d/0x14b0
+[  798.008784]  kasan_check_range+0x100/0x1e0
+[  798.008788]  memcpy+0x24/0x60
+[  798.008792]  copy_page_from_iter_atomic+0xd3d/0x14b0
+[  798.008795]  ? pagecache_get_page+0x53/0x160
+[  798.008799]  ? iov_iter_get_pages_alloc+0x1590/0x1590
+[  798.008803]  ? ext4_write_begin+0xfc0/0xfc0
+[  798.008807]  ? current_time+0x72/0x210
+[  798.008811]  generic_perform_write+0x2c8/0x530
+[  798.008816]  ? filemap_fdatawrite_wbc+0x180/0x180
+[  798.008820]  ? down_write+0xb4/0x120
+[  798.008824]  ? down_write_killable+0x130/0x130
+[  798.008829]  ext4_buffered_write_iter+0x137/0x2c0
+[  798.008833]  ext4_file_write_iter+0x40b/0x1490
+[  798.008837]  ? __fsnotify_parent+0x275/0xb20
+[  798.008842]  ? __fsnotify_update_child_dentry_flags+0x2c0/0x2c0
+[  798.008846]  ? ext4_buffered_write_iter+0x2c0/0x2c0
+[  798.008851]  __kernel_write+0x3a1/0xa70
+[  798.008855]  ? __x64_sys_preadv2+0x160/0x160
+[  798.008860]  ? security_file_permission+0x4a/0xa0
+[  798.008865]  kernel_write+0xbb/0x360
+[  798.008869]  ksmbd_vfs_write+0x27e/0xb90 [ksmbd]
+[  798.008881]  ? ksmbd_vfs_read+0x830/0x830 [ksmbd]
+[  798.008892]  ? _raw_read_unlock+0x2a/0x50
+[  798.008896]  smb2_write+0xb45/0x14e0 [ksmbd]
+[  798.008909]  ? __kasan_check_write+0x14/0x20
+[  798.008912]  ? _raw_spin_lock_bh+0xd0/0xe0
+[  798.008916]  ? smb2_read+0x15e0/0x15e0 [ksmbd]
+[  798.008927]  ? memcpy+0x4e/0x60
+[  798.008931]  ? _raw_spin_unlock+0x19/0x30
+[  798.008934]  ? ksmbd_smb2_check_message+0x16af/0x2350 [ksmbd]
+[  798.008946]  ? _raw_spin_lock_bh+0xe0/0xe0
+[  798.008950]  handle_ksmbd_work+0x30e/0x1020 [ksmbd]
+[  798.008962]  process_one_work+0x778/0x11c0
+[  798.008966]  ? _raw_spin_lock_irq+0x8e/0xe0
+[  798.008970]  worker_thread+0x544/0x1180
+[  798.008973]  ? __cpuidle_text_end+0x4/0x4
+[  798.008977]  kthread+0x282/0x320
+[  798.008982]  ? process_one_work+0x11c0/0x11c0
+[  798.008985]  ? kthread_complete_and_exit+0x30/0x30
+[  798.008989]  ret_from_fork+0x1f/0x30
+[  798.008995]  </TASK>
+
+Fixes: e2f34481b24d ("cifsd: add server-side procedures for SMB3")
+Cc: stable@vger.kernel.org
+Reported-by: zdi-disclosures@trendmicro.com # ZDI-CAN-17817
+Signed-off-by: Hyunchul Lee <hyc.lee@gmail.com>
+Acked-by: Namjae Jeon <linkinjeon@kernel.org>
+Signed-off-by: Steve French <stfrench@microsoft.com>
+The vulnerable function: static int smb2_get_data_area_len(unsigned int *off, unsigned int *len,
+				  struct smb2_hdr *hdr)
+{
+	int ret = 0;
+
+	*off = 0;
+	*len = 0;
+
+	/* error reqeusts do not have data area */
+	if (hdr->Status && hdr->Status != STATUS_MORE_PROCESSING_REQUIRED &&
+	    (((struct smb2_err_rsp *)hdr)->StructureSize) == SMB2_ERROR_STRUCTURE_SIZE2_LE)
+		return ret;
+
+	/*
+	 * Following commands have data areas so we have to get the location
+	 * of the data buffer offset and data buffer length for the particular
+	 * command.
+	 */
+	switch (hdr->Command) {
+	case SMB2_SESSION_SETUP:
+		*off = le16_to_cpu(((struct smb2_sess_setup_req *)hdr)->SecurityBufferOffset);
+		*len = le16_to_cpu(((struct smb2_sess_setup_req *)hdr)->SecurityBufferLength);
+		break;
+	case SMB2_TREE_CONNECT:
+		*off = le16_to_cpu(((struct smb2_tree_connect_req *)hdr)->PathOffset);
+		*len = le16_to_cpu(((struct smb2_tree_connect_req *)hdr)->PathLength);
+		break;
+	case SMB2_CREATE:
+	{
+		if (((struct smb2_create_req *)hdr)->CreateContextsLength) {
+			*off = le32_to_cpu(((struct smb2_create_req *)
+				hdr)->CreateContextsOffset);
+			*len = le32_to_cpu(((struct smb2_create_req *)
+				hdr)->CreateContextsLength);
+			break;
+		}
+
+		*off = le16_to_cpu(((struct smb2_create_req *)hdr)->NameOffset);
+		*len = le16_to_cpu(((struct smb2_create_req *)hdr)->NameLength);
+		break;
+	}
+	case SMB2_QUERY_INFO:
+		*off = le16_to_cpu(((struct smb2_query_info_req *)hdr)->InputBufferOffset);
+		*len = le32_to_cpu(((struct smb2_query_info_req *)hdr)->InputBufferLength);
+		break;
+	case SMB2_SET_INFO:
+		*off = le16_to_cpu(((struct smb2_set_info_req *)hdr)->BufferOffset);
+		*len = le32_to_cpu(((struct smb2_set_info_req *)hdr)->BufferLength);
+		break;
+	case SMB2_READ:
+		*off = le16_to_cpu(((struct smb2_read_req *)hdr)->ReadChannelInfoOffset);
+		*len = le16_to_cpu(((struct smb2_read_req *)hdr)->ReadChannelInfoLength);
+		break;
+	case SMB2_WRITE:
+		if (((struct smb2_write_req *)hdr)->DataOffset) {
+			*off = le16_to_cpu(((struct smb2_write_req *)hdr)->DataOffset);
+			*len = le32_to_cpu(((struct smb2_write_req *)hdr)->Length);
+			break;
+		}
+
+		*off = le16_to_cpu(((struct smb2_write_req *)hdr)->WriteChannelInfoOffset);
+		*len = le16_to_cpu(((struct smb2_write_req *)hdr)->WriteChannelInfoLength);
+		break;
+	case SMB2_QUERY_DIRECTORY:
+		*off = le16_to_cpu(((struct smb2_query_directory_req *)hdr)->FileNameOffset);
+		*len = le16_to_cpu(((struct smb2_query_directory_req *)hdr)->FileNameLength);
+		break;
+	case SMB2_LOCK:
+	{
+		int lock_count;
+
+		/*
+		 * smb2_lock request size is 48 included single
+		 * smb2_lock_element structure size.
+		 */
+		lock_count = le16_to_cpu(((struct smb2_lock_req *)hdr)->LockCount) - 1;
+		if (lock_count > 0) {
+			*off = __SMB2_HEADER_STRUCTURE_SIZE + 48;
+			*len = sizeof(struct smb2_lock_element) * lock_count;
+		}
+		break;
+	}
+	case SMB2_IOCTL:
+		*off = le32_to_cpu(((struct smb2_ioctl_req *)hdr)->InputOffset);
+		*len = le32_to_cpu(((struct smb2_ioctl_req *)hdr)->InputCount);
+		break;
+	default:
+		ksmbd_debug(SMB, "no length check for command\n");
+		break;
+	}
+
+	if (*off > 4096) {
+		ksmbd_debug(SMB, "offset %d too large\n", *off);
+		ret = -EINVAL;
+	} else if ((u64)*off + *len > MAX_STREAM_PROT_LEN) {
+		ksmbd_debug(SMB, "Request is larger than maximum stream protocol length(%u): %llu\n",
+			    MAX_STREAM_PROT_LEN, (u64)*off + *len);
+		ret = -EINVAL;
+	}
+
+	return ret;
+}
+The corrected function: int smb2_write(struct ksmbd_work *work)
+{
+	struct smb2_write_req *req;
+	struct smb2_write_rsp *rsp;
+	struct ksmbd_file *fp = NULL;
+	loff_t offset;
+	size_t length;
+	ssize_t nbytes;
+	char *data_buf;
+	bool writethrough = false, is_rdma_channel = false;
+	int err = 0;
+	unsigned int max_write_size = work->conn->vals->max_write_size;
+
+	WORK_BUFFERS(work, req, rsp);
+
+	if (test_share_config_flag(work->tcon->share_conf, KSMBD_SHARE_FLAG_PIPE)) {
+		ksmbd_debug(SMB, "IPC pipe write request\n");
+		return smb2_write_pipe(work);
+	}
+
+	offset = le64_to_cpu(req->Offset);
+	length = le32_to_cpu(req->Length);
+
+	if (req->Channel == SMB2_CHANNEL_RDMA_V1 ||
+	    req->Channel == SMB2_CHANNEL_RDMA_V1_INVALIDATE) {
+		is_rdma_channel = true;
+		max_write_size = get_smbd_max_read_write_size();
+		length = le32_to_cpu(req->RemainingBytes);
+	}
+
+	if (is_rdma_channel == true) {
+		unsigned int ch_offset = le16_to_cpu(req->WriteChannelInfoOffset);
+
+		if (req->Length != 0 || req->DataOffset != 0 ||
+		    ch_offset < offsetof(struct smb2_write_req, Buffer)) {
+			err = -EINVAL;
+			goto out;
+		}
+		err = smb2_set_remote_key_for_rdma(work,
+						   (struct smb2_buffer_desc_v1 *)
+						   ((char *)req + ch_offset),
+						   req->Channel,
+						   req->WriteChannelInfoLength);
+		if (err)
+			goto out;
+	}
+
+	if (!test_tree_conn_flag(work->tcon, KSMBD_TREE_CONN_FLAG_WRITABLE)) {
+		ksmbd_debug(SMB, "User does not have write permission\n");
+		err = -EACCES;
+		goto out;
+	}
+
+	fp = ksmbd_lookup_fd_slow(work, req->VolatileFileId, req->PersistentFileId);
+	if (!fp) {
+		err = -ENOENT;
+		goto out;
+	}
+
+	if (!(fp->daccess & (FILE_WRITE_DATA_LE | FILE_READ_ATTRIBUTES_LE))) {
+		pr_err("Not permitted to write : 0x%x\n", fp->daccess);
+		err = -EACCES;
+		goto out;
+	}
+
+	if (length > max_write_size) {
+		ksmbd_debug(SMB, "limiting write size to max size(%u)\n",
+			    max_write_size);
+		err = -EINVAL;
+		goto out;
+	}
+
+	ksmbd_debug(SMB, "flags %u\n", le32_to_cpu(req->Flags));
+	if (le32_to_cpu(req->Flags) & SMB2_WRITEFLAG_WRITE_THROUGH)
+		writethrough = true;
+
+	if (is_rdma_channel == false) {
+		if ((u64)le16_to_cpu(req->DataOffset) + length >
+		    get_rfc1002_len(work->request_buf)) {
+			pr_err("invalid write data offset %u, smb_len %u\n",
+			       le16_to_cpu(req->DataOffset),
+			       get_rfc1002_len(work->request_buf));
+			err = -EINVAL;
+			goto out;
+		}
+		data_buf = (char *)(((char *)&req->hdr.ProtocolId) +
+				    le16_to_cpu(req->DataOffset));
+
+		ksmbd_debug(SMB, "filename %pd, offset %lld, len %zu\n",
+			    fp->filp->f_path.dentry, offset, length);
+		err = ksmbd_vfs_write(work, fp, data_buf, length, &offset,
+				      writethrough, &nbytes);
+		if (err < 0)
+			goto out;
+	} else {
+		/* read data from the client using rdma channel, and
+		 * write the data.
+		 */
+		nbytes = smb2_write_rdma_channel(work, req, fp, offset, length,
+						 writethrough);
+		if (nbytes < 0) {
+			err = (int)nbytes;
+			goto out;
+		}
+	}
+
+	rsp->StructureSize = cpu_to_le16(17);
+	rsp->DataOffset = 0;
+	rsp->Reserved = 0;
+	rsp->DataLength = cpu_to_le32(nbytes);
+	rsp->DataRemaining = 0;
+	rsp->Reserved2 = 0;
+	inc_rfc1001_len(work->response_buf, 16);
+	ksmbd_fd_put(work, fp);
+	return 0;
+
+out:
+	if (err == -EAGAIN)
+		rsp->hdr.Status = STATUS_FILE_LOCK_CONFLICT;
+	else if (err == -ENOSPC || err == -EFBIG)
+		rsp->hdr.Status = STATUS_DISK_FULL;
+	else if (err == -ENOENT)
+		rsp->hdr.Status = STATUS_FILE_CLOSED;
+	else if (err == -EACCES)
+		rsp->hdr.Status = STATUS_ACCESS_DENIED;
+	else if (err == -ESHARE)
+		rsp->hdr.Status = STATUS_SHARING_VIOLATION;
+	else if (err == -EINVAL)
+		rsp->hdr.Status = STATUS_INVALID_PARAMETER;
+	else
+		rsp->hdr.Status = STATUS_INVALID_HANDLE;
+
+	smb2_set_err_rsp(work);
+	ksmbd_fd_put(work, fp);
+	return err;
+}

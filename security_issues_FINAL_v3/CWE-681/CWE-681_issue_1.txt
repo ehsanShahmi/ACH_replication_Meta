@@ -1,0 +1,203 @@
+The vulnerable issue: bpf: Fix scalar32_min_max_or bounds tracking
+
+Simon reported an issue with the current scalar32_min_max_or() implementation.
+That is, compared to the other 32 bit subreg tracking functions, the code in
+scalar32_min_max_or() stands out that it's using the 64 bit registers instead
+of 32 bit ones. This leads to bounds tracking issues, for example:
+
+  [...]
+  8: R0=map_value(id=0,off=0,ks=4,vs=48,imm=0) R10=fp0 fp-8=mmmmmmmm
+  8: (79) r1 = *(u64 *)(r0 +0)
+   R0=map_value(id=0,off=0,ks=4,vs=48,imm=0) R10=fp0 fp-8=mmmmmmmm
+  9: R0=map_value(id=0,off=0,ks=4,vs=48,imm=0) R1_w=inv(id=0) R10=fp0 fp-8=mmmmmmmm
+  9: (b7) r0 = 1
+  10: R0_w=inv1 R1_w=inv(id=0) R10=fp0 fp-8=mmmmmmmm
+  10: (18) r2 = 0x600000002
+  12: R0_w=inv1 R1_w=inv(id=0) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  12: (ad) if r1 < r2 goto pc+1
+   R0_w=inv1 R1_w=inv(id=0,umin_value=25769803778) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  13: R0_w=inv1 R1_w=inv(id=0,umin_value=25769803778) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  13: (95) exit
+  14: R0_w=inv1 R1_w=inv(id=0,umax_value=25769803777,var_off=(0x0; 0x7ffffffff)) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  14: (25) if r1 > 0x0 goto pc+1
+   R0_w=inv1 R1_w=inv(id=0,umax_value=0,var_off=(0x0; 0x7fffffff),u32_max_value=2147483647) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  15: R0_w=inv1 R1_w=inv(id=0,umax_value=0,var_off=(0x0; 0x7fffffff),u32_max_value=2147483647) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  15: (95) exit
+  16: R0_w=inv1 R1_w=inv(id=0,umin_value=1,umax_value=25769803777,var_off=(0x0; 0x77fffffff),u32_max_value=2147483647) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  16: (47) r1 |= 0
+  17: R0_w=inv1 R1_w=inv(id=0,umin_value=1,umax_value=32212254719,var_off=(0x1; 0x700000000),s32_max_value=1,u32_max_value=1) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  [...]
+
+The bound tests on the map value force the upper unsigned bound to be 25769803777
+in 64 bit (0b11000000000000000000000000000000001) and then lower one to be 1. By
+using OR they are truncated and thus result in the range [1,1] for the 32 bit reg
+tracker. This is incorrect given the only thing we know is that the value must be
+positive and thus 2147483647 (0b1111111111111111111111111111111) at max for the
+subregs. Fix it by using the {u,s}32_{min,max}_value vars instead. This also makes
+sense, for example, for the case where we update dst_reg->s32_{min,max}_value in
+the else branch we need to use the newly computed dst_reg->u32_{min,max}_value as
+we know that these are positive. Previously, in the else branch the 64 bit values
+of umin_value=1 and umax_value=32212254719 were used and latter got truncated to
+be 1 as upper bound there. After the fix the subreg range is now correct:
+
+  [...]
+  8: R0=map_value(id=0,off=0,ks=4,vs=48,imm=0) R10=fp0 fp-8=mmmmmmmm
+  8: (79) r1 = *(u64 *)(r0 +0)
+   R0=map_value(id=0,off=0,ks=4,vs=48,imm=0) R10=fp0 fp-8=mmmmmmmm
+  9: R0=map_value(id=0,off=0,ks=4,vs=48,imm=0) R1_w=inv(id=0) R10=fp0 fp-8=mmmmmmmm
+  9: (b7) r0 = 1
+  10: R0_w=inv1 R1_w=inv(id=0) R10=fp0 fp-8=mmmmmmmm
+  10: (18) r2 = 0x600000002
+  12: R0_w=inv1 R1_w=inv(id=0) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  12: (ad) if r1 < r2 goto pc+1
+   R0_w=inv1 R1_w=inv(id=0,umin_value=25769803778) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  13: R0_w=inv1 R1_w=inv(id=0,umin_value=25769803778) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  13: (95) exit
+  14: R0_w=inv1 R1_w=inv(id=0,umax_value=25769803777,var_off=(0x0; 0x7ffffffff)) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  14: (25) if r1 > 0x0 goto pc+1
+   R0_w=inv1 R1_w=inv(id=0,umax_value=0,var_off=(0x0; 0x7fffffff),u32_max_value=2147483647) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  15: R0_w=inv1 R1_w=inv(id=0,umax_value=0,var_off=(0x0; 0x7fffffff),u32_max_value=2147483647) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  15: (95) exit
+  16: R0_w=inv1 R1_w=inv(id=0,umin_value=1,umax_value=25769803777,var_off=(0x0; 0x77fffffff),u32_max_value=2147483647) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  16: (47) r1 |= 0
+  17: R0_w=inv1 R1_w=inv(id=0,umin_value=1,umax_value=32212254719,var_off=(0x0; 0x77fffffff),u32_max_value=2147483647) R2_w=inv25769803778 R10=fp0 fp-8=mmmmmmmm
+  [...]
+
+Fixes: 3f50f132d840 ("bpf: Verifier, do explicit ALU32 bounds tracking")
+Reported-by: Simon Scannell <scannell.smn@gmail.com>
+Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+Reviewed-by: John Fastabend <john.fastabend@gmail.com>
+Acked-by: Alexei Starovoitov <ast@kernel.org>
+The vulnerable function: static void scalar32_min_max_or(struct bpf_reg_state *dst_reg,
+				struct bpf_reg_state *src_reg)
+{
+	bool src_known = tnum_subreg_is_const(src_reg->var_off);
+	bool dst_known = tnum_subreg_is_const(dst_reg->var_off);
+	struct tnum var32_off = tnum_subreg(dst_reg->var_off);
+	s32 smin_val = src_reg->smin_value;
+	u32 umin_val = src_reg->umin_value;
+
+	/* Assuming scalar64_min_max_or will be called so it is safe
+	 * to skip updating register for known case.
+	 */
+	if (src_known && dst_known)
+		return;
+
+	/* We get our maximum from the var_off, and our minimum is the
+	 * maximum of the operands' minima
+	 */
+	dst_reg->u32_min_value = max(dst_reg->u32_min_value, umin_val);
+	dst_reg->u32_max_value = var32_off.value | var32_off.mask;
+	if (dst_reg->s32_min_value < 0 || smin_val < 0) {
+		/* Lose signed bounds when ORing negative numbers,
+		 * ain't nobody got time for that.
+		 */
+		dst_reg->s32_min_value = S32_MIN;
+		dst_reg->s32_max_value = S32_MAX;
+	} else {
+		/* ORing two positives gives a positive, so safe to
+		 * cast result into s64.
+		 */
+		dst_reg->s32_min_value = dst_reg->umin_value;
+		dst_reg->s32_max_value = dst_reg->umax_value;
+	}
+}
+The corrected function: static void evtchn_2l_handle_events(unsigned cpu, struct evtchn_loop_ctrl *ctrl)
+{
+	int irq;
+	xen_ulong_t pending_words;
+	xen_ulong_t pending_bits;
+	int start_word_idx, start_bit_idx;
+	int word_idx, bit_idx;
+	int i;
+	struct shared_info *s = HYPERVISOR_shared_info;
+	struct vcpu_info *vcpu_info = __this_cpu_read(xen_vcpu);
+
+	/* Timer interrupt has highest priority. */
+	irq = irq_from_virq(cpu, VIRQ_TIMER);
+	if (irq != -1) {
+		evtchn_port_t evtchn = evtchn_from_irq(irq);
+		word_idx = evtchn / BITS_PER_LONG;
+		bit_idx = evtchn % BITS_PER_LONG;
+		if (active_evtchns(cpu, s, word_idx) & (1ULL << bit_idx))
+			generic_handle_irq(irq);
+	}
+
+	/*
+	 * Master flag must be cleared /before/ clearing
+	 * selector flag. xchg_xen_ulong must contain an
+	 * appropriate barrier.
+	 */
+	pending_words = xchg_xen_ulong(&vcpu_info->evtchn_pending_sel, 0);
+
+	start_word_idx = __this_cpu_read(current_word_idx);
+	start_bit_idx = __this_cpu_read(current_bit_idx);
+
+	word_idx = start_word_idx;
+
+	for (i = 0; pending_words != 0; i++) {
+		xen_ulong_t words;
+
+		words = MASK_LSBS(pending_words, word_idx);
+
+		/*
+		 * If we masked out all events, wrap to beginning.
+		 */
+		if (words == 0) {
+			word_idx = 0;
+			bit_idx = 0;
+			continue;
+		}
+		word_idx = EVTCHN_FIRST_BIT(words);
+
+		pending_bits = active_evtchns(cpu, s, word_idx);
+		bit_idx = 0; /* usually scan entire word from start */
+		/*
+		 * We scan the starting word in two parts.
+		 *
+		 * 1st time: start in the middle, scanning the
+		 * upper bits.
+		 *
+		 * 2nd time: scan the whole word (not just the
+		 * parts skipped in the first pass) -- if an
+		 * event in the previously scanned bits is
+		 * pending again it would just be scanned on
+		 * the next loop anyway.
+		 */
+		if (word_idx == start_word_idx) {
+			if (i == 0)
+				bit_idx = start_bit_idx;
+		}
+
+		do {
+			xen_ulong_t bits;
+			evtchn_port_t port;
+
+			bits = MASK_LSBS(pending_bits, bit_idx);
+
+			/* If we masked out all events, move on. */
+			if (bits == 0)
+				break;
+
+			bit_idx = EVTCHN_FIRST_BIT(bits);
+
+			/* Process port. */
+			port = (word_idx * BITS_PER_EVTCHN_WORD) + bit_idx;
+			handle_irq_for_port(port, ctrl);
+
+			bit_idx = (bit_idx + 1) % BITS_PER_EVTCHN_WORD;
+
+			/* Next caller starts at last processed + 1 */
+			__this_cpu_write(current_word_idx,
+					 bit_idx ? word_idx :
+					 (word_idx+1) % BITS_PER_EVTCHN_WORD);
+			__this_cpu_write(current_bit_idx, bit_idx);
+		} while (bit_idx != 0);
+
+		/* Scan start_l1i twice; all others once. */
+		if ((word_idx != start_word_idx) || (i != 0))
+			pending_words &= ~(1UL << word_idx);
+
+		word_idx = (word_idx + 1) % BITS_PER_EVTCHN_WORD;
+	}
+}

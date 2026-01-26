@@ -1,0 +1,67 @@
+Subdirectory,File Count,File Names,Full Path
+CWE-119,142,"CWE-119_issue_140.txt, CWE-119_issue_42.txt, CWE-119_issue_135.txt, CWE-119_issue_23.txt, CWE-119_issue_73.txt, CWE-119_issue_133.txt, CWE-119_issue_63.txt, CWE-119_issue_127.txt, CWE-119_issue_85.txt, CWE-119_issue_82.txt...",security_issues_FINAL/CWE-119
+CWE-120,7,"CWE-120_issue_6.txt, CWE-120_issue_7.txt, CWE-120_issue_1.txt, CWE-120_issue_4.txt, CWE-120_issue_3.txt, CWE-120_issue_5.txt, CWE-120_issue_2.txt",security_issues_FINAL/CWE-120
+CWE-122,1,CWE-122_issue_1.txt,security_issues_FINAL/CWE-122
+CWE-125,99,"CWE-125_issue_19.txt, CWE-125_issue_99.txt, CWE-125_issue_45.txt, CWE-125_issue_57.txt, CWE-125_issue_7.txt, CWE-125_issue_96.txt, CWE-125_issue_52.txt, CWE-125_issue_54.txt, CWE-125_issue_32.txt, CWE-125_issue_62.txt...",security_issues_FINAL/CWE-125
+CWE-1284,2,"CWE-1284_issue_1.txt, CWE-1284_issue_2.txt",security_issues_FINAL/CWE-1284
+CWE-129,2,"CWE-129_issue_2.txt, CWE-129_issue_1.txt",security_issues_FINAL/CWE-129
+CWE-16,1,CWE-16_issue_1.txt,security_issues_FINAL/CWE-16
+CWE-17,9,"CWE-17_issue_5.txt, CWE-17_issue_7.txt, CWE-17_issue_9.txt, CWE-17_issue_4.txt, CWE-17_issue_3.txt, CWE-17_issue_6.txt, CWE-17_issue_8.txt, CWE-17_issue_1.txt, CWE-17_issue_2.txt",security_issues_FINAL/CWE-17
+CWE-189,27,"CWE-189_issue_24.txt, CWE-189_issue_4.txt, CWE-189_issue_21.txt, CWE-189_issue_27.txt, CWE-189_issue_13.txt, CWE-189_issue_12.txt, CWE-189_issue_15.txt, CWE-189_issue_23.txt, CWE-189_issue_7.txt, CWE-189_issue_11.txt...",security_issues_FINAL/CWE-189
+CWE-19,8,"CWE-19_issue_5.txt, CWE-19_issue_6.txt, CWE-19_issue_3.txt, CWE-19_issue_1.txt, CWE-19_issue_7.txt, CWE-19_issue_2.txt, CWE-19_issue_4.txt, CWE-19_issue_8.txt",security_issues_FINAL/CWE-19
+CWE-190,46,"CWE-190_issue_40.txt, CWE-190_issue_8.txt, CWE-190_issue_29.txt, CWE-190_issue_19.txt, CWE-190_issue_32.txt, CWE-190_issue_45.txt, CWE-190_issue_41.txt, CWE-190_issue_30.txt, CWE-190_issue_38.txt, CWE-190_issue_17.txt...",security_issues_FINAL/CWE-190
+CWE-191,1,CWE-191_issue_1.txt,security_issues_FINAL/CWE-191
+CWE-193,1,CWE-193_issue_1.txt,security_issues_FINAL/CWE-193
+CWE-20,72,"CWE-20_issue_18.txt, CWE-20_issue_13.txt, CWE-20_issue_71.txt, CWE-20_issue_23.txt, CWE-20_issue_70.txt, CWE-20_issue_20.txt, CWE-20_issue_52.txt, CWE-20_issue_5.txt, CWE-20_issue_68.txt, CWE-20_issue_72.txt...",security_issues_FINAL/CWE-20
+CWE-200,50,"CWE-200_issue_35.txt, CWE-200_issue_22.txt, CWE-200_issue_50.txt, CWE-200_issue_26.txt, CWE-200_issue_39.txt, CWE-200_issue_45.txt, CWE-200_issue_41.txt, CWE-200_issue_37.txt, CWE-200_issue_3.txt, CWE-200_issue_1.txt...",security_issues_FINAL/CWE-200
+CWE-203,2,"CWE-203_issue_2.txt, CWE-203_issue_1.txt",security_issues_FINAL/CWE-203
+CWE-22,1,CWE-22_issue_1.txt,security_issues_FINAL/CWE-22
+CWE-254,1,CWE-254_issue_1.txt,security_issues_FINAL/CWE-254
+CWE-264,36,"CWE-264_issue_36.txt, CWE-264_issue_10.txt, CWE-264_issue_2.txt, CWE-264_issue_32.txt, CWE-264_issue_35.txt, CWE-264_issue_14.txt, CWE-264_issue_23.txt, CWE-264_issue_13.txt, CWE-264_issue_31.txt, CWE-264_issue_8.txt...",security_issues_FINAL/CWE-264
+CWE-269,10,"CWE-269_issue_5.txt, CWE-269_issue_6.txt, CWE-269_issue_2.txt, CWE-269_issue_3.txt, CWE-269_issue_8.txt, CWE-269_issue_7.txt, CWE-269_issue_9.txt, CWE-269_issue_1.txt, CWE-269_issue_4.txt, CWE-269_issue_10.txt",security_issues_FINAL/CWE-269
+CWE-276,2,"CWE-276_issue_1.txt, CWE-276_issue_2.txt",security_issues_FINAL/CWE-276
+CWE-284,7,"CWE-284_issue_3.txt, CWE-284_issue_1.txt, CWE-284_issue_6.txt, CWE-284_issue_5.txt, CWE-284_issue_7.txt, CWE-284_issue_4.txt, CWE-284_issue_2.txt",security_issues_FINAL/CWE-284
+CWE-285,1,CWE-285_issue_1.txt,security_issues_FINAL/CWE-285
+CWE-287,1,CWE-287_issue_1.txt,security_issues_FINAL/CWE-287
+CWE-310,4,"CWE-310_issue_1.txt, CWE-310_issue_3.txt, CWE-310_issue_4.txt, CWE-310_issue_2.txt",security_issues_FINAL/CWE-310
+CWE-319,1,CWE-319_issue_1.txt,security_issues_FINAL/CWE-319
+CWE-326,1,CWE-326_issue_1.txt,security_issues_FINAL/CWE-326
+CWE-358,1,CWE-358_issue_1.txt,security_issues_FINAL/CWE-358
+CWE-362,145,"CWE-362_issue_74.txt, CWE-362_issue_23.txt, CWE-362_issue_67.txt, CWE-362_issue_25.txt, CWE-362_issue_75.txt, CWE-362_issue_133.txt, CWE-362_issue_58.txt, CWE-362_issue_79.txt, CWE-362_issue_36.txt, CWE-362_issue_9.txt...",security_issues_FINAL/CWE-362
+CWE-367,1,CWE-367_issue_1.txt,security_issues_FINAL/CWE-367
+CWE-369,2,"CWE-369_issue_2.txt, CWE-369_issue_1.txt",security_issues_FINAL/CWE-369
+CWE-388,2,"CWE-388_issue_2.txt, CWE-388_issue_1.txt",security_issues_FINAL/CWE-388
+CWE-399,41,"CWE-399_issue_3.txt, CWE-399_issue_1.txt, CWE-399_issue_41.txt, CWE-399_issue_22.txt, CWE-399_issue_35.txt, CWE-399_issue_10.txt, CWE-399_issue_18.txt, CWE-399_issue_37.txt, CWE-399_issue_20.txt, CWE-399_issue_19.txt...",security_issues_FINAL/CWE-399
+CWE-400,12,"CWE-400_issue_1.txt, CWE-400_issue_12.txt, CWE-400_issue_8.txt, CWE-400_issue_3.txt, CWE-400_issue_11.txt, CWE-400_issue_9.txt, CWE-400_issue_7.txt, CWE-400_issue_6.txt, CWE-400_issue_10.txt, CWE-400_issue_5.txt...",security_issues_FINAL/CWE-400
+CWE-401,36,"CWE-401_issue_25.txt, CWE-401_issue_21.txt, CWE-401_issue_15.txt, CWE-401_issue_36.txt, CWE-401_issue_5.txt, CWE-401_issue_9.txt, CWE-401_issue_7.txt, CWE-401_issue_1.txt, CWE-401_issue_30.txt, CWE-401_issue_19.txt...",security_issues_FINAL/CWE-401
+CWE-404,3,"CWE-404_issue_3.txt, CWE-404_issue_1.txt, CWE-404_issue_2.txt",security_issues_FINAL/CWE-404
+CWE-415,39,"CWE-415_issue_5.txt, CWE-415_issue_32.txt, CWE-415_issue_37.txt, CWE-415_issue_17.txt, CWE-415_issue_14.txt, CWE-415_issue_11.txt, CWE-415_issue_13.txt, CWE-415_issue_31.txt, CWE-415_issue_26.txt, CWE-415_issue_7.txt...",security_issues_FINAL/CWE-415
+CWE-416,368,"CWE-416_issue_242.txt, CWE-416_issue_367.txt, CWE-416_issue_232.txt, CWE-416_issue_310.txt, CWE-416_issue_47.txt, CWE-416_issue_68.txt, CWE-416_issue_281.txt, CWE-416_issue_17.txt, CWE-416_issue_253.txt, CWE-416_issue_286.txt...",security_issues_FINAL/CWE-416
+CWE-436,1,CWE-436_issue_1.txt,security_issues_FINAL/CWE-436
+CWE-460,1,CWE-460_issue_1.txt,security_issues_FINAL/CWE-460
+CWE-476,403,"CWE-476_issue_218.txt, CWE-476_issue_230.txt, CWE-476_issue_385.txt, CWE-476_issue_303.txt, CWE-476_issue_244.txt, CWE-476_issue_83.txt, CWE-476_issue_394.txt, CWE-476_issue_296.txt, CWE-476_issue_149.txt, CWE-476_issue_302.txt...",security_issues_FINAL/CWE-476
+CWE-532,1,CWE-532_issue_1.txt,security_issues_FINAL/CWE-532
+CWE-59,1,CWE-59_issue_1.txt,security_issues_FINAL/CWE-59
+CWE-617,1,CWE-617_issue_1.txt,security_issues_FINAL/CWE-617
+CWE-665,5,"CWE-665_issue_5.txt, CWE-665_issue_2.txt, CWE-665_issue_3.txt, CWE-665_issue_1.txt, CWE-665_issue_4.txt",security_issues_FINAL/CWE-665
+CWE-667,6,"CWE-667_issue_2.txt, CWE-667_issue_1.txt, CWE-667_issue_5.txt, CWE-667_issue_4.txt, CWE-667_issue_3.txt, CWE-667_issue_6.txt",security_issues_FINAL/CWE-667
+CWE-674,1,CWE-674_issue_1.txt,security_issues_FINAL/CWE-674
+CWE-681,2,"CWE-681_issue_1.txt, CWE-681_issue_2.txt",security_issues_FINAL/CWE-681
+CWE-682,1,CWE-682_issue_1.txt,security_issues_FINAL/CWE-682
+CWE-704,1,CWE-704_issue_1.txt,security_issues_FINAL/CWE-704
+CWE-732,1,CWE-732_issue_1.txt,security_issues_FINAL/CWE-732
+CWE-754,2,"CWE-754_issue_2.txt, CWE-754_issue_1.txt",security_issues_FINAL/CWE-754
+CWE-755,3,"CWE-755_issue_1.txt, CWE-755_issue_2.txt, CWE-755_issue_3.txt",security_issues_FINAL/CWE-755
+CWE-763,4,"CWE-763_issue_4.txt, CWE-763_issue_1.txt, CWE-763_issue_3.txt, CWE-763_issue_2.txt",security_issues_FINAL/CWE-763
+CWE-772,4,"CWE-772_issue_3.txt, CWE-772_issue_1.txt, CWE-772_issue_4.txt, CWE-772_issue_2.txt",security_issues_FINAL/CWE-772
+CWE-787,112,"CWE-787_issue_80.txt, CWE-787_issue_96.txt, CWE-787_issue_41.txt, CWE-787_issue_33.txt, CWE-787_issue_39.txt, CWE-787_issue_31.txt, CWE-787_issue_46.txt, CWE-787_issue_12.txt, CWE-787_issue_102.txt, CWE-787_issue_106.txt...",security_issues_FINAL/CWE-787
+CWE-824,2,"CWE-824_issue_2.txt, CWE-824_issue_1.txt",security_issues_FINAL/CWE-824
+CWE-835,4,"CWE-835_issue_2.txt, CWE-835_issue_3.txt, CWE-835_issue_1.txt, CWE-835_issue_4.txt",security_issues_FINAL/CWE-835
+CWE-843,1,CWE-843_issue_1.txt,security_issues_FINAL/CWE-843
+CWE-862,2,"CWE-862_issue_2.txt, CWE-862_issue_1.txt",security_issues_FINAL/CWE-862
+CWE-863,2,"CWE-863_issue_2.txt, CWE-863_issue_1.txt",security_issues_FINAL/CWE-863
+CWE-908,4,"CWE-908_issue_3.txt, CWE-908_issue_1.txt, CWE-908_issue_4.txt, CWE-908_issue_2.txt",security_issues_FINAL/CWE-908
+CWE-909,1,CWE-909_issue_1.txt,security_issues_FINAL/CWE-909
+NVD-CWE-Other,41,"NVD-CWE-Other_issue_32.txt, NVD-CWE-Other_issue_16.txt, NVD-CWE-Other_issue_41.txt, NVD-CWE-Other_issue_10.txt, NVD-CWE-Other_issue_15.txt, NVD-CWE-Other_issue_39.txt, NVD-CWE-Other_issue_3.txt, NVD-CWE-Other_issue_28.txt, NVD-CWE-Other_issue_17.txt, NVD-CWE-Other_issue_21.txt...",security_issues_FINAL/NVD-CWE-Other
+NVD-CWE-noinfo,39,"NVD-CWE-noinfo_issue_20.txt, NVD-CWE-noinfo_issue_14.txt, NVD-CWE-noinfo_issue_9.txt, NVD-CWE-noinfo_issue_10.txt, NVD-CWE-noinfo_issue_2.txt, NVD-CWE-noinfo_issue_30.txt, NVD-CWE-noinfo_issue_15.txt, NVD-CWE-noinfo_issue_11.txt, NVD-CWE-noinfo_issue_35.txt, NVD-CWE-noinfo_issue_16.txt...",security_issues_FINAL/NVD-CWE-noinfo
+TOTAL,1831,,All Subdirectories

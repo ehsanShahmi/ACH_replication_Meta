@@ -1,0 +1,252 @@
+The vulnerable issue: drm/amd/display: Atom Integrated System Info v2_2 for DCN35
+
+New request from KMD/VBIOS in order to support new UMA carveout
+model. This fixes a null dereference from accessing
+Ctx->dc_bios->integrated_info while it was NULL.
+
+DAL parses through the BIOS and extracts the necessary
+integrated_info but was missing a case for the new BIOS
+version 2.3.
+
+Reviewed-by: Nicholas Kazlauskas <nicholas.kazlauskas@amd.com>
+Acked-by: Aurabindo Pillai <aurabindo.pillai@amd.com>
+Signed-off-by: Gabe Teeger <gabe.teeger@amd.com>
+Tested-by: Daniel Wheeler <daniel.wheeler@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+The vulnerable function: static enum bp_result construct_integrated_info(
+	struct bios_parser *bp,
+	struct integrated_info *info)
+{
+	static enum bp_result result = BP_RESULT_BADBIOSTABLE;
+
+	struct atom_common_table_header *header;
+	struct atom_data_revision revision;
+
+	uint32_t i;
+	uint32_t j;
+
+	if (info && DATA_TABLES(integratedsysteminfo)) {
+		header = GET_IMAGE(struct atom_common_table_header,
+					DATA_TABLES(integratedsysteminfo));
+
+		get_atom_data_table_revision(header, &revision);
+
+		switch (revision.major) {
+		case 1:
+			switch (revision.minor) {
+			case 11:
+			case 12:
+				result = get_integrated_info_v11(bp, info);
+				break;
+			default:
+				return result;
+			}
+			break;
+		case 2:
+			switch (revision.minor) {
+			case 1:
+				result = get_integrated_info_v2_1(bp, info);
+				break;
+			case 2:
+				result = get_integrated_info_v2_2(bp, info);
+				break;
+			default:
+				return result;
+			}
+			break;
+		default:
+			return result;
+		}
+		if (result == BP_RESULT_OK) {
+
+			DC_LOG_BIOS("edp1:\n"
+						"\tedp_pwr_on_off_delay = %d\n"
+						"\tedp_pwr_on_vary_bl_to_blon = %d\n"
+						"\tedp_pwr_down_bloff_to_vary_bloff = %d\n"
+						"\tedp_bootup_bl_level = %d\n",
+						info->edp1_info.edp_pwr_on_off_delay,
+						info->edp1_info.edp_pwr_on_vary_bl_to_blon,
+						info->edp1_info.edp_pwr_down_bloff_to_vary_bloff,
+						info->edp1_info.edp_bootup_bl_level);
+			DC_LOG_BIOS("edp2:\n"
+						"\tedp_pwr_on_off_delayv = %d\n"
+						"\tedp_pwr_on_vary_bl_to_blon = %d\n"
+						"\tedp_pwr_down_bloff_to_vary_bloff = %d\n"
+						"\tedp_bootup_bl_level = %d\n",
+						info->edp2_info.edp_pwr_on_off_delay,
+						info->edp2_info.edp_pwr_on_vary_bl_to_blon,
+						info->edp2_info.edp_pwr_down_bloff_to_vary_bloff,
+						info->edp2_info.edp_bootup_bl_level);
+		}
+	}
+
+	if (result != BP_RESULT_OK)
+		return result;
+	else {
+		// Log each external path
+		for (i = 0; i < MAX_NUMBER_OF_EXT_DISPLAY_PATH; i++) {
+			if (info->ext_disp_conn_info.path[i].device_tag != 0)
+				DC_LOG_BIOS("integrated_info:For EXTERNAL DISPLAY PATH %d --------------\n"
+						"DEVICE_TAG: 0x%x\n"
+						"DEVICE_ACPI_ENUM: 0x%x\n"
+						"DEVICE_CONNECTOR_ID: 0x%x\n"
+						"EXT_AUX_DDC_LUT_INDEX: %d\n"
+						"EXT_HPD_PIN_LUT_INDEX: %d\n"
+						"EXT_ENCODER_OBJ_ID: 0x%x\n"
+						"Encoder CAPS: 0x%x\n",
+						i,
+						info->ext_disp_conn_info.path[i].device_tag,
+						info->ext_disp_conn_info.path[i].device_acpi_enum,
+						info->ext_disp_conn_info.path[i].device_connector_id.id,
+						info->ext_disp_conn_info.path[i].ext_aux_ddc_lut_index,
+						info->ext_disp_conn_info.path[i].ext_hpd_pin_lut_index,
+						info->ext_disp_conn_info.path[i].ext_encoder_obj_id.id,
+						info->ext_disp_conn_info.path[i].caps
+						);
+			if (info->ext_disp_conn_info.path[i].caps & EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN)
+				DC_LOG_BIOS("BIOS EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN on path %d\n", i);
+			else if (bp->base.ctx->dc->config.force_bios_fixed_vs) {
+				info->ext_disp_conn_info.path[i].caps |= EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN;
+				DC_LOG_BIOS("driver forced EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN on path %d\n", i);
+			}
+		}
+		// Log the Checksum and Voltage Swing
+		DC_LOG_BIOS("Integrated info table CHECKSUM: %d\n"
+					"Integrated info table FIX_DP_VOLTAGE_SWING: %d\n",
+					info->ext_disp_conn_info.checksum,
+					info->ext_disp_conn_info.fixdpvoltageswing);
+		if (bp->base.ctx->dc->config.force_bios_fixed_vs && info->ext_disp_conn_info.fixdpvoltageswing == 0) {
+			info->ext_disp_conn_info.fixdpvoltageswing = bp->base.ctx->dc->config.force_bios_fixed_vs & 0xF;
+			DC_LOG_BIOS("driver forced fixdpvoltageswing = %d\n", info->ext_disp_conn_info.fixdpvoltageswing);
+		}
+	}
+	/* Sort voltage table from low to high*/
+	for (i = 1; i < NUMBER_OF_DISP_CLK_VOLTAGE; ++i) {
+		for (j = i; j > 0; --j) {
+			if (info->disp_clk_voltage[j].max_supported_clk <
+			    info->disp_clk_voltage[j-1].max_supported_clk)
+				swap(info->disp_clk_voltage[j-1], info->disp_clk_voltage[j]);
+		}
+	}
+
+	return result;
+}
+The corrected function: static enum bp_result construct_integrated_info(
+	struct bios_parser *bp,
+	struct integrated_info *info)
+{
+	static enum bp_result result = BP_RESULT_BADBIOSTABLE;
+
+	struct atom_common_table_header *header;
+	struct atom_data_revision revision;
+
+	uint32_t i;
+	uint32_t j;
+
+	if (info && DATA_TABLES(integratedsysteminfo)) {
+		header = GET_IMAGE(struct atom_common_table_header,
+					DATA_TABLES(integratedsysteminfo));
+
+		get_atom_data_table_revision(header, &revision);
+
+		switch (revision.major) {
+		case 1:
+			switch (revision.minor) {
+			case 11:
+			case 12:
+				result = get_integrated_info_v11(bp, info);
+				break;
+			default:
+				return result;
+			}
+			break;
+		case 2:
+			switch (revision.minor) {
+			case 1:
+				result = get_integrated_info_v2_1(bp, info);
+				break;
+			case 2:
+			case 3:
+				result = get_integrated_info_v2_2(bp, info);
+				break;
+			default:
+				return result;
+			}
+			break;
+		default:
+			return result;
+		}
+		if (result == BP_RESULT_OK) {
+
+			DC_LOG_BIOS("edp1:\n"
+						"\tedp_pwr_on_off_delay = %d\n"
+						"\tedp_pwr_on_vary_bl_to_blon = %d\n"
+						"\tedp_pwr_down_bloff_to_vary_bloff = %d\n"
+						"\tedp_bootup_bl_level = %d\n",
+						info->edp1_info.edp_pwr_on_off_delay,
+						info->edp1_info.edp_pwr_on_vary_bl_to_blon,
+						info->edp1_info.edp_pwr_down_bloff_to_vary_bloff,
+						info->edp1_info.edp_bootup_bl_level);
+			DC_LOG_BIOS("edp2:\n"
+						"\tedp_pwr_on_off_delayv = %d\n"
+						"\tedp_pwr_on_vary_bl_to_blon = %d\n"
+						"\tedp_pwr_down_bloff_to_vary_bloff = %d\n"
+						"\tedp_bootup_bl_level = %d\n",
+						info->edp2_info.edp_pwr_on_off_delay,
+						info->edp2_info.edp_pwr_on_vary_bl_to_blon,
+						info->edp2_info.edp_pwr_down_bloff_to_vary_bloff,
+						info->edp2_info.edp_bootup_bl_level);
+		}
+	}
+
+	if (result != BP_RESULT_OK)
+		return result;
+	else {
+		// Log each external path
+		for (i = 0; i < MAX_NUMBER_OF_EXT_DISPLAY_PATH; i++) {
+			if (info->ext_disp_conn_info.path[i].device_tag != 0)
+				DC_LOG_BIOS("integrated_info:For EXTERNAL DISPLAY PATH %d --------------\n"
+						"DEVICE_TAG: 0x%x\n"
+						"DEVICE_ACPI_ENUM: 0x%x\n"
+						"DEVICE_CONNECTOR_ID: 0x%x\n"
+						"EXT_AUX_DDC_LUT_INDEX: %d\n"
+						"EXT_HPD_PIN_LUT_INDEX: %d\n"
+						"EXT_ENCODER_OBJ_ID: 0x%x\n"
+						"Encoder CAPS: 0x%x\n",
+						i,
+						info->ext_disp_conn_info.path[i].device_tag,
+						info->ext_disp_conn_info.path[i].device_acpi_enum,
+						info->ext_disp_conn_info.path[i].device_connector_id.id,
+						info->ext_disp_conn_info.path[i].ext_aux_ddc_lut_index,
+						info->ext_disp_conn_info.path[i].ext_hpd_pin_lut_index,
+						info->ext_disp_conn_info.path[i].ext_encoder_obj_id.id,
+						info->ext_disp_conn_info.path[i].caps
+						);
+			if (info->ext_disp_conn_info.path[i].caps & EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN)
+				DC_LOG_BIOS("BIOS EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN on path %d\n", i);
+			else if (bp->base.ctx->dc->config.force_bios_fixed_vs) {
+				info->ext_disp_conn_info.path[i].caps |= EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN;
+				DC_LOG_BIOS("driver forced EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN on path %d\n", i);
+			}
+		}
+		// Log the Checksum and Voltage Swing
+		DC_LOG_BIOS("Integrated info table CHECKSUM: %d\n"
+					"Integrated info table FIX_DP_VOLTAGE_SWING: %d\n",
+					info->ext_disp_conn_info.checksum,
+					info->ext_disp_conn_info.fixdpvoltageswing);
+		if (bp->base.ctx->dc->config.force_bios_fixed_vs && info->ext_disp_conn_info.fixdpvoltageswing == 0) {
+			info->ext_disp_conn_info.fixdpvoltageswing = bp->base.ctx->dc->config.force_bios_fixed_vs & 0xF;
+			DC_LOG_BIOS("driver forced fixdpvoltageswing = %d\n", info->ext_disp_conn_info.fixdpvoltageswing);
+		}
+	}
+	/* Sort voltage table from low to high*/
+	for (i = 1; i < NUMBER_OF_DISP_CLK_VOLTAGE; ++i) {
+		for (j = i; j > 0; --j) {
+			if (info->disp_clk_voltage[j].max_supported_clk <
+			    info->disp_clk_voltage[j-1].max_supported_clk)
+				swap(info->disp_clk_voltage[j-1], info->disp_clk_voltage[j]);
+		}
+	}
+
+	return result;
+}

@@ -1,0 +1,13 @@
+bpf: Fix remap of arena.
+
+The bpf arena logic didn't account for mremap operation. Add a refcnt for
+multiple mmap events to prevent use-after-free in arena_vm_close.
+
+Fixes: 317460317a02 ("bpf: Introduce bpf_arena.")
+Reported-by: Pengfei Xu <pengfei.xu@intel.com>
+Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+Reviewed-by: Barret Rhoden <brho@google.com>
+Tested-by: Pengfei Xu <pengfei.xu@intel.com>
+Closes: https://lore.kernel.org/bpf/Zmuw29IhgyPNKnIM@xpf.sh.intel.com
+Link: https://lore.kernel.org/bpf/20240617171812.76634-1-alexei.starovoitov@gmail.com

@@ -1,0 +1,142 @@
+The vulnerable issue: KEYS: Fix race between updating and finding a negative key
+
+Consolidate KEY_FLAG_INSTANTIATED, KEY_FLAG_NEGATIVE and the rejection
+error into one field such that:
+
+ (1) The instantiation state can be modified/read atomically.
+
+ (2) The error can be accessed atomically with the state.
+
+ (3) The error isn't stored unioned with the payload pointers.
+
+This deals with the problem that the state is spread over three different
+objects (two bits and a separate variable) and reading or updating them
+atomically isn't practical, given that not only can uninstantiated keys
+change into instantiated or rejected keys, but rejected keys can also turn
+into instantiated keys - and someone accessing the key might not be using
+any locking.
+
+The main side effect of this problem is that what was held in the payload
+may change, depending on the state.  For instance, you might observe the
+key to be in the rejected state.  You then read the cached error, but if
+the key semaphore wasn't locked, the key might've become instantiated
+between the two reads - and you might now have something in hand that isn't
+actually an error code.
+
+The state is now KEY_IS_UNINSTANTIATED, KEY_IS_POSITIVE or a negative error
+code if the key is negatively instantiated.  The key_is_instantiated()
+function is replaced with key_is_positive() to avoid confusion as negative
+keys are also 'instantiated'.
+
+Additionally, barriering is included:
+
+ (1) Order payload-set before state-set during instantiation.
+
+ (2) Order state-read before payload-read when using the key.
+
+Further separate barriering is necessary if RCU is being used to access the
+payload content after reading the payload pointers.
+
+Fixes: 146aa8b1453b ("KEYS: Merge the type-specific data with the payload data")
+Cc: stable@vger.kernel.org # v4.4+
+Reported-by: Eric Biggers <ebiggers@google.com>
+Signed-off-by: David Howells <dhowells@redhat.com>
+Reviewed-by: Eric Biggers <ebiggers@google.com>
+The vulnerable function: int key_update(key_ref_t key_ref, const void *payload, size_t plen)
+{
+	struct key_preparsed_payload prep;
+	struct key *key = key_ref_to_ptr(key_ref);
+	int ret;
+
+	key_check(key);
+
+	/* the key must be writable */
+	ret = key_permission(key_ref, KEY_NEED_WRITE);
+	if (ret < 0)
+		return ret;
+
+	/* attempt to update it if supported */
+	if (!key->type->update)
+		return -EOPNOTSUPP;
+
+	memset(&prep, 0, sizeof(prep));
+	prep.data = payload;
+	prep.datalen = plen;
+	prep.quotalen = key->type->def_datalen;
+	prep.expiry = TIME_T_MAX;
+	if (key->type->preparse) {
+		ret = key->type->preparse(&prep);
+		if (ret < 0)
+			goto error;
+	}
+
+	down_write(&key->sem);
+
+	ret = key->type->update(key, &prep);
+	if (ret == 0)
+		/* updating a negative key instantiates it */
+		clear_bit(KEY_FLAG_NEGATIVE, &key->flags);
+
+	up_write(&key->sem);
+
+error:
+	if (key->type->preparse)
+		key->type->free_preparse(&prep);
+	return ret;
+}
+The corrected function: static int __key_instantiate_and_link(struct key *key,
+				      struct key_preparsed_payload *prep,
+				      struct key *keyring,
+				      struct key *authkey,
+				      struct assoc_array_edit **_edit)
+{
+	int ret, awaken;
+
+	key_check(key);
+	key_check(keyring);
+
+	awaken = 0;
+	ret = -EBUSY;
+
+	mutex_lock(&key_construction_mutex);
+
+	/* can't instantiate twice */
+	if (key->state == KEY_IS_UNINSTANTIATED) {
+		/* instantiate the key */
+		ret = key->type->instantiate(key, prep);
+
+		if (ret == 0) {
+			/* mark the key as being instantiated */
+			atomic_inc(&key->user->nikeys);
+			mark_key_instantiated(key, 0);
+
+			if (test_and_clear_bit(KEY_FLAG_USER_CONSTRUCT, &key->flags))
+				awaken = 1;
+
+			/* and link it into the destination keyring */
+			if (keyring) {
+				if (test_bit(KEY_FLAG_KEEP, &keyring->flags))
+					set_bit(KEY_FLAG_KEEP, &key->flags);
+
+				__key_link(key, _edit);
+			}
+
+			/* disable the authorisation key */
+			if (authkey)
+				key_revoke(authkey);
+
+			if (prep->expiry != TIME_T_MAX) {
+				key->expiry = prep->expiry;
+				key_schedule_gc(prep->expiry + key_gc_delay);
+			}
+		}
+	}
+
+	mutex_unlock(&key_construction_mutex);
+
+	/* wake up anyone waiting for a key to be constructed */
+	if (awaken)
+		wake_up_bit(&key->flags, KEY_FLAG_USER_CONSTRUCT);
+
+	return ret;
+}

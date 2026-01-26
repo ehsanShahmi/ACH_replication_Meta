@@ -1,0 +1,61 @@
+The vulnerable issue: NFSv4: Convert the open and close ops to use fmode
+
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+The vulnerable function: static void nfs4_open_prepare(struct rpc_task *task, void *calldata)
+{
+	struct nfs4_opendata *data = calldata;
+	struct nfs4_state_owner *sp = data->owner;
+
+	if (nfs_wait_on_sequence(data->o_arg.seqid, task) != 0)
+		return;
+	/*
+	 * Check if we still need to send an OPEN call, or if we can use
+	 * a delegation instead.
+	 */
+	if (data->state != NULL) {
+		struct nfs_delegation *delegation;
+
+		if (can_open_cached(data->state, data->o_arg.open_flags & (FMODE_READ|FMODE_WRITE|O_EXCL)))
+			goto out_no_action;
+		rcu_read_lock();
+		delegation = rcu_dereference(NFS_I(data->state->inode)->delegation);
+		if (delegation != NULL &&
+		    test_bit(NFS_DELEGATION_NEED_RECLAIM, &delegation->flags) == 0) {
+			rcu_read_unlock();
+			goto out_no_action;
+		}
+		rcu_read_unlock();
+	}
+	/* Update sequence id. */
+	data->o_arg.id = sp->so_owner_id.id;
+	data->o_arg.clientid = sp->so_client->cl_clientid;
+	if (data->o_arg.claim == NFS4_OPEN_CLAIM_PREVIOUS) {
+		task->tk_msg.rpc_proc = &nfs4_procedures[NFSPROC4_CLNT_OPEN_NOATTR];
+		nfs_copy_fh(&data->o_res.fh, data->o_arg.fh);
+	}
+	data->timestamp = jiffies;
+	rpc_call_start(task);
+	return;
+out_no_action:
+	task->tk_action = NULL;
+
+}
+The corrected function: static int nfs4_open_recover_helper(struct nfs4_opendata *opendata, mode_t openflags, struct nfs4_state **res)
+{
+	struct nfs4_state *newstate;
+	int ret;
+
+	opendata->o_arg.open_flags = openflags;
+	memset(&opendata->o_res, 0, sizeof(opendata->o_res));
+	memset(&opendata->c_res, 0, sizeof(opendata->c_res));
+	nfs4_init_opendata_res(opendata);
+	ret = _nfs4_proc_open(opendata);
+	if (ret != 0)
+		return ret; 
+	newstate = nfs4_opendata_to_nfs4_state(opendata);
+	if (IS_ERR(newstate))
+		return PTR_ERR(newstate);
+	nfs4_close_state(&opendata->path, newstate, openflags);
+	*res = newstate;
+	return 0;
+}

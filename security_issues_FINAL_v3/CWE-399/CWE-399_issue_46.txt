@@ -1,0 +1,161 @@
+The vulnerable issue: aio: prevent double free in ioctx_alloc
+
+ioctx_alloc() calls aio_setup_ring() to allocate a ring. If aio_setup_ring()
+fails to do so it would call aio_free_ring() before returning, but
+ioctx_alloc() would call aio_free_ring() again causing a double free of
+the ring.
+
+This is easily reproducible from userspace.
+
+Signed-off-by: Sasha Levin <sasha.levin@oracle.com>
+Signed-off-by: Benjamin LaHaise <bcrl@kvack.org>
+The vulnerable function: static struct kioctx *ioctx_alloc(unsigned nr_events)
+{
+	struct mm_struct *mm = current->mm;
+	struct kioctx *ctx;
+	int err = -ENOMEM;
+
+	/*
+	 * We keep track of the number of available ringbuffer slots, to prevent
+	 * overflow (reqs_available), and we also use percpu counters for this.
+	 *
+	 * So since up to half the slots might be on other cpu's percpu counters
+	 * and unavailable, double nr_events so userspace sees what they
+	 * expected: additionally, we move req_batch slots to/from percpu
+	 * counters at a time, so make sure that isn't 0:
+	 */
+	nr_events = max(nr_events, num_possible_cpus() * 4);
+	nr_events *= 2;
+
+	/* Prevent overflows */
+	if ((nr_events > (0x10000000U / sizeof(struct io_event))) ||
+	    (nr_events > (0x10000000U / sizeof(struct kiocb)))) {
+		pr_debug("ENOMEM: nr_events too high\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	if (!nr_events || (unsigned long)nr_events > (aio_max_nr * 2UL))
+		return ERR_PTR(-EAGAIN);
+
+	ctx = kmem_cache_zalloc(kioctx_cachep, GFP_KERNEL);
+	if (!ctx)
+		return ERR_PTR(-ENOMEM);
+
+	ctx->max_reqs = nr_events;
+
+	if (percpu_ref_init(&ctx->users, free_ioctx_users))
+		goto err;
+
+	if (percpu_ref_init(&ctx->reqs, free_ioctx_reqs))
+		goto err;
+
+	spin_lock_init(&ctx->ctx_lock);
+	spin_lock_init(&ctx->completion_lock);
+	mutex_init(&ctx->ring_lock);
+	init_waitqueue_head(&ctx->wait);
+
+	INIT_LIST_HEAD(&ctx->active_reqs);
+
+	ctx->cpu = alloc_percpu(struct kioctx_cpu);
+	if (!ctx->cpu)
+		goto err;
+
+	if (aio_setup_ring(ctx) < 0)
+		goto err;
+
+	atomic_set(&ctx->reqs_available, ctx->nr_events - 1);
+	ctx->req_batch = (ctx->nr_events - 1) / (num_possible_cpus() * 4);
+	if (ctx->req_batch < 1)
+		ctx->req_batch = 1;
+
+	/* limit the number of system wide aios */
+	spin_lock(&aio_nr_lock);
+	if (aio_nr + nr_events > (aio_max_nr * 2UL) ||
+	    aio_nr + nr_events < aio_nr) {
+		spin_unlock(&aio_nr_lock);
+		err = -EAGAIN;
+		goto err;
+	}
+	aio_nr += ctx->max_reqs;
+	spin_unlock(&aio_nr_lock);
+
+	percpu_ref_get(&ctx->users); /* io_setup() will drop this ref */
+
+	err = ioctx_add_table(ctx, mm);
+	if (err)
+		goto err_cleanup;
+
+	pr_debug("allocated ioctx %p[%ld]: mm=%p mask=0x%x\n",
+		 ctx, ctx->user_id, mm, ctx->nr_events);
+	return ctx;
+
+err_cleanup:
+	aio_nr_sub(ctx->max_reqs);
+err:
+	aio_free_ring(ctx);
+	free_percpu(ctx->cpu);
+	free_percpu(ctx->reqs.pcpu_count);
+	free_percpu(ctx->users.pcpu_count);
+	kmem_cache_free(kioctx_cachep, ctx);
+	pr_debug("error allocating ioctx %d\n", err);
+	return ERR_PTR(err);
+}
+The corrected function: mISDN_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
+		   struct msghdr *msg, size_t len, int flags)
+{
+	struct sk_buff		*skb;
+	struct sock		*sk = sock->sk;
+
+	int		copied, err;
+
+	if (*debug & DEBUG_SOCKET)
+		printk(KERN_DEBUG "%s: len %d, flags %x ch.nr %d, proto %x\n",
+		       __func__, (int)len, flags, _pms(sk)->ch.nr,
+		       sk->sk_protocol);
+	if (flags & (MSG_OOB))
+		return -EOPNOTSUPP;
+
+	if (sk->sk_state == MISDN_CLOSED)
+		return 0;
+
+	skb = skb_recv_datagram(sk, flags, flags & MSG_DONTWAIT, &err);
+	if (!skb)
+		return err;
+
+	if (msg->msg_name) {
+		struct sockaddr_mISDN *maddr = msg->msg_name;
+
+		maddr->family = AF_ISDN;
+		maddr->dev = _pms(sk)->dev->id;
+		if ((sk->sk_protocol == ISDN_P_LAPD_TE) ||
+		    (sk->sk_protocol == ISDN_P_LAPD_NT)) {
+			maddr->channel = (mISDN_HEAD_ID(skb) >> 16) & 0xff;
+			maddr->tei =  (mISDN_HEAD_ID(skb) >> 8) & 0xff;
+			maddr->sapi = mISDN_HEAD_ID(skb) & 0xff;
+		} else {
+			maddr->channel = _pms(sk)->ch.nr;
+			maddr->sapi = _pms(sk)->ch.addr & 0xFF;
+			maddr->tei =  (_pms(sk)->ch.addr >> 8) & 0xFF;
+		}
+		msg->msg_namelen = sizeof(*maddr);
+	}
+
+	copied = skb->len + MISDN_HEADER_LEN;
+	if (len < copied) {
+		if (flags & MSG_PEEK)
+			atomic_dec(&skb->users);
+		else
+			skb_queue_head(&sk->sk_receive_queue, skb);
+		return -ENOSPC;
+	}
+	memcpy(skb_push(skb, MISDN_HEADER_LEN), mISDN_HEAD_P(skb),
+	       MISDN_HEADER_LEN);
+
+	err = skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
+
+	mISDN_sock_cmsg(sk, msg, skb);
+
+	skb_free_datagram(sk, skb);
+
+	return err ? : copied;
+}

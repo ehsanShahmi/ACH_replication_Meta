@@ -1,0 +1,335 @@
+The vulnerable issue: f2fs: fix to check atomic_file in f2fs ioctl interfaces
+
+Some f2fs ioctl interfaces like f2fs_ioc_set_pin_file(),
+f2fs_move_file_range(), and f2fs_defragment_range() missed to
+check atomic_write status, which may cause potential race issue,
+fix it.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Chao Yu <chao@kernel.org>
+Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+The vulnerable function: static int f2fs_defragment_range(struct f2fs_sb_info *sbi,
+					struct file *filp,
+					struct f2fs_defragment *range)
+{
+	struct inode *inode = file_inode(filp);
+	struct f2fs_map_blocks map = { .m_next_extent = NULL,
+					.m_seg_type = NO_CHECK_TYPE,
+					.m_may_create = false };
+	struct extent_info ei = {};
+	pgoff_t pg_start, pg_end, next_pgofs;
+	unsigned int total = 0, sec_num;
+	block_t blk_end = 0;
+	bool fragmented = false;
+	int err;
+
+	f2fs_balance_fs(sbi, true);
+
+	inode_lock(inode);
+	pg_start = range->start >> PAGE_SHIFT;
+	pg_end = min_t(pgoff_t,
+				(range->start + range->len) >> PAGE_SHIFT,
+				DIV_ROUND_UP(i_size_read(inode), PAGE_SIZE));
+
+	if (is_inode_flag_set(inode, FI_COMPRESS_RELEASED)) {
+		err = -EINVAL;
+		goto unlock_out;
+	}
+
+	/* if in-place-update policy is enabled, don't waste time here */
+	set_inode_flag(inode, FI_OPU_WRITE);
+	if (f2fs_should_update_inplace(inode, NULL)) {
+		err = -EINVAL;
+		goto out;
+	}
+
+	/* writeback all dirty pages in the range */
+	err = filemap_write_and_wait_range(inode->i_mapping,
+						pg_start << PAGE_SHIFT,
+						(pg_end << PAGE_SHIFT) - 1);
+	if (err)
+		goto out;
+
+	/*
+	 * lookup mapping info in extent cache, skip defragmenting if physical
+	 * block addresses are continuous.
+	 */
+	if (f2fs_lookup_read_extent_cache(inode, pg_start, &ei)) {
+		if ((pgoff_t)ei.fofs + ei.len >= pg_end)
+			goto out;
+	}
+
+	map.m_lblk = pg_start;
+	map.m_next_pgofs = &next_pgofs;
+
+	/*
+	 * lookup mapping info in dnode page cache, skip defragmenting if all
+	 * physical block addresses are continuous even if there are hole(s)
+	 * in logical blocks.
+	 */
+	while (map.m_lblk < pg_end) {
+		map.m_len = pg_end - map.m_lblk;
+		err = f2fs_map_blocks(inode, &map, F2FS_GET_BLOCK_DEFAULT);
+		if (err)
+			goto out;
+
+		if (!(map.m_flags & F2FS_MAP_FLAGS)) {
+			map.m_lblk = next_pgofs;
+			continue;
+		}
+
+		if (blk_end && blk_end != map.m_pblk)
+			fragmented = true;
+
+		/* record total count of block that we're going to move */
+		total += map.m_len;
+
+		blk_end = map.m_pblk + map.m_len;
+
+		map.m_lblk += map.m_len;
+	}
+
+	if (!fragmented) {
+		total = 0;
+		goto out;
+	}
+
+	sec_num = DIV_ROUND_UP(total, CAP_BLKS_PER_SEC(sbi));
+
+	/*
+	 * make sure there are enough free section for LFS allocation, this can
+	 * avoid defragment running in SSR mode when free section are allocated
+	 * intensively
+	 */
+	if (has_not_enough_free_secs(sbi, 0, sec_num)) {
+		err = -EAGAIN;
+		goto out;
+	}
+
+	map.m_lblk = pg_start;
+	map.m_len = pg_end - pg_start;
+	total = 0;
+
+	while (map.m_lblk < pg_end) {
+		pgoff_t idx;
+		int cnt = 0;
+
+do_map:
+		map.m_len = pg_end - map.m_lblk;
+		err = f2fs_map_blocks(inode, &map, F2FS_GET_BLOCK_DEFAULT);
+		if (err)
+			goto clear_out;
+
+		if (!(map.m_flags & F2FS_MAP_FLAGS)) {
+			map.m_lblk = next_pgofs;
+			goto check;
+		}
+
+		set_inode_flag(inode, FI_SKIP_WRITES);
+
+		idx = map.m_lblk;
+		while (idx < map.m_lblk + map.m_len &&
+						cnt < BLKS_PER_SEG(sbi)) {
+			struct page *page;
+
+			page = f2fs_get_lock_data_page(inode, idx, true);
+			if (IS_ERR(page)) {
+				err = PTR_ERR(page);
+				goto clear_out;
+			}
+
+			f2fs_wait_on_page_writeback(page, DATA, true, true);
+
+			set_page_dirty(page);
+			set_page_private_gcing(page);
+			f2fs_put_page(page, 1);
+
+			idx++;
+			cnt++;
+			total++;
+		}
+
+		map.m_lblk = idx;
+check:
+		if (map.m_lblk < pg_end && cnt < BLKS_PER_SEG(sbi))
+			goto do_map;
+
+		clear_inode_flag(inode, FI_SKIP_WRITES);
+
+		err = filemap_fdatawrite(inode->i_mapping);
+		if (err)
+			goto out;
+	}
+clear_out:
+	clear_inode_flag(inode, FI_SKIP_WRITES);
+out:
+	clear_inode_flag(inode, FI_OPU_WRITE);
+unlock_out:
+	inode_unlock(inode);
+	if (!err)
+		range->len = (u64)total << PAGE_SHIFT;
+	return err;
+}
+The corrected function: static int f2fs_defragment_range(struct f2fs_sb_info *sbi,
+					struct file *filp,
+					struct f2fs_defragment *range)
+{
+	struct inode *inode = file_inode(filp);
+	struct f2fs_map_blocks map = { .m_next_extent = NULL,
+					.m_seg_type = NO_CHECK_TYPE,
+					.m_may_create = false };
+	struct extent_info ei = {};
+	pgoff_t pg_start, pg_end, next_pgofs;
+	unsigned int total = 0, sec_num;
+	block_t blk_end = 0;
+	bool fragmented = false;
+	int err;
+
+	f2fs_balance_fs(sbi, true);
+
+	inode_lock(inode);
+	pg_start = range->start >> PAGE_SHIFT;
+	pg_end = min_t(pgoff_t,
+				(range->start + range->len) >> PAGE_SHIFT,
+				DIV_ROUND_UP(i_size_read(inode), PAGE_SIZE));
+
+	if (is_inode_flag_set(inode, FI_COMPRESS_RELEASED) ||
+		f2fs_is_atomic_file(inode)) {
+		err = -EINVAL;
+		goto unlock_out;
+	}
+
+	/* if in-place-update policy is enabled, don't waste time here */
+	set_inode_flag(inode, FI_OPU_WRITE);
+	if (f2fs_should_update_inplace(inode, NULL)) {
+		err = -EINVAL;
+		goto out;
+	}
+
+	/* writeback all dirty pages in the range */
+	err = filemap_write_and_wait_range(inode->i_mapping,
+						pg_start << PAGE_SHIFT,
+						(pg_end << PAGE_SHIFT) - 1);
+	if (err)
+		goto out;
+
+	/*
+	 * lookup mapping info in extent cache, skip defragmenting if physical
+	 * block addresses are continuous.
+	 */
+	if (f2fs_lookup_read_extent_cache(inode, pg_start, &ei)) {
+		if ((pgoff_t)ei.fofs + ei.len >= pg_end)
+			goto out;
+	}
+
+	map.m_lblk = pg_start;
+	map.m_next_pgofs = &next_pgofs;
+
+	/*
+	 * lookup mapping info in dnode page cache, skip defragmenting if all
+	 * physical block addresses are continuous even if there are hole(s)
+	 * in logical blocks.
+	 */
+	while (map.m_lblk < pg_end) {
+		map.m_len = pg_end - map.m_lblk;
+		err = f2fs_map_blocks(inode, &map, F2FS_GET_BLOCK_DEFAULT);
+		if (err)
+			goto out;
+
+		if (!(map.m_flags & F2FS_MAP_FLAGS)) {
+			map.m_lblk = next_pgofs;
+			continue;
+		}
+
+		if (blk_end && blk_end != map.m_pblk)
+			fragmented = true;
+
+		/* record total count of block that we're going to move */
+		total += map.m_len;
+
+		blk_end = map.m_pblk + map.m_len;
+
+		map.m_lblk += map.m_len;
+	}
+
+	if (!fragmented) {
+		total = 0;
+		goto out;
+	}
+
+	sec_num = DIV_ROUND_UP(total, CAP_BLKS_PER_SEC(sbi));
+
+	/*
+	 * make sure there are enough free section for LFS allocation, this can
+	 * avoid defragment running in SSR mode when free section are allocated
+	 * intensively
+	 */
+	if (has_not_enough_free_secs(sbi, 0, sec_num)) {
+		err = -EAGAIN;
+		goto out;
+	}
+
+	map.m_lblk = pg_start;
+	map.m_len = pg_end - pg_start;
+	total = 0;
+
+	while (map.m_lblk < pg_end) {
+		pgoff_t idx;
+		int cnt = 0;
+
+do_map:
+		map.m_len = pg_end - map.m_lblk;
+		err = f2fs_map_blocks(inode, &map, F2FS_GET_BLOCK_DEFAULT);
+		if (err)
+			goto clear_out;
+
+		if (!(map.m_flags & F2FS_MAP_FLAGS)) {
+			map.m_lblk = next_pgofs;
+			goto check;
+		}
+
+		set_inode_flag(inode, FI_SKIP_WRITES);
+
+		idx = map.m_lblk;
+		while (idx < map.m_lblk + map.m_len &&
+						cnt < BLKS_PER_SEG(sbi)) {
+			struct page *page;
+
+			page = f2fs_get_lock_data_page(inode, idx, true);
+			if (IS_ERR(page)) {
+				err = PTR_ERR(page);
+				goto clear_out;
+			}
+
+			f2fs_wait_on_page_writeback(page, DATA, true, true);
+
+			set_page_dirty(page);
+			set_page_private_gcing(page);
+			f2fs_put_page(page, 1);
+
+			idx++;
+			cnt++;
+			total++;
+		}
+
+		map.m_lblk = idx;
+check:
+		if (map.m_lblk < pg_end && cnt < BLKS_PER_SEG(sbi))
+			goto do_map;
+
+		clear_inode_flag(inode, FI_SKIP_WRITES);
+
+		err = filemap_fdatawrite(inode->i_mapping);
+		if (err)
+			goto out;
+	}
+clear_out:
+	clear_inode_flag(inode, FI_SKIP_WRITES);
+out:
+	clear_inode_flag(inode, FI_OPU_WRITE);
+unlock_out:
+	inode_unlock(inode);
+	if (!err)
+		range->len = (u64)total << PAGE_SHIFT;
+	return err;
+}

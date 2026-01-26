@@ -1,0 +1,17 @@
+Revert "NFSv4: Handle the special Linux file open access mode"
+
+This reverts commit 44942b4e457beda00981f616402a1a791e8c616e.
+
+After secondly opening a file with O_ACCMODE|O_DIRECT flags,
+nfs4_valid_open_stateid() will dereference NULL nfs4_state when lseek().
+
+Reproducer:
+  1. mount -t nfs -o vers=4.2 $server_ip:/ /mnt/
+  2. fd = open("/mnt/file", O_ACCMODE|O_DIRECT|O_CREAT)
+  3. close(fd)
+  4. fd = open("/mnt/file", O_ACCMODE|O_DIRECT)
+  5. lseek(fd)
+
+Reported-by: Lyu Tao <tao.lyu@epfl.ch>
+Signed-off-by: ChenXiaoSong <chenxiaosong2@huawei.com>
+Signed-off-by: Trond Myklebust <trond.myklebust@hammerspace.com>

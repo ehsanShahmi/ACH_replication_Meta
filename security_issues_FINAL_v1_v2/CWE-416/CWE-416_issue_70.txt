@@ -1,0 +1,16 @@
+appletalk: Fix Use-After-Free in atalk_ioctl
+
+Because atalk_ioctl() accesses sk->sk_receive_queue
+without holding a sk->sk_receive_queue.lock, it can
+cause a race with atalk_recvmsg().
+A use-after-free for skb occurs with the following flow.
+```
+atalk_ioctl() -> skb_peek()
+atalk_recvmsg() -> skb_recv_datagram() -> skb_free_datagram()
+```
+Add sk->sk_receive_queue.lock to atalk_ioctl() to fix this issue.
+
+Fixes: 1da177e4c3f4 ("Linux-2.6.12-rc2")
+Signed-off-by: Hyunwoo Kim <v4bel@theori.io>
+Link: https://lore.kernel.org/r/20231213041056.GA519680@v4bel-B760M-AORUS-ELITE-AX
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>

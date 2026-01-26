@@ -45,53 +45,87 @@ def get_includes_as_string(include_dir="./includes") -> str:
 
 
 
+import os
+import sys
 
-def mutator(SUMMARY: str, current_filename_path: str, test_case_filename_path: str) -> str:
-    base_dir = 'current_code_repo'
-    testcases_dir = 'testcases'
+def mutator(issue_filepath: str, current_filename_path: str, test_case_filename_path: str, output_directory: str) -> str:
+    """
+    Generates a mutant from the given issue, code, and test files.
+    Saves mutant into the specified output directory.
+    """
+    # Ensure output dir exists
+    os.makedirs(output_directory, exist_ok=True)
+    
+    # --- Load includes and contents ---
     all_header_content = get_includes_as_string(include_dir="./includes")
-    mutant_dir = 'mutants'
 
-    # test_case_filename = f'{existing_test_case}'
-    # test_case_filename_path = os.path.join(base_dir, testcases_dir, test_case_filename)
-    with open(test_case_filename_path, 'r') as file:
+    with open(issue_filepath, 'r', encoding='utf-8') as f:
+        issue_content = f.read()
+
+    with open(test_case_filename_path, 'r', encoding='utf-8') as file:
         string_test_case_filename = file.read()
 
-    # code_repo_filename = f'{current_file}'
-    # code_repo_filename_path = os.path.join(base_dir, code_repo_filename)
-    with open(current_filename_path, 'r') as file:
+    with open(current_filename_path, 'r', encoding='utf-8') as file:
         string_current_filename = file.read()
 
-    # # Use os.path.splitext() to get the filename root without the extension
-    # filename_root, extension = os.path.splitext(current_file)
-    # # Now use the root filename to build the header file path
-    # header_filename = f'{filename_root}.h'
-    # header_filename_path = os.path.join(base_dir, include_dir, header_filename)
-    # with open(header_filename_path, 'r') as file:
-    #     file_header = file.read()
+    # --- LLM Prompt ---
+    INSTRUCT_1 = (
+        "INSTRUCTION: Here is a file under test and a file with some unit tests for the file under test."
+        "{" + string_current_filename + "}."
+        "{" + string_test_case_filename + "}."
+        " Write a new version of this file under test in which each function is replaced by a new version "
+        "that contains a typical bug that introduces a SECURITY violation similar to context. "
+        "Delimit the mutated part using the comment-pair '// MUTANT <START>' and '// MUTANT <END>'. "
+        "______________________________________________________________________________________"
+        "IMPORTANT instructions: "
+        "THE MUTANT MUST PASS ALL THE EXISTING TEST CASES. YOU HAVE TO INTRODUCE A NEW CWE TYPE, ACCORDING TO THE GIVEN CONTEXT."
+        "DO NOT CHANGE THE ORIGINAL SECURITY ISSUE IN ANY WAY, SO THAT EXISTING ALL TEST CASES PASS YOUR MUTANT."
+        "______________________________________________________________________________________"
+        "Extra instructions: "
+        "[DO NOT INCLUDE MARKDOWN CODEBLOCKS (```c...``` or ```python...```) AT THE START AND END OF THE FILE. "
+        "WHEN GENERATING THE FINAL MUTANT CODE, ONLY USE STANDARD #include 'filename.h' STATEMENTS. "
+        "DO NOT COPY THE CONTENTS OF THE HEADERS INTO THE FINAL CODE FILE.]"
+    )
+    PROMPT1 = "CONTEXT: " + issue_content + " " + INSTRUCT_1
 
-
-    INSTRUCT_1 = "INSTRUCTION: Here is a file under test and a file with some unit tests for the file under test.{"+all_header_content+string_current_filename+"}.{"+string_test_case_filename+"}. Write a new version of this file under test in which each function is replaced by a new version of that same function that contains a typical bug that introduces a SECURITY violation similar to context. Delimit the mutated part using the comment-pair '// MUTANT <START>' and '// MUTANT <END>'. [DO NOT INCLUDE MARKDOWN CODEBLOCKS (```c...```) AT THE START AND END OF THE FILE. WHEN GENERATING THE FINAL MUTANT CODE, ONLY USE STANDARD #include 'filename.h' STATEMENTS. DO NOT COPY THE CONTENTS OF THE HEADERS INTO THE FINAL CODE FILE.]"
-
-    PROMPT1 = "CONTEXT: "+SUMMARY+" "+INSTRUCT_1
-    response = client.models.generate_content(model="gemini-3-pro-preview", contents=PROMPT1)
-    # response_gpt = client_gpt.responses.create(model="gpt-5", input=[SUMMARY, EXISTING_TEST_CASES, current_code_repo, INSTRUCT_1])
-    current_filename_basename = os.path.basename(current_filename_path) 
-    current_filename_root, extension = os.path.splitext(current_filename_basename)
-    new_mutant_filename = f"{current_filename_root}_mutant{extension}"
-    mutant_filename_path = os.path.join(mutant_dir, new_mutant_filename)
-    os.makedirs(mutant_dir, exist_ok=True)
+    # --- Generate new mutant content ---
+    response = client.models.generate_content(model="gemma-3-27b-it", contents=PROMPT1)
     file_content_mutant = response.text
+
+    # --- Build mutant filename ---
+    current_filename_basename = os.path.basename(current_filename_path)
+    current_filename_root, extension = os.path.splitext(current_filename_basename)
+
+    issue_filename = os.path.basename(issue_filepath)
+    issue_root, _ = os.path.splitext(issue_filename)
+
+    # Example: CWE-120_issue_2_math_task_mutant.c
+    new_mutant_filename = f"{issue_root}_{current_filename_root}_mutant{extension}"
+    mutant_filename_path = os.path.join(output_directory, new_mutant_filename)
+
+    # --- Write mutant file ---
     with open(mutant_filename_path, 'w', encoding='utf-8') as file:
         file.write(file_content_mutant)
-    
+
     return mutant_filename_path
 
 
-
 if __name__ == "__main__":
-    summary = sys.argv[1]
+    # Expect 4 arguments
+    if len(sys.argv) != 5:
+        print("Usage: python3 mutator.py <path_to_issue_file> <path_to_c_file> <path_to_test_file> <output_directory>")
+        sys.exit(1)
+
+    issue_filepath = sys.argv[1]
     current_file = sys.argv[2]
     existing_test_case = sys.argv[3]
-    mutant_filename = mutator(summary, current_file, existing_test_case)
-    print (mutant_filename)
+    output_directory = sys.argv[4]
+
+    # Check paths
+    for path in [issue_filepath, current_file, existing_test_case]:
+        if not os.path.exists(path):
+            print(f"Error: file not found at '{path}'")
+            sys.exit(1)
+
+    mutant_filename = mutator(issue_filepath, current_file, existing_test_case, output_directory)
+    print(mutant_filename)

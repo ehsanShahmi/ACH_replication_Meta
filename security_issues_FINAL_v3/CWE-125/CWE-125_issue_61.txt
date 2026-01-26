@@ -1,0 +1,71 @@
+The vulnerable issue: Bluetooth: refactor malicious adv data check
+
+Check for out-of-bound read was being performed at the end of while
+num_reports loop, and would fill journal with false positives. Added
+check to beginning of loop processing so that it doesn't get checked
+after ptr has been advanced.
+
+Signed-off-by: Brian Gix <brian.gix@intel.com>
+Signed-off-by: Marcel Holtmann <marcel@holtmann.org>
+The vulnerable function: static void hci_le_adv_report_evt(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	u8 num_reports = skb->data[0];
+	void *ptr = &skb->data[1];
+
+	hci_dev_lock(hdev);
+
+	while (num_reports--) {
+		struct hci_ev_le_advertising_info *ev = ptr;
+		s8 rssi;
+
+		if (ev->length <= HCI_MAX_AD_LENGTH &&
+		    ev->data + ev->length <= skb_tail_pointer(skb)) {
+			rssi = ev->data[ev->length];
+			process_adv_report(hdev, ev->evt_type, &ev->bdaddr,
+					   ev->bdaddr_type, NULL, 0, rssi,
+					   ev->data, ev->length, false);
+		} else {
+			bt_dev_err(hdev, "Dropping invalid advertising data");
+		}
+
+		ptr += sizeof(*ev) + ev->length + 1;
+
+		if (ptr > (void *) skb_tail_pointer(skb) - sizeof(*ev)) {
+			bt_dev_err(hdev, "Malicious advertising data. Stopping processing");
+			break;
+		}
+	}
+
+	hci_dev_unlock(hdev);
+}
+The corrected function: static void hci_le_adv_report_evt(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	u8 num_reports = skb->data[0];
+	void *ptr = &skb->data[1];
+
+	hci_dev_lock(hdev);
+
+	while (num_reports--) {
+		struct hci_ev_le_advertising_info *ev = ptr;
+		s8 rssi;
+
+		if (ptr > (void *)skb_tail_pointer(skb) - sizeof(*ev)) {
+			bt_dev_err(hdev, "Malicious advertising data.");
+			break;
+		}
+
+		if (ev->length <= HCI_MAX_AD_LENGTH &&
+		    ev->data + ev->length <= skb_tail_pointer(skb)) {
+			rssi = ev->data[ev->length];
+			process_adv_report(hdev, ev->evt_type, &ev->bdaddr,
+					   ev->bdaddr_type, NULL, 0, rssi,
+					   ev->data, ev->length, false);
+		} else {
+			bt_dev_err(hdev, "Dropping invalid advertising data");
+		}
+
+		ptr += sizeof(*ev) + ev->length + 1;
+	}
+
+	hci_dev_unlock(hdev);
+}

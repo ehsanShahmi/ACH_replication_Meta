@@ -1,0 +1,29 @@
+{no}
+
+The two versions are not equivalent.
+
+**Explanation:**
+
+In the first version (File 1), the `get_target_for_redirect` function performs a strict validation of the domain. It checks if the `netloc` (hostname) of the target URL either:
+1. Exactly matches the `domain`.
+2. Ends with the suffix `.<domain>` (indicating a valid subdomain).
+
+In the second version (File 2), the function uses `strstr(target_netloc, domain) != NULL`. This merely checks if the `domain` string appears *anywhere* inside the target's hostname.
+
+**Divergent Behavior Example:**
+
+Consider the input:
+*   `target` = `"https://attacker-example.com"`
+*   `domain` = `"example.com"`
+
+**File 1 Execution:**
+1.  Extracts `netloc`: `"attacker-example.com"`.
+2.  Checks exact match: fails.
+3.  Checks subdomain format (expects `.` before `example.com`): fails because the character preceding "example.com" is `-`.
+4.  **Result:** Returns the fallback URL `"https://example.com"`.
+
+**File 2 Execution:**
+1.  Extracts `netloc`: `"attacker-example.com"`.
+2.  Checks if `"attacker-example.com"` contains `"example.com"` using `strstr`.
+3.  The check passes because `"example.com"` is a substring.
+4.  **Result:** Returns the malicious target URL `"https://attacker-example.com"`.

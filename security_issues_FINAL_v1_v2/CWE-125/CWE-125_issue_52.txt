@@ -1,0 +1,7 @@
+drm/amdgpu: fix ucode out-of-bounds read warning
+
+Clear warning that read ucode[] may out-of-bounds.
+
+Signed-off-by: Tim Huang <Tim.Huang@amd.com>
+Reviewed-by: Alex Deucher <alexander.deucher@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>

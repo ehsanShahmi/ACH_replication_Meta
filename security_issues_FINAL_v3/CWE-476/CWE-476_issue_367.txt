@@ -1,0 +1,72 @@
+The vulnerable issue: KEYS: Remove key_type::match in favour of overriding default by match_preparse
+
+A previous patch added a ->match_preparse() method to the key type.  This is
+allowed to override the function called by the iteration algorithm.
+Therefore, we can just set a default that simply checks for an exact match of
+the key description with the original criterion data and allow match_preparse
+to override it as needed.
+
+The key_type::match op is then redundant and can be removed, as can the
+user_match() function.
+
+Signed-off-by: David Howells <dhowells@redhat.com>
+Acked-by: Vivek Goyal <vgoyal@redhat.com>
+The vulnerable function: key_ref_t keyring_search(key_ref_t keyring,
+			 struct key_type *type,
+			 const char *description)
+{
+	struct keyring_search_context ctx = {
+		.index_key.type		= type,
+		.index_key.description	= description,
+		.cred			= current_cred(),
+		.match_data.cmp		= type->match,
+		.match_data.raw_data	= description,
+		.match_data.lookup_type	= KEYRING_SEARCH_LOOKUP_DIRECT,
+		.flags			= KEYRING_SEARCH_DO_STATE_CHECK,
+	};
+	key_ref_t key;
+	int ret;
+
+	if (!ctx.match_data.cmp)
+		return ERR_PTR(-ENOKEY);
+
+	if (type->match_preparse) {
+		ret = type->match_preparse(&ctx.match_data);
+		if (ret < 0)
+			return ERR_PTR(ret);
+	}
+
+	key = keyring_search_aux(keyring, &ctx);
+
+	if (type->match_free)
+		type->match_free(&ctx.match_data);
+	return key;
+}
+The corrected function: key_ref_t keyring_search(key_ref_t keyring,
+			 struct key_type *type,
+			 const char *description)
+{
+	struct keyring_search_context ctx = {
+		.index_key.type		= type,
+		.index_key.description	= description,
+		.cred			= current_cred(),
+		.match_data.cmp		= key_default_cmp,
+		.match_data.raw_data	= description,
+		.match_data.lookup_type	= KEYRING_SEARCH_LOOKUP_DIRECT,
+		.flags			= KEYRING_SEARCH_DO_STATE_CHECK,
+	};
+	key_ref_t key;
+	int ret;
+
+	if (type->match_preparse) {
+		ret = type->match_preparse(&ctx.match_data);
+		if (ret < 0)
+			return ERR_PTR(ret);
+	}
+
+	key = keyring_search_aux(keyring, &ctx);
+
+	if (type->match_free)
+		type->match_free(&ctx.match_data);
+	return key;
+}

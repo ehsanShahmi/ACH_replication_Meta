@@ -1,0 +1,183 @@
+The vulnerable issue: perf: Remove the nmi parameter from the swevent and overflow interface
+
+The nmi parameter indicated if we could do wakeups from the current
+context, if not, we would set some state and self-IPI and let the
+resulting interrupt do the wakeup.
+
+For the various event classes:
+
+  - hardware: nmi=0; PMI is in fact an NMI or we run irq_work_run from
+    the PMI-tail (ARM etc.)
+  - tracepoint: nmi=0; since tracepoint could be from NMI context.
+  - software: nmi=[0,1]; some, like the schedule thing cannot
+    perform wakeups, and hence need 0.
+
+As one can see, there is very little nmi=1 usage, and the down-side of
+not using it is that on some platforms some software events can have a
+jiffy delay in wakeup (when arch_irq_work_raise isn't implemented).
+
+The up-side however is that we can remove the nmi parameter and save a
+bunch of conditionals in fast paths.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: Michael Cree <mcree@orcon.net.nz>
+Cc: Will Deacon <will.deacon@arm.com>
+Cc: Deng-Cheng Zhu <dengcheng.zhu@gmail.com>
+Cc: Anton Blanchard <anton@samba.org>
+Cc: Eric B Munson <emunson@mgebm.net>
+Cc: Heiko Carstens <heiko.carstens@de.ibm.com>
+Cc: Paul Mundt <lethal@linux-sh.org>
+Cc: David S. Miller <davem@davemloft.net>
+Cc: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Jason Wessel <jason.wessel@windriver.com>
+Cc: Don Zickus <dzickus@redhat.com>
+Link: http://lkml.kernel.org/n/tip-agjev8eu666tvknpb3iaj0fg@git.kernel.org
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+The vulnerable function: static int misaligned_store(struct pt_regs *regs,
+			    __u32 opcode,
+			    int displacement_not_indexed,
+			    int width_shift)
+{
+	/* Return -1 for a fault, 0 for OK */
+	int error;
+	int srcreg;
+	__u64 address;
+
+	error = generate_and_check_address(regs, opcode,
+			displacement_not_indexed, width_shift, &address);
+	if (error < 0) {
+		return error;
+	}
+
+	perf_sw_event(PERF_COUNT_SW_ALIGNMENT_FAULTS, 1, 0, regs, address);
+
+	srcreg = (opcode >> 4) & 0x3f;
+	if (user_mode(regs)) {
+		__u64 buffer;
+
+		if (!access_ok(VERIFY_WRITE, (unsigned long) address, 1UL<<width_shift)) {
+			return -1;
+		}
+
+		switch (width_shift) {
+		case 1:
+			*(__u16 *) &buffer = (__u16) regs->regs[srcreg];
+			break;
+		case 2:
+			*(__u32 *) &buffer = (__u32) regs->regs[srcreg];
+			break;
+		case 3:
+			buffer = regs->regs[srcreg];
+			break;
+		default:
+			printk("Unexpected width_shift %d in misaligned_store, PC=%08lx\n",
+				width_shift, (unsigned long) regs->pc);
+			break;
+		}
+
+		if (__copy_user((void *)(int)address, &buffer, (1 << width_shift)) > 0) {
+			return -1; /* fault */
+		}
+	} else {
+		/* kernel mode - we can take short cuts since if we fault, it's a genuine bug */
+		__u64 val = regs->regs[srcreg];
+
+		switch (width_shift) {
+		case 1:
+			misaligned_kernel_word_store(address, val);
+			break;
+		case 2:
+			asm ("stlo.l %1, 0, %0" : : "r" (val), "r" (address));
+			asm ("sthi.l %1, 3, %0" : : "r" (val), "r" (address));
+			break;
+		case 3:
+			asm ("stlo.q %1, 0, %0" : : "r" (val), "r" (address));
+			asm ("sthi.q %1, 7, %0" : : "r" (val), "r" (address));
+			break;
+
+		default:
+			printk("Unexpected width_shift %d in misaligned_store, PC=%08lx\n",
+				width_shift, (unsigned long) regs->pc);
+			break;
+		}
+	}
+
+	return 0;
+
+}
+The corrected function: static int misaligned_fpu_load(struct pt_regs *regs,
+			   __u32 opcode,
+			   int displacement_not_indexed,
+			   int width_shift,
+			   int do_paired_load)
+{
+	/* Return -1 for a fault, 0 for OK */
+	int error;
+	int destreg;
+	__u64 address;
+
+	error = generate_and_check_address(regs, opcode,
+			displacement_not_indexed, width_shift, &address);
+	if (error < 0) {
+		return error;
+	}
+
+	perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS, 1, regs, address);
+
+	destreg = (opcode >> 4) & 0x3f;
+	if (user_mode(regs)) {
+		__u64 buffer;
+		__u32 buflo, bufhi;
+
+		if (!access_ok(VERIFY_READ, (unsigned long) address, 1UL<<width_shift)) {
+			return -1;
+		}
+
+		if (__copy_user(&buffer, (const void *)(int)address, (1 << width_shift)) > 0) {
+			return -1; /* fault */
+		}
+		/* 'current' may be the current owner of the FPU state, so
+		   context switch the registers into memory so they can be
+		   indexed by register number. */
+		if (last_task_used_math == current) {
+			enable_fpu();
+			save_fpu(current);
+			disable_fpu();
+			last_task_used_math = NULL;
+			regs->sr |= SR_FD;
+		}
+
+		buflo = *(__u32*) &buffer;
+		bufhi = *(1 + (__u32*) &buffer);
+
+		switch (width_shift) {
+		case 2:
+			current->thread.xstate->hardfpu.fp_regs[destreg] = buflo;
+			break;
+		case 3:
+			if (do_paired_load) {
+				current->thread.xstate->hardfpu.fp_regs[destreg] = buflo;
+				current->thread.xstate->hardfpu.fp_regs[destreg+1] = bufhi;
+			} else {
+#if defined(CONFIG_CPU_LITTLE_ENDIAN)
+				current->thread.xstate->hardfpu.fp_regs[destreg] = bufhi;
+				current->thread.xstate->hardfpu.fp_regs[destreg+1] = buflo;
+#else
+				current->thread.xstate->hardfpu.fp_regs[destreg] = buflo;
+				current->thread.xstate->hardfpu.fp_regs[destreg+1] = bufhi;
+#endif
+			}
+			break;
+		default:
+			printk("Unexpected width_shift %d in misaligned_fpu_load, PC=%08lx\n",
+				width_shift, (unsigned long) regs->pc);
+			break;
+		}
+		return 0;
+	} else {
+		die ("Misaligned FPU load inside kernel", regs, 0);
+		return -1;
+	}
+
+
+}

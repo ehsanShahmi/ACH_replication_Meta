@@ -1,0 +1,12 @@
+ASoC: fsl: fsl_qmc_audio: Check devm_kasprintf() returned value
+
+devm_kasprintf() can return a NULL pointer on failure but this returned
+value is not checked.
+
+Fix this lack and check the returned value.
+
+Fixes: 075c7125b11c ("ASoC: fsl: Add support for QMC audio")
+Cc: stable@vger.kernel.org
+Signed-off-by: Herve Codina <herve.codina@bootlin.com>
+Link: https://patch.msgid.link/20240701113038.55144-2-herve.codina@bootlin.com
+Signed-off-by: Mark Brown <broonie@kernel.org>

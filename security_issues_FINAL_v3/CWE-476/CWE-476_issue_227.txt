@@ -1,0 +1,120 @@
+The vulnerable issue: RDMA/uverbs: Check for null return of kmalloc_array
+
+Because of the possible failure of the allocation, data might be NULL
+pointer and will cause the dereference of the NULL pointer later.
+Therefore, it might be better to check it and return -ENOMEM.
+
+Fixes: 6884c6c4bd09 ("RDMA/verbs: Store the write/write_ex uapi entry points in the uverbs_api")
+Link: https://lore.kernel.org/r/20211231093315.1917667-1-jiasheng@iscas.ac.cn
+Signed-off-by: Jiasheng Jiang <jiasheng@iscas.ac.cn>
+Reviewed-by: Leon Romanovsky <leonro@nvidia.com>
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+The vulnerable function: static int uapi_finalize(struct uverbs_api *uapi)
+{
+	const struct uverbs_api_write_method **data;
+	unsigned long max_write_ex = 0;
+	unsigned long max_write = 0;
+	struct radix_tree_iter iter;
+	void __rcu **slot;
+	int rc;
+	int i;
+
+	radix_tree_for_each_slot (slot, &uapi->radix, &iter, 0) {
+		struct uverbs_api_ioctl_method *method_elm =
+			rcu_dereference_protected(*slot, true);
+
+		if (uapi_key_is_ioctl_method(iter.index)) {
+			rc = uapi_finalize_ioctl_method(uapi, method_elm,
+							iter.index);
+			if (rc)
+				return rc;
+		}
+
+		if (uapi_key_is_write_method(iter.index))
+			max_write = max(max_write,
+					iter.index & UVERBS_API_ATTR_KEY_MASK);
+		if (uapi_key_is_write_ex_method(iter.index))
+			max_write_ex =
+				max(max_write_ex,
+				    iter.index & UVERBS_API_ATTR_KEY_MASK);
+	}
+
+	uapi->notsupp_method.handler = ib_uverbs_notsupp;
+	uapi->num_write = max_write + 1;
+	uapi->num_write_ex = max_write_ex + 1;
+	data = kmalloc_array(uapi->num_write + uapi->num_write_ex,
+			     sizeof(*uapi->write_methods), GFP_KERNEL);
+	for (i = 0; i != uapi->num_write + uapi->num_write_ex; i++)
+		data[i] = &uapi->notsupp_method;
+	uapi->write_methods = data;
+	uapi->write_ex_methods = data + uapi->num_write;
+
+	radix_tree_for_each_slot (slot, &uapi->radix, &iter, 0) {
+		if (uapi_key_is_write_method(iter.index))
+			uapi->write_methods[iter.index &
+					    UVERBS_API_ATTR_KEY_MASK] =
+				rcu_dereference_protected(*slot, true);
+		if (uapi_key_is_write_ex_method(iter.index))
+			uapi->write_ex_methods[iter.index &
+					       UVERBS_API_ATTR_KEY_MASK] =
+				rcu_dereference_protected(*slot, true);
+	}
+
+	return 0;
+}
+The corrected function: static int uapi_finalize(struct uverbs_api *uapi)
+{
+	const struct uverbs_api_write_method **data;
+	unsigned long max_write_ex = 0;
+	unsigned long max_write = 0;
+	struct radix_tree_iter iter;
+	void __rcu **slot;
+	int rc;
+	int i;
+
+	radix_tree_for_each_slot (slot, &uapi->radix, &iter, 0) {
+		struct uverbs_api_ioctl_method *method_elm =
+			rcu_dereference_protected(*slot, true);
+
+		if (uapi_key_is_ioctl_method(iter.index)) {
+			rc = uapi_finalize_ioctl_method(uapi, method_elm,
+							iter.index);
+			if (rc)
+				return rc;
+		}
+
+		if (uapi_key_is_write_method(iter.index))
+			max_write = max(max_write,
+					iter.index & UVERBS_API_ATTR_KEY_MASK);
+		if (uapi_key_is_write_ex_method(iter.index))
+			max_write_ex =
+				max(max_write_ex,
+				    iter.index & UVERBS_API_ATTR_KEY_MASK);
+	}
+
+	uapi->notsupp_method.handler = ib_uverbs_notsupp;
+	uapi->num_write = max_write + 1;
+	uapi->num_write_ex = max_write_ex + 1;
+	data = kmalloc_array(uapi->num_write + uapi->num_write_ex,
+			     sizeof(*uapi->write_methods), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	for (i = 0; i != uapi->num_write + uapi->num_write_ex; i++)
+		data[i] = &uapi->notsupp_method;
+	uapi->write_methods = data;
+	uapi->write_ex_methods = data + uapi->num_write;
+
+	radix_tree_for_each_slot (slot, &uapi->radix, &iter, 0) {
+		if (uapi_key_is_write_method(iter.index))
+			uapi->write_methods[iter.index &
+					    UVERBS_API_ATTR_KEY_MASK] =
+				rcu_dereference_protected(*slot, true);
+		if (uapi_key_is_write_ex_method(iter.index))
+			uapi->write_ex_methods[iter.index &
+					       UVERBS_API_ATTR_KEY_MASK] =
+				rcu_dereference_protected(*slot, true);
+	}
+
+	return 0;
+}

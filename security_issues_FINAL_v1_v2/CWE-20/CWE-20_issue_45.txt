@@ -1,0 +1,17 @@
+ROSE: prevent heap corruption with bad facilities
+
+When parsing the FAC_NATIONAL_DIGIS facilities field, it's possible for
+a remote host to provide more digipeaters than expected, resulting in
+heap corruption.  Check against ROSE_MAX_DIGIS to prevent overflows, and
+abort facilities parsing on failure.
+
+Additionally, when parsing the FAC_CCITT_DEST_NSAP and
+FAC_CCITT_SRC_NSAP facilities fields, a remote host can provide a length
+of less than 10, resulting in an underflow in a memcpy size, causing a
+kernel panic due to massive heap corruption.  A length of greater than
+20 results in a stack overflow of the callsign array.  Abort facilities
+parsing on these invalid length values.
+
+Signed-off-by: Dan Rosenberg <drosenberg@vsecurity.com>
+Cc: stable@kernel.org
+Signed-off-by: David S. Miller <davem@davemloft.net>

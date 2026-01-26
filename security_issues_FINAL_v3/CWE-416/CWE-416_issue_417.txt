@@ -1,0 +1,90 @@
+The vulnerable issue: usb: f_fs: Fix use-after-free for epfile
+
+Consider a case where ffs_func_eps_disable is called from
+ffs_func_disable as part of composition switch and at the
+same time ffs_epfile_release get called from userspace.
+ffs_epfile_release will free up the read buffer and call
+ffs_data_closed which in turn destroys ffs->epfiles and
+mark it as NULL. While this was happening the driver has
+already initialized the local epfile in ffs_func_eps_disable
+which is now freed and waiting to acquire the spinlock. Once
+spinlock is acquired the driver proceeds with the stale value
+of epfile and tries to free the already freed read buffer
+causing use-after-free.
+
+Following is the illustration of the race:
+
+      CPU1                                  CPU2
+
+   ffs_func_eps_disable
+   epfiles (local copy)
+					ffs_epfile_release
+					ffs_data_closed
+					if (last file closed)
+					ffs_data_reset
+					ffs_data_clear
+					ffs_epfiles_destroy
+spin_lock
+dereference epfiles
+
+Fix this races by taking epfiles local copy & assigning it under
+spinlock and if epfiles(local) is null then update it in ffs->epfiles
+then finally destroy it.
+Extending the scope further from the race, protecting the ep related
+structures, and concurrent accesses.
+
+Fixes: a9e6f83c2df1 ("usb: gadget: f_fs: stop sleeping in ffs_func_eps_disable")
+Co-developed-by: Udipto Goswami <quic_ugoswami@quicinc.com>
+Reviewed-by: John Keeping <john@metanate.com>
+Signed-off-by: Pratham Pratap <quic_ppratap@quicinc.com>
+Signed-off-by: Udipto Goswami <quic_ugoswami@quicinc.com>
+Link: https://lore.kernel.org/r/1643256595-10797-1-git-send-email-quic_ugoswami@quicinc.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+The vulnerable function: static void ffs_data_closed(struct ffs_data *ffs)
+{
+	ENTER();
+
+	if (atomic_dec_and_test(&ffs->opened)) {
+		if (ffs->no_disconnect) {
+			ffs->state = FFS_DEACTIVATED;
+			if (ffs->epfiles) {
+				ffs_epfiles_destroy(ffs->epfiles,
+						   ffs->eps_count);
+				ffs->epfiles = NULL;
+			}
+			if (ffs->setup_state == FFS_SETUP_PENDING)
+				__ffs_ep0_stall(ffs);
+		} else {
+			ffs->state = FFS_CLOSING;
+			ffs_data_reset(ffs);
+		}
+	}
+	if (atomic_read(&ffs->opened) < 0) {
+		ffs->state = FFS_CLOSING;
+		ffs_data_reset(ffs);
+	}
+
+	ffs_data_put(ffs);
+}
+The corrected function: static void ffs_func_eps_disable(struct ffs_function *func)
+{
+	struct ffs_ep *ep         = func->eps;
+	struct ffs_epfile *epfile = func->ffs->epfiles;
+	unsigned count            = func->ffs->eps_count;
+	unsigned long flags;
+
+	spin_lock_irqsave(&func->ffs->eps_lock, flags);
+	while (count--) {
+		/* pending requests get nuked */
+		if (ep->ep)
+			usb_ep_disable(ep->ep);
+		++ep;
+
+		if (epfile) {
+			epfile->ep = NULL;
+			__ffs_epfile_read_buffer_free(epfile);
+			++epfile;
+		}
+	}
+	spin_unlock_irqrestore(&func->ffs->eps_lock, flags);
+}

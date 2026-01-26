@@ -1,0 +1,150 @@
+The vulnerable issue: Btrfs: fix hash overflow handling
+
+The handling for directory crc hash overflows was fairly obscure,
+split_leaf returns EOVERFLOW when we try to extend the item and that is
+supposed to bubble up to userland.  For a while it did so, but along the
+way we added better handling of errors and forced the FS readonly if we
+hit IO errors during the directory insertion.
+
+Along the way, we started testing only for EEXIST and the EOVERFLOW case
+was dropped.  The end result is that we may force the FS readonly if we
+catch a directory hash bucket overflow.
+
+This fixes a few problem spots.  First I add tests for EOVERFLOW in the
+places where we can safely just return the error up the chain.
+
+btrfs_rename is harder though, because it tries to insert the new
+directory item only after it has already unlinked anything the rename
+was going to overwrite.  Rather than adding very complex logic, I added
+a helper to test for the hash overflow case early while it is still safe
+to bail out.
+
+Snapshot and subvolume creation had a similar problem, so they are using
+the new helper now too.
+
+Signed-off-by: Chris Mason <chris.mason@fusionio.com>
+Reported-by: Pascal Junod <pascal@junod.info>
+The vulnerable function: int btrfs_add_link(struct btrfs_trans_handle *trans,
+		   struct inode *parent_inode, struct inode *inode,
+		   const char *name, int name_len, int add_backref, u64 index)
+{
+	int ret = 0;
+	struct btrfs_key key;
+	struct btrfs_root *root = BTRFS_I(parent_inode)->root;
+	u64 ino = btrfs_ino(inode);
+	u64 parent_ino = btrfs_ino(parent_inode);
+
+	if (unlikely(ino == BTRFS_FIRST_FREE_OBJECTID)) {
+		memcpy(&key, &BTRFS_I(inode)->root->root_key, sizeof(key));
+	} else {
+		key.objectid = ino;
+		btrfs_set_key_type(&key, BTRFS_INODE_ITEM_KEY);
+		key.offset = 0;
+	}
+
+	if (unlikely(ino == BTRFS_FIRST_FREE_OBJECTID)) {
+		ret = btrfs_add_root_ref(trans, root->fs_info->tree_root,
+					 key.objectid, root->root_key.objectid,
+					 parent_ino, index, name, name_len);
+	} else if (add_backref) {
+		ret = btrfs_insert_inode_ref(trans, root, name, name_len, ino,
+					     parent_ino, index);
+	}
+
+	/* Nothing to clean up yet */
+	if (ret)
+		return ret;
+
+	ret = btrfs_insert_dir_item(trans, root, name, name_len,
+				    parent_inode, &key,
+				    btrfs_inode_type(inode), index);
+	if (ret == -EEXIST)
+		goto fail_dir_item;
+	else if (ret) {
+		btrfs_abort_transaction(trans, root, ret);
+		return ret;
+	}
+
+	btrfs_i_size_write(parent_inode, parent_inode->i_size +
+			   name_len * 2);
+	inode_inc_iversion(parent_inode);
+	parent_inode->i_mtime = parent_inode->i_ctime = CURRENT_TIME;
+	ret = btrfs_update_inode(trans, root, parent_inode);
+	if (ret)
+		btrfs_abort_transaction(trans, root, ret);
+	return ret;
+
+fail_dir_item:
+	if (unlikely(ino == BTRFS_FIRST_FREE_OBJECTID)) {
+		u64 local_index;
+		int err;
+		err = btrfs_del_root_ref(trans, root->fs_info->tree_root,
+				 key.objectid, root->root_key.objectid,
+				 parent_ino, &local_index, name, name_len);
+
+	} else if (add_backref) {
+		u64 local_index;
+		int err;
+
+		err = btrfs_del_inode_ref(trans, root, name, name_len,
+					  ino, parent_ino, &local_index);
+	}
+	return ret;
+}
+The corrected function: static noinline int btrfs_mksubvol(struct path *parent,
+				   char *name, int namelen,
+				   struct btrfs_root *snap_src,
+				   u64 *async_transid, bool readonly,
+				   struct btrfs_qgroup_inherit **inherit)
+{
+	struct inode *dir  = parent->dentry->d_inode;
+	struct dentry *dentry;
+	int error;
+
+	mutex_lock_nested(&dir->i_mutex, I_MUTEX_PARENT);
+
+	dentry = lookup_one_len(name, parent->dentry, namelen);
+	error = PTR_ERR(dentry);
+	if (IS_ERR(dentry))
+		goto out_unlock;
+
+	error = -EEXIST;
+	if (dentry->d_inode)
+		goto out_dput;
+
+	error = btrfs_may_create(dir, dentry);
+	if (error)
+		goto out_dput;
+
+	/*
+	 * even if this name doesn't exist, we may get hash collisions.
+	 * check for them now when we can safely fail
+	 */
+	error = btrfs_check_dir_item_collision(BTRFS_I(dir)->root,
+					       dir->i_ino, name,
+					       namelen);
+	if (error)
+		goto out_dput;
+
+	down_read(&BTRFS_I(dir)->root->fs_info->subvol_sem);
+
+	if (btrfs_root_refs(&BTRFS_I(dir)->root->root_item) == 0)
+		goto out_up_read;
+
+	if (snap_src) {
+		error = create_snapshot(snap_src, dentry, name, namelen,
+					async_transid, readonly, inherit);
+	} else {
+		error = create_subvol(BTRFS_I(dir)->root, dentry,
+				      name, namelen, async_transid, inherit);
+	}
+	if (!error)
+		fsnotify_mkdir(dir, dentry);
+out_up_read:
+	up_read(&BTRFS_I(dir)->root->fs_info->subvol_sem);
+out_dput:
+	dput(dentry);
+out_unlock:
+	mutex_unlock(&dir->i_mutex);
+	return error;
+}

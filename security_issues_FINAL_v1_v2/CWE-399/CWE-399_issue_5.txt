@@ -1,0 +1,12 @@
+[media] v4l: Share code between video_usercopy and video_ioctl2
+
+The two functions are mostly identical. They handle the copy_from_user
+and copy_to_user operations related with V4L2 ioctls and call the real
+ioctl handler.
+
+Create a __video_usercopy function that implements the core of
+video_usercopy and video_ioctl2, and call that function from both.
+
+Signed-off-by: Laurent Pinchart <laurent.pinchart@ideasonboard.com>
+Acked-by: Hans Verkuil <hverkuil@xs4all.nl>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>

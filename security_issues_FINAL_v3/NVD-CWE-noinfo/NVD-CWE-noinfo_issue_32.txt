@@ -1,0 +1,31 @@
+The vulnerable issue: NFSv4: Convert the open and close ops to use fmode
+
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+The vulnerable function: static int encode_open_downgrade(struct xdr_stream *xdr, const struct nfs_closeargs *arg)
+{
+	__be32 *p;
+
+	RESERVE_SPACE(4+NFS4_STATEID_SIZE+4);
+	WRITE32(OP_OPEN_DOWNGRADE);
+	WRITEMEM(arg->stateid->data, NFS4_STATEID_SIZE);
+	WRITE32(arg->seqid->sequence->counter);
+	encode_share_access(xdr, arg->open_flags);
+	return 0;
+}
+The corrected function: static inline void encode_openhdr(struct xdr_stream *xdr, const struct nfs_openargs *arg)
+{
+	__be32 *p;
+ /*
+ * opcode 4, seqid 4, share_access 4, share_deny 4, clientid 8, ownerlen 4,
+ * owner 4 = 32
+ */
+	RESERVE_SPACE(8);
+	WRITE32(OP_OPEN);
+	WRITE32(arg->seqid->sequence->counter);
+	encode_share_access(xdr, arg->open_flags);
+	RESERVE_SPACE(28);
+	WRITE64(arg->clientid);
+	WRITE32(16);
+	WRITEMEM("open id:", 8);
+	WRITE64(arg->id);
+}

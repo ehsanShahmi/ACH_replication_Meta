@@ -1,0 +1,9 @@
+ASoC: TAS2781: Fix tasdev_load_calibrated_data()
+
+This function has a reversed if statement so it's either a no-op or it
+leads to a NULL dereference.
+
+Fixes: b195acf5266d ("ASoC: tas2781: Fix wrong loading calibrated data sequence")
+Signed-off-by: Dan Carpenter <dan.carpenter@linaro.org>
+Link: https://patch.msgid.link/18a29b68-cc85-4139-b7c7-2514e8409a42@stanley.mountain
+Signed-off-by: Mark Brown <broonie@kernel.org>

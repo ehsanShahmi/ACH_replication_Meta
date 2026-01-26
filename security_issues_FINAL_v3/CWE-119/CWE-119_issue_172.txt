@@ -1,0 +1,80 @@
+The vulnerable issue: libceph: do not hard code max auth ticket len
+
+We hard code cephx auth ticket buffer size to 256 bytes.  This isn't
+enough for any moderate setups and, in case tickets themselves are not
+encrypted, leads to buffer overflows (ceph_x_decrypt() errors out, but
+ceph_decode_copy() doesn't - it's just a memcpy() wrapper).  Since the
+buffer is allocated dynamically anyway, allocated it a bit later, at
+the point where we know how much is going to be needed.
+
+Fixes: http://tracker.ceph.com/issues/8979
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Ilya Dryomov <ilya.dryomov@inktank.com>
+Reviewed-by: Sage Weil <sage@redhat.com>
+The vulnerable function: static int ceph_x_decrypt(struct ceph_crypto_key *secret,
+			  void **p, void *end, void *obuf, size_t olen)
+{
+	struct ceph_x_encrypt_header head;
+	size_t head_len = sizeof(head);
+	int len, ret;
+
+	len = ceph_decode_32(p);
+	if (*p + len > end)
+		return -EINVAL;
+
+	dout("ceph_x_decrypt len %d\n", len);
+	ret = ceph_decrypt2(secret, &head, &head_len, obuf, &olen,
+			    *p, len);
+	if (ret)
+		return ret;
+	if (head.struct_v != 1 || le64_to_cpu(head.magic) != CEPHX_ENC_MAGIC)
+		return -EPERM;
+	*p += len;
+	return olen;
+}
+The corrected function: static int ceph_x_proc_ticket_reply(struct ceph_auth_client *ac,
+				    struct ceph_crypto_key *secret,
+				    void *buf, void *end)
+{
+	void *p = buf;
+	char *dbuf;
+	char *ticket_buf;
+	u8 reply_struct_v;
+	u32 num;
+	int ret;
+
+	dbuf = kmalloc(TEMP_TICKET_BUF_LEN, GFP_NOFS);
+	if (!dbuf)
+		return -ENOMEM;
+
+	ret = -ENOMEM;
+	ticket_buf = kmalloc(TEMP_TICKET_BUF_LEN, GFP_NOFS);
+	if (!ticket_buf)
+		goto out_dbuf;
+
+	ceph_decode_8_safe(&p, end, reply_struct_v, bad);
+	if (reply_struct_v != 1)
+		return -EINVAL;
+
+	ceph_decode_32_safe(&p, end, num, bad);
+	dout("%d tickets\n", num);
+
+	while (num--) {
+		ret = process_one_ticket(ac, secret, &p, end,
+					 dbuf, ticket_buf);
+		if (ret)
+			goto out;
+	}
+
+	ret = 0;
+out:
+	kfree(ticket_buf);
+out_dbuf:
+	kfree(dbuf);
+	return ret;
+
+bad:
+	ret = -EINVAL;
+	goto out;
+}

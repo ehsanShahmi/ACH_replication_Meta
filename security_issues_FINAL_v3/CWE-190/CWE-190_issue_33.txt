@@ -1,0 +1,280 @@
+The vulnerable issue: Bluetooth: L2CAP: Fix div-by-zero in l2cap_le_flowctl_init()
+
+l2cap_le_flowctl_init() can cause both div-by-zero and an integer
+overflow since hdev->le_mtu may not fall in the valid range.
+
+Move MTU from hci_dev to hci_conn to validate MTU and stop the connection
+process earlier if MTU is invalid.
+Also, add a missing validation in read_buffer_size() and make it return
+an error value if the validation fails.
+Now hci_conn_add() returns ERR_PTR() as it can fail due to the both a
+kzalloc failure and invalid MTU value.
+
+divide error: 0000 [#1] PREEMPT SMP KASAN NOPTI
+CPU: 0 PID: 67 Comm: kworker/u5:0 Tainted: G        W          6.9.0-rc5+ #20
+Hardware name: QEMU Standard PC (i440FX + PIIX, 1996), BIOS 1.15.0-1 04/01/2014
+Workqueue: hci0 hci_rx_work
+RIP: 0010:l2cap_le_flowctl_init+0x19e/0x3f0 net/bluetooth/l2cap_core.c:547
+Code: e8 17 17 0c 00 66 41 89 9f 84 00 00 00 bf 01 00 00 00 41 b8 02 00 00 00 4c
+89 fe 4c 89 e2 89 d9 e8 27 17 0c 00 44 89 f0 31 d2 <66> f7 f3 89 c3 ff c3 4d 8d
+b7 88 00 00 00 4c 89 f0 48 c1 e8 03 42
+RSP: 0018:ffff88810bc0f858 EFLAGS: 00010246
+RAX: 00000000000002a0 RBX: 0000000000000000 RCX: dffffc0000000000
+RDX: 0000000000000000 RSI: ffff88810bc0f7c0 RDI: ffffc90002dcb66f
+RBP: ffff88810bc0f880 R08: aa69db2dda70ff01 R09: 0000ffaaaaaaaaaa
+R10: 0084000000ffaaaa R11: 0000000000000000 R12: ffff88810d65a084
+R13: dffffc0000000000 R14: 00000000000002a0 R15: ffff88810d65a000
+FS:  0000000000000000(0000) GS:ffff88811ac00000(0000) knlGS:0000000000000000
+CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+CR2: 0000000020000100 CR3: 0000000103268003 CR4: 0000000000770ef0
+PKRU: 55555554
+Call Trace:
+ <TASK>
+ l2cap_le_connect_req net/bluetooth/l2cap_core.c:4902 [inline]
+ l2cap_le_sig_cmd net/bluetooth/l2cap_core.c:5420 [inline]
+ l2cap_le_sig_channel net/bluetooth/l2cap_core.c:5486 [inline]
+ l2cap_recv_frame+0xe59d/0x11710 net/bluetooth/l2cap_core.c:6809
+ l2cap_recv_acldata+0x544/0x10a0 net/bluetooth/l2cap_core.c:7506
+ hci_acldata_packet net/bluetooth/hci_core.c:3939 [inline]
+ hci_rx_work+0x5e5/0xb20 net/bluetooth/hci_core.c:4176
+ process_one_work kernel/workqueue.c:3254 [inline]
+ process_scheduled_works+0x90f/0x1530 kernel/workqueue.c:3335
+ worker_thread+0x926/0xe70 kernel/workqueue.c:3416
+ kthread+0x2e3/0x380 kernel/kthread.c:388
+ ret_from_fork+0x5c/0x90 arch/x86/kernel/process.c:147
+ ret_from_fork_asm+0x1a/0x30 arch/x86/entry/entry_64.S:244
+ </TASK>
+Modules linked in:
+---[ end trace 0000000000000000 ]---
+
+Fixes: 6ed58ec520ad ("Bluetooth: Use LE buffers for LE traffic")
+Suggested-by: Luiz Augusto von Dentz <luiz.dentz@gmail.com>
+Signed-off-by: Sungwoo Kim <iam@sung-woo.kim>
+Signed-off-by: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+The vulnerable function: struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
+			      u8 role, u16 handle)
+{
+	struct hci_conn *conn;
+
+	bt_dev_dbg(hdev, "dst %pMR handle 0x%4.4x", dst, handle);
+
+	conn = kzalloc(sizeof(*conn), GFP_KERNEL);
+	if (!conn)
+		return NULL;
+
+	bacpy(&conn->dst, dst);
+	bacpy(&conn->src, &hdev->bdaddr);
+	conn->handle = handle;
+	conn->hdev  = hdev;
+	conn->type  = type;
+	conn->role  = role;
+	conn->mode  = HCI_CM_ACTIVE;
+	conn->state = BT_OPEN;
+	conn->auth_type = HCI_AT_GENERAL_BONDING;
+	conn->io_capability = hdev->io_capability;
+	conn->remote_auth = 0xff;
+	conn->key_type = 0xff;
+	conn->rssi = HCI_RSSI_INVALID;
+	conn->tx_power = HCI_TX_POWER_INVALID;
+	conn->max_tx_power = HCI_TX_POWER_INVALID;
+	conn->sync_handle = HCI_SYNC_HANDLE_INVALID;
+
+	set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+	conn->disc_timeout = HCI_DISCONN_TIMEOUT;
+
+	/* Set Default Authenticated payload timeout to 30s */
+	conn->auth_payload_timeout = DEFAULT_AUTH_PAYLOAD_TIMEOUT;
+
+	if (conn->role == HCI_ROLE_MASTER)
+		conn->out = true;
+
+	switch (type) {
+	case ACL_LINK:
+		conn->pkt_type = hdev->pkt_type & ACL_PTYPE_MASK;
+		break;
+	case LE_LINK:
+		/* conn->src should reflect the local identity address */
+		hci_copy_identity_address(hdev, &conn->src, &conn->src_type);
+		break;
+	case ISO_LINK:
+		/* conn->src should reflect the local identity address */
+		hci_copy_identity_address(hdev, &conn->src, &conn->src_type);
+
+		/* set proper cleanup function */
+		if (!bacmp(dst, BDADDR_ANY))
+			conn->cleanup = bis_cleanup;
+		else if (conn->role == HCI_ROLE_MASTER)
+			conn->cleanup = cis_cleanup;
+
+		break;
+	case SCO_LINK:
+		if (lmp_esco_capable(hdev))
+			conn->pkt_type = (hdev->esco_type & SCO_ESCO_MASK) |
+					(hdev->esco_type & EDR_ESCO_MASK);
+		else
+			conn->pkt_type = hdev->pkt_type & SCO_PTYPE_MASK;
+		break;
+	case ESCO_LINK:
+		conn->pkt_type = hdev->esco_type & ~EDR_ESCO_MASK;
+		break;
+	}
+
+	skb_queue_head_init(&conn->data_q);
+
+	INIT_LIST_HEAD(&conn->chan_list);
+	INIT_LIST_HEAD(&conn->link_list);
+
+	INIT_DELAYED_WORK(&conn->disc_work, hci_conn_timeout);
+	INIT_DELAYED_WORK(&conn->auto_accept_work, hci_conn_auto_accept);
+	INIT_DELAYED_WORK(&conn->idle_work, hci_conn_idle);
+	INIT_DELAYED_WORK(&conn->le_conn_timeout, le_conn_timeout);
+
+	atomic_set(&conn->refcnt, 0);
+
+	hci_dev_hold(hdev);
+
+	hci_conn_hash_add(hdev, conn);
+
+	/* The SCO and eSCO connections will only be notified when their
+	 * setup has been completed. This is different to ACL links which
+	 * can be notified right away.
+	 */
+	if (conn->type != SCO_LINK && conn->type != ESCO_LINK) {
+		if (hdev->notify)
+			hdev->notify(hdev, HCI_NOTIFY_CONN_ADD);
+	}
+
+	hci_conn_init_sysfs(conn);
+
+	return conn;
+}
+The corrected function: struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
+			      u8 role, u16 handle)
+{
+	struct hci_conn *conn;
+
+	switch (type) {
+	case ACL_LINK:
+		if (!hdev->acl_mtu)
+			return ERR_PTR(-ECONNREFUSED);
+		break;
+	case ISO_LINK:
+		if (hdev->iso_mtu)
+			/* Dedicated ISO Buffer exists */
+			break;
+		fallthrough;
+	case LE_LINK:
+		if (hdev->le_mtu && hdev->le_mtu < HCI_MIN_LE_MTU)
+			return ERR_PTR(-ECONNREFUSED);
+		if (!hdev->le_mtu && hdev->acl_mtu < HCI_MIN_LE_MTU)
+			return ERR_PTR(-ECONNREFUSED);
+		break;
+	case SCO_LINK:
+	case ESCO_LINK:
+		if (!hdev->sco_pkts)
+			/* Controller does not support SCO or eSCO over HCI */
+			return ERR_PTR(-ECONNREFUSED);
+		break;
+	default:
+		return ERR_PTR(-ECONNREFUSED);
+	}
+
+	bt_dev_dbg(hdev, "dst %pMR handle 0x%4.4x", dst, handle);
+
+	conn = kzalloc(sizeof(*conn), GFP_KERNEL);
+	if (!conn)
+		return ERR_PTR(-ENOMEM);
+
+	bacpy(&conn->dst, dst);
+	bacpy(&conn->src, &hdev->bdaddr);
+	conn->handle = handle;
+	conn->hdev  = hdev;
+	conn->type  = type;
+	conn->role  = role;
+	conn->mode  = HCI_CM_ACTIVE;
+	conn->state = BT_OPEN;
+	conn->auth_type = HCI_AT_GENERAL_BONDING;
+	conn->io_capability = hdev->io_capability;
+	conn->remote_auth = 0xff;
+	conn->key_type = 0xff;
+	conn->rssi = HCI_RSSI_INVALID;
+	conn->tx_power = HCI_TX_POWER_INVALID;
+	conn->max_tx_power = HCI_TX_POWER_INVALID;
+	conn->sync_handle = HCI_SYNC_HANDLE_INVALID;
+
+	set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+	conn->disc_timeout = HCI_DISCONN_TIMEOUT;
+
+	/* Set Default Authenticated payload timeout to 30s */
+	conn->auth_payload_timeout = DEFAULT_AUTH_PAYLOAD_TIMEOUT;
+
+	if (conn->role == HCI_ROLE_MASTER)
+		conn->out = true;
+
+	switch (type) {
+	case ACL_LINK:
+		conn->pkt_type = hdev->pkt_type & ACL_PTYPE_MASK;
+		conn->mtu = hdev->acl_mtu;
+		break;
+	case LE_LINK:
+		/* conn->src should reflect the local identity address */
+		hci_copy_identity_address(hdev, &conn->src, &conn->src_type);
+		conn->mtu = hdev->le_mtu ? hdev->le_mtu : hdev->acl_mtu;
+		break;
+	case ISO_LINK:
+		/* conn->src should reflect the local identity address */
+		hci_copy_identity_address(hdev, &conn->src, &conn->src_type);
+
+		/* set proper cleanup function */
+		if (!bacmp(dst, BDADDR_ANY))
+			conn->cleanup = bis_cleanup;
+		else if (conn->role == HCI_ROLE_MASTER)
+			conn->cleanup = cis_cleanup;
+
+		conn->mtu = hdev->iso_mtu ? hdev->iso_mtu :
+			    hdev->le_mtu ? hdev->le_mtu : hdev->acl_mtu;
+		break;
+	case SCO_LINK:
+		if (lmp_esco_capable(hdev))
+			conn->pkt_type = (hdev->esco_type & SCO_ESCO_MASK) |
+					(hdev->esco_type & EDR_ESCO_MASK);
+		else
+			conn->pkt_type = hdev->pkt_type & SCO_PTYPE_MASK;
+
+		conn->mtu = hdev->sco_mtu;
+		break;
+	case ESCO_LINK:
+		conn->pkt_type = hdev->esco_type & ~EDR_ESCO_MASK;
+		conn->mtu = hdev->sco_mtu;
+		break;
+	}
+
+	skb_queue_head_init(&conn->data_q);
+
+	INIT_LIST_HEAD(&conn->chan_list);
+	INIT_LIST_HEAD(&conn->link_list);
+
+	INIT_DELAYED_WORK(&conn->disc_work, hci_conn_timeout);
+	INIT_DELAYED_WORK(&conn->auto_accept_work, hci_conn_auto_accept);
+	INIT_DELAYED_WORK(&conn->idle_work, hci_conn_idle);
+	INIT_DELAYED_WORK(&conn->le_conn_timeout, le_conn_timeout);
+
+	atomic_set(&conn->refcnt, 0);
+
+	hci_dev_hold(hdev);
+
+	hci_conn_hash_add(hdev, conn);
+
+	/* The SCO and eSCO connections will only be notified when their
+	 * setup has been completed. This is different to ACL links which
+	 * can be notified right away.
+	 */
+	if (conn->type != SCO_LINK && conn->type != ESCO_LINK) {
+		if (hdev->notify)
+			hdev->notify(hdev, HCI_NOTIFY_CONN_ADD);
+	}
+
+	hci_conn_init_sysfs(conn);
+
+	return conn;
+}

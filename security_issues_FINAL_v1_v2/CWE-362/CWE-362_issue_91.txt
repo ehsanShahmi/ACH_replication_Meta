@@ -1,0 +1,24 @@
+sctp: Fix another socket race during accept/peeloff
+
+There is a race between sctp_rcv() and sctp_accept() where we
+have moved the association from the listening socket to the
+accepted socket, but sctp_rcv() processing cached the old
+socket and continues to use it.
+
+The easy solution is to check for the socket mismatch once we've
+grabed the socket lock.  If we hit a mis-match, that means
+that were are currently holding the lock on the listening socket,
+but the association is refrencing a newly accepted socket.  We need
+to drop the lock on the old socket and grab the lock on the new one.
+
+A more proper solution might be to create accepted sockets when
+the new association is established, similar to TCP.  That would
+eliminate the race for 1-to-1 style sockets, but it would still
+existing for 1-to-many sockets where a user wished to peeloff an
+association.  For now, we'll live with this easy solution as
+it addresses the problem.
+
+Reported-by: Michal Hocko <mhocko@suse.cz>
+Reported-by: Karsten Keil <kkeil@suse.de>
+Signed-off-by: Vlad Yasevich <vladislav.yasevich@hp.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>

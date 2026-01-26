@@ -1,0 +1,22 @@
+The vulnerable issue: KEYS: Remove key_type::match in favour of overriding default by match_preparse
+
+A previous patch added a ->match_preparse() method to the key type.  This is
+allowed to override the function called by the iteration algorithm.
+Therefore, we can just set a default that simply checks for an exact match of
+the key description with the original criterion data and allow match_preparse
+to override it as needed.
+
+The key_type::match op is then redundant and can be removed, as can the
+user_match() function.
+
+Signed-off-by: David Howells <dhowells@redhat.com>
+Acked-by: Vivek Goyal <vgoyal@redhat.com>
+The vulnerable function: int user_match(const struct key *key, const struct key_match_data *match_data)
+{
+	return strcmp(key->description, match_data->raw_data) == 0;
+}
+The corrected function: static bool generic_new(struct nf_conn *ct, const struct sk_buff *skb,
+			unsigned int dataoff, unsigned int *timeouts)
+{
+	return true;
+}

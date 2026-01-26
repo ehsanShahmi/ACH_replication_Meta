@@ -1,0 +1,7 @@
+{no}
+
+The first version of the file includes a call to `sanitize_input(sanitized_content)` inside the `store_info_in_header` function, whereas the second version comments this line out.
+
+The `sanitize_input` function removes newline (`\n`) and carriage return (`\r`) characters from the string. Since the second version skips this step, any `info_content` containing these characters will be stored as-is in the header dictionary, while the first version would strip them out.
+
+For example, if `info_content` is passed as `"value\n"`, the first version will store `"value"`, while the second version will store `"value\n"`. This results in different outputs when `print_header_in_python_format` is called.

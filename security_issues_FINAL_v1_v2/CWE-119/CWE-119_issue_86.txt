@@ -1,0 +1,12 @@
+cifs: fix double-fault crash during ntlmssp
+
+The crash occurred because we were calling memzero_explicit() on an
+already freed sess_data::iov[1] (ntlmsspblob) in sess_free_buffer().
+
+Fix this by not calling memzero_explicit() on sess_data::iov[1] as
+it's already by handled by callers.
+
+Fixes: a4e430c8c8ba ("cifs: replace kfree() with kfree_sensitive() for sensitive data")
+Reviewed-by: Enzo Matsumiya <ematsumiya@suse.de>
+Signed-off-by: Paulo Alcantara (SUSE) <pc@cjr.nz>
+Signed-off-by: Steve French <stfrench@microsoft.com>

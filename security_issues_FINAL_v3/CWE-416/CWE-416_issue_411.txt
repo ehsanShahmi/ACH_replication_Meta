@@ -1,0 +1,135 @@
+The vulnerable issue: ftrace: Fix possible use-after-free issue in ftrace_location()
+
+KASAN reports a bug:
+
+  BUG: KASAN: use-after-free in ftrace_location+0x90/0x120
+  Read of size 8 at addr ffff888141d40010 by task insmod/424
+  CPU: 8 PID: 424 Comm: insmod Tainted: G        W          6.9.0-rc2+
+  [...]
+  Call Trace:
+   <TASK>
+   dump_stack_lvl+0x68/0xa0
+   print_report+0xcf/0x610
+   kasan_report+0xb5/0xe0
+   ftrace_location+0x90/0x120
+   register_kprobe+0x14b/0xa40
+   kprobe_init+0x2d/0xff0 [kprobe_example]
+   do_one_initcall+0x8f/0x2d0
+   do_init_module+0x13a/0x3c0
+   load_module+0x3082/0x33d0
+   init_module_from_file+0xd2/0x130
+   __x64_sys_finit_module+0x306/0x440
+   do_syscall_64+0x68/0x140
+   entry_SYSCALL_64_after_hwframe+0x71/0x79
+
+The root cause is that, in lookup_rec(), ftrace record of some address
+is being searched in ftrace pages of some module, but those ftrace pages
+at the same time is being freed in ftrace_release_mod() as the
+corresponding module is being deleted:
+
+           CPU1                       |      CPU2
+  register_kprobes() {                | delete_module() {
+    check_kprobe_address_safe() {     |
+      arch_check_ftrace_location() {  |
+        ftrace_location() {           |
+          lookup_rec() // USE!        |   ftrace_release_mod() // Free!
+
+To fix this issue:
+  1. Hold rcu lock as accessing ftrace pages in ftrace_location_range();
+  2. Use ftrace_location_range() instead of lookup_rec() in
+     ftrace_location();
+  3. Call synchronize_rcu() before freeing any ftrace pages both in
+     ftrace_process_locs()/ftrace_release_mod()/ftrace_free_mem().
+
+Link: https://lore.kernel.org/linux-trace-kernel/20240509192859.1273558-1-zhengyejian1@huawei.com
+
+Cc: stable@vger.kernel.org
+Cc: <mhiramat@kernel.org>
+Cc: <mark.rutland@arm.com>
+Cc: <mathieu.desnoyers@efficios.com>
+Fixes: ae6aa16fdc16 ("kprobes: introduce ftrace based optimization")
+Suggested-by: Steven Rostedt <rostedt@goodmis.org>
+Signed-off-by: Zheng Yejian <zhengyejian1@huawei.com>
+Signed-off-by: Steven Rostedt (Google) <rostedt@goodmis.org>
+The vulnerable function: void ftrace_free_mem(struct module *mod, void *start_ptr, void *end_ptr)
+{
+	unsigned long start = (unsigned long)(start_ptr);
+	unsigned long end = (unsigned long)(end_ptr);
+	struct ftrace_page **last_pg = &ftrace_pages_start;
+	struct ftrace_page *pg;
+	struct dyn_ftrace *rec;
+	struct dyn_ftrace key;
+	struct ftrace_mod_map *mod_map = NULL;
+	struct ftrace_init_func *func, *func_next;
+	LIST_HEAD(clear_hash);
+
+	key.ip = start;
+	key.flags = end;	/* overload flags, as it is unsigned long */
+
+	mutex_lock(&ftrace_lock);
+
+	/*
+	 * If we are freeing module init memory, then check if
+	 * any tracer is active. If so, we need to save a mapping of
+	 * the module functions being freed with the address.
+	 */
+	if (mod && ftrace_ops_list != &ftrace_list_end)
+		mod_map = allocate_ftrace_mod_map(mod, start, end);
+
+	for (pg = ftrace_pages_start; pg; last_pg = &pg->next, pg = *last_pg) {
+		if (end < pg->records[0].ip ||
+		    start >= (pg->records[pg->index - 1].ip + MCOUNT_INSN_SIZE))
+			continue;
+ again:
+		rec = bsearch(&key, pg->records, pg->index,
+			      sizeof(struct dyn_ftrace),
+			      ftrace_cmp_recs);
+		if (!rec)
+			continue;
+
+		/* rec will be cleared from hashes after ftrace_lock unlock */
+		add_to_clear_hash_list(&clear_hash, rec);
+
+		if (mod_map)
+			save_ftrace_mod_rec(mod_map, rec);
+
+		pg->index--;
+		ftrace_update_tot_cnt--;
+		if (!pg->index) {
+			*last_pg = pg->next;
+			if (pg->records) {
+				free_pages((unsigned long)pg->records, pg->order);
+				ftrace_number_of_pages -= 1 << pg->order;
+			}
+			ftrace_number_of_groups--;
+			kfree(pg);
+			pg = container_of(last_pg, struct ftrace_page, next);
+			if (!(*last_pg))
+				ftrace_pages = pg;
+			continue;
+		}
+		memmove(rec, rec + 1,
+			(pg->index - (rec - pg->records)) * sizeof(*rec));
+		/* More than one function may be in this block */
+		goto again;
+	}
+	mutex_unlock(&ftrace_lock);
+
+	list_for_each_entry_safe(func, func_next, &clear_hash, list) {
+		clear_func_from_hashes(func);
+		kfree(func);
+	}
+}
+The corrected function: unsigned long ftrace_location_range(unsigned long start, unsigned long end)
+{
+	struct dyn_ftrace *rec;
+	unsigned long ip = 0;
+
+	rcu_read_lock();
+	rec = lookup_rec(start, end);
+	if (rec)
+		ip = rec->ip;
+	rcu_read_unlock();
+
+	return ip;
+}

@@ -1,0 +1,10 @@
+nvmet-auth: add missing goto in nvmet_setup_auth()
+
+There's a goto missing in nvmet_setup_auth(), causing a kernel oops
+when nvme_auth_extract_key() fails.
+
+Reported-by: Tal Lossos <tallossos@gmail.com>
+Signed-off-by: Hannes Reinecke <hare@suse.de>
+Reviewed-by: Sagi Grimberg <sagi@grimberg.me>
+Reviewed-by: Chaitanya Kulkarni <kch@nvidia.com>
+Signed-off-by: Christoph Hellwig <hch@lst.de>

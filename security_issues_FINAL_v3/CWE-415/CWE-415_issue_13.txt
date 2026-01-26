@@ -1,0 +1,281 @@
+The vulnerable issue: cifs: fix double free race when mount fails in cifs_get_root()
+
+When cifs_get_root() fails during cifs_smb3_do_mount() we call
+deactivate_locked_super() which eventually will call delayed_free() which
+will free the context.
+In this situation we should not proceed to enter the out: section in
+cifs_smb3_do_mount() and free the same resources a second time.
+
+[Thu Feb 10 12:59:06 2022] BUG: KASAN: use-after-free in rcu_cblist_dequeue+0x32/0x60
+[Thu Feb 10 12:59:06 2022] Read of size 8 at addr ffff888364f4d110 by task swapper/1/0
+
+[Thu Feb 10 12:59:06 2022] CPU: 1 PID: 0 Comm: swapper/1 Tainted: G           OE     5.17.0-rc3+ #4
+[Thu Feb 10 12:59:06 2022] Hardware name: Microsoft Corporation Virtual Machine/Virtual Machine, BIOS Hyper-V UEFI Release v4.0 12/17/2019
+[Thu Feb 10 12:59:06 2022] Call Trace:
+[Thu Feb 10 12:59:06 2022]  <IRQ>
+[Thu Feb 10 12:59:06 2022]  dump_stack_lvl+0x5d/0x78
+[Thu Feb 10 12:59:06 2022]  print_address_description.constprop.0+0x24/0x150
+[Thu Feb 10 12:59:06 2022]  ? rcu_cblist_dequeue+0x32/0x60
+[Thu Feb 10 12:59:06 2022]  kasan_report.cold+0x7d/0x117
+[Thu Feb 10 12:59:06 2022]  ? rcu_cblist_dequeue+0x32/0x60
+[Thu Feb 10 12:59:06 2022]  __asan_load8+0x86/0xa0
+[Thu Feb 10 12:59:06 2022]  rcu_cblist_dequeue+0x32/0x60
+[Thu Feb 10 12:59:06 2022]  rcu_core+0x547/0xca0
+[Thu Feb 10 12:59:06 2022]  ? call_rcu+0x3c0/0x3c0
+[Thu Feb 10 12:59:06 2022]  ? __this_cpu_preempt_check+0x13/0x20
+[Thu Feb 10 12:59:06 2022]  ? lock_is_held_type+0xea/0x140
+[Thu Feb 10 12:59:06 2022]  rcu_core_si+0xe/0x10
+[Thu Feb 10 12:59:06 2022]  __do_softirq+0x1d4/0x67b
+[Thu Feb 10 12:59:06 2022]  __irq_exit_rcu+0x100/0x150
+[Thu Feb 10 12:59:06 2022]  irq_exit_rcu+0xe/0x30
+[Thu Feb 10 12:59:06 2022]  sysvec_hyperv_stimer0+0x9d/0xc0
+...
+[Thu Feb 10 12:59:07 2022] Freed by task 58179:
+[Thu Feb 10 12:59:07 2022]  kasan_save_stack+0x26/0x50
+[Thu Feb 10 12:59:07 2022]  kasan_set_track+0x25/0x30
+[Thu Feb 10 12:59:07 2022]  kasan_set_free_info+0x24/0x40
+[Thu Feb 10 12:59:07 2022]  ____kasan_slab_free+0x137/0x170
+[Thu Feb 10 12:59:07 2022]  __kasan_slab_free+0x12/0x20
+[Thu Feb 10 12:59:07 2022]  slab_free_freelist_hook+0xb3/0x1d0
+[Thu Feb 10 12:59:07 2022]  kfree+0xcd/0x520
+[Thu Feb 10 12:59:07 2022]  cifs_smb3_do_mount+0x149/0xbe0 [cifs]
+[Thu Feb 10 12:59:07 2022]  smb3_get_tree+0x1a0/0x2e0 [cifs]
+[Thu Feb 10 12:59:07 2022]  vfs_get_tree+0x52/0x140
+[Thu Feb 10 12:59:07 2022]  path_mount+0x635/0x10c0
+[Thu Feb 10 12:59:07 2022]  __x64_sys_mount+0x1bf/0x210
+[Thu Feb 10 12:59:07 2022]  do_syscall_64+0x5c/0xc0
+[Thu Feb 10 12:59:07 2022]  entry_SYSCALL_64_after_hwframe+0x44/0xae
+
+[Thu Feb 10 12:59:07 2022] Last potentially related work creation:
+[Thu Feb 10 12:59:07 2022]  kasan_save_stack+0x26/0x50
+[Thu Feb 10 12:59:07 2022]  __kasan_record_aux_stack+0xb6/0xc0
+[Thu Feb 10 12:59:07 2022]  kasan_record_aux_stack_noalloc+0xb/0x10
+[Thu Feb 10 12:59:07 2022]  call_rcu+0x76/0x3c0
+[Thu Feb 10 12:59:07 2022]  cifs_umount+0xce/0xe0 [cifs]
+[Thu Feb 10 12:59:07 2022]  cifs_kill_sb+0xc8/0xe0 [cifs]
+[Thu Feb 10 12:59:07 2022]  deactivate_locked_super+0x5d/0xd0
+[Thu Feb 10 12:59:07 2022]  cifs_smb3_do_mount+0xab9/0xbe0 [cifs]
+[Thu Feb 10 12:59:07 2022]  smb3_get_tree+0x1a0/0x2e0 [cifs]
+[Thu Feb 10 12:59:07 2022]  vfs_get_tree+0x52/0x140
+[Thu Feb 10 12:59:07 2022]  path_mount+0x635/0x10c0
+[Thu Feb 10 12:59:07 2022]  __x64_sys_mount+0x1bf/0x210
+[Thu Feb 10 12:59:07 2022]  do_syscall_64+0x5c/0xc0
+[Thu Feb 10 12:59:07 2022]  entry_SYSCALL_64_after_hwframe+0x44/0xae
+
+Reported-by: Shyam Prasad N <sprasad@microsoft.com>
+Reviewed-by: Shyam Prasad N <sprasad@microsoft.com>
+Signed-off-by: Ronnie Sahlberg <lsahlber@redhat.com>
+Signed-off-by: Steve French <stfrench@microsoft.com>
+The vulnerable function: struct dentry *
+cifs_smb3_do_mount(struct file_system_type *fs_type,
+	      int flags, struct smb3_fs_context *old_ctx)
+{
+	int rc;
+	struct super_block *sb;
+	struct cifs_sb_info *cifs_sb = NULL;
+	struct cifs_mnt_data mnt_data;
+	struct dentry *root;
+
+	/*
+	 * Prints in Kernel / CIFS log the attempted mount operation
+	 *	If CIFS_DEBUG && cifs_FYI
+	 */
+	if (cifsFYI)
+		cifs_dbg(FYI, "Devname: %s flags: %d\n", old_ctx->UNC, flags);
+	else
+		cifs_info("Attempting to mount %s\n", old_ctx->UNC);
+
+	cifs_sb = kzalloc(sizeof(struct cifs_sb_info), GFP_KERNEL);
+	if (cifs_sb == NULL) {
+		root = ERR_PTR(-ENOMEM);
+		goto out;
+	}
+
+	cifs_sb->ctx = kzalloc(sizeof(struct smb3_fs_context), GFP_KERNEL);
+	if (!cifs_sb->ctx) {
+		root = ERR_PTR(-ENOMEM);
+		goto out;
+	}
+	rc = smb3_fs_context_dup(cifs_sb->ctx, old_ctx);
+	if (rc) {
+		root = ERR_PTR(rc);
+		goto out;
+	}
+
+	rc = cifs_setup_volume_info(cifs_sb->ctx, NULL, NULL);
+	if (rc) {
+		root = ERR_PTR(rc);
+		goto out;
+	}
+
+	rc = cifs_setup_cifs_sb(cifs_sb);
+	if (rc) {
+		root = ERR_PTR(rc);
+		goto out;
+	}
+
+	rc = cifs_mount(cifs_sb, cifs_sb->ctx);
+	if (rc) {
+		if (!(flags & SB_SILENT))
+			cifs_dbg(VFS, "cifs_mount failed w/return code = %d\n",
+				 rc);
+		root = ERR_PTR(rc);
+		goto out;
+	}
+
+	mnt_data.ctx = cifs_sb->ctx;
+	mnt_data.cifs_sb = cifs_sb;
+	mnt_data.flags = flags;
+
+	/* BB should we make this contingent on mount parm? */
+	flags |= SB_NODIRATIME | SB_NOATIME;
+
+	sb = sget(fs_type, cifs_match_super, cifs_set_super, flags, &mnt_data);
+	if (IS_ERR(sb)) {
+		root = ERR_CAST(sb);
+		cifs_umount(cifs_sb);
+		cifs_sb = NULL;
+		goto out;
+	}
+
+	if (sb->s_root) {
+		cifs_dbg(FYI, "Use existing superblock\n");
+		cifs_umount(cifs_sb);
+		cifs_sb = NULL;
+	} else {
+		rc = cifs_read_super(sb);
+		if (rc) {
+			root = ERR_PTR(rc);
+			goto out_super;
+		}
+
+		sb->s_flags |= SB_ACTIVE;
+	}
+
+	root = cifs_get_root(cifs_sb ? cifs_sb->ctx : old_ctx, sb);
+	if (IS_ERR(root))
+		goto out_super;
+
+	if (cifs_sb)
+		cifs_sb->root = dget(root);
+
+	cifs_dbg(FYI, "dentry root is: %p\n", root);
+	return root;
+
+out_super:
+	deactivate_locked_super(sb);
+out:
+	if (cifs_sb) {
+		kfree(cifs_sb->prepath);
+		smb3_cleanup_fs_context(cifs_sb->ctx);
+		kfree(cifs_sb);
+	}
+	return root;
+}
+The corrected function: struct dentry *
+cifs_smb3_do_mount(struct file_system_type *fs_type,
+	      int flags, struct smb3_fs_context *old_ctx)
+{
+	int rc;
+	struct super_block *sb;
+	struct cifs_sb_info *cifs_sb = NULL;
+	struct cifs_mnt_data mnt_data;
+	struct dentry *root;
+
+	/*
+	 * Prints in Kernel / CIFS log the attempted mount operation
+	 *	If CIFS_DEBUG && cifs_FYI
+	 */
+	if (cifsFYI)
+		cifs_dbg(FYI, "Devname: %s flags: %d\n", old_ctx->UNC, flags);
+	else
+		cifs_info("Attempting to mount %s\n", old_ctx->UNC);
+
+	cifs_sb = kzalloc(sizeof(struct cifs_sb_info), GFP_KERNEL);
+	if (cifs_sb == NULL) {
+		root = ERR_PTR(-ENOMEM);
+		goto out;
+	}
+
+	cifs_sb->ctx = kzalloc(sizeof(struct smb3_fs_context), GFP_KERNEL);
+	if (!cifs_sb->ctx) {
+		root = ERR_PTR(-ENOMEM);
+		goto out;
+	}
+	rc = smb3_fs_context_dup(cifs_sb->ctx, old_ctx);
+	if (rc) {
+		root = ERR_PTR(rc);
+		goto out;
+	}
+
+	rc = cifs_setup_volume_info(cifs_sb->ctx, NULL, NULL);
+	if (rc) {
+		root = ERR_PTR(rc);
+		goto out;
+	}
+
+	rc = cifs_setup_cifs_sb(cifs_sb);
+	if (rc) {
+		root = ERR_PTR(rc);
+		goto out;
+	}
+
+	rc = cifs_mount(cifs_sb, cifs_sb->ctx);
+	if (rc) {
+		if (!(flags & SB_SILENT))
+			cifs_dbg(VFS, "cifs_mount failed w/return code = %d\n",
+				 rc);
+		root = ERR_PTR(rc);
+		goto out;
+	}
+
+	mnt_data.ctx = cifs_sb->ctx;
+	mnt_data.cifs_sb = cifs_sb;
+	mnt_data.flags = flags;
+
+	/* BB should we make this contingent on mount parm? */
+	flags |= SB_NODIRATIME | SB_NOATIME;
+
+	sb = sget(fs_type, cifs_match_super, cifs_set_super, flags, &mnt_data);
+	if (IS_ERR(sb)) {
+		root = ERR_CAST(sb);
+		cifs_umount(cifs_sb);
+		cifs_sb = NULL;
+		goto out;
+	}
+
+	if (sb->s_root) {
+		cifs_dbg(FYI, "Use existing superblock\n");
+		cifs_umount(cifs_sb);
+		cifs_sb = NULL;
+	} else {
+		rc = cifs_read_super(sb);
+		if (rc) {
+			root = ERR_PTR(rc);
+			goto out_super;
+		}
+
+		sb->s_flags |= SB_ACTIVE;
+	}
+
+	root = cifs_get_root(cifs_sb ? cifs_sb->ctx : old_ctx, sb);
+	if (IS_ERR(root))
+		goto out_super;
+
+	if (cifs_sb)
+		cifs_sb->root = dget(root);
+
+	cifs_dbg(FYI, "dentry root is: %p\n", root);
+	return root;
+
+out_super:
+	deactivate_locked_super(sb);
+	return root;
+out:
+	if (cifs_sb) {
+		kfree(cifs_sb->prepath);
+		smb3_cleanup_fs_context(cifs_sb->ctx);
+		kfree(cifs_sb);
+	}
+	return root;
+}

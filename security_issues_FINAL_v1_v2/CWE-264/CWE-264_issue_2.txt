@@ -1,0 +1,19 @@
+cifs: clean up cifs_find_smb_ses (try #2)
+
+This patch replaces the earlier patch by the same name. The only
+difference is that MAX_PASSWORD_SIZE has been increased to attempt to
+match the limits that windows enforces.
+
+Do a better job of matching sessions by authtype. Matching by username
+for a Kerberos session is incorrect, and anonymous sessions need special
+handling.
+
+Also, in the case where we do match by username, we also need to match
+by password. That ensures that someone else doesn't "borrow" an existing
+session without needing to know the password.
+
+Finally, passwords can be longer than 16 bytes. Bump MAX_PASSWORD_SIZE
+to 512 to match the size that the userspace mount helper allows.
+
+Signed-off-by: Jeff Layton <jlayton@redhat.com>
+Signed-off-by: Steve French <sfrench@us.ibm.com>

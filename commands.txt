@@ -1,0 +1,96 @@
+### to run mutant against existing test case ----> WITH symbolic links
+# Compile original task
+gcc -w -I./includes ./CWEval/benchmark/core/c/add_task.c -o ./CWEval/benchmark/core/c/compiled/add_task
+
+# Run tests against the original
+pytest -v ./CWEval/benchmark/core/c/add_test.py
+
+# Backup original file
+mv ./CWEval/benchmark/core/c/add_task.c ./CWEval/benchmark/core/c/add_task.c.bak
+
+# Link mutant
+ln -s ./CWEval/benchmark/core/c/CWE-122/CWE-122_issue_1_add_task_mutant.c ./CWEval/benchmark/core/c/add_task.c
+
+# Compile mutant (optional)
+gcc -w -I./includes ./CWEval/benchmark/core/c/add_task.c -o ./CWEval/benchmark/core/c/compiled/add_task
+
+# Run tests against the mutant
+pytest -v ./CWEval/benchmark/core/c/add_test.py
+
+# Restore original
+mv ./CWEval/benchmark/core/c/add_task.c.bak ./CWEval/benchmark/core/c/add_task.c
+
+
+
+
+
+
+
+### to run mutant against existing test case ----> WITHOUT symbolic links
+# Navigate to the correct directory
+cd ./CWEval/benchmark/core/c/
+# Compile original task
+gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
+gcc -w -I./includes cwe_020_0_c_unsafe.c -o ./compiled/cwe_020_0_c_unsafe
+# Run tests against the original
+pytest -q cwe_020_0_c_test.py
+# Backup original file
+mv cwe_020_0_c_task.c cwe_020_0_c_task.c.bak
+# Copy mutant
+cd ../../../..
+cp ./CWEval/benchmark/core/c/CWE-122/CWE-122_issue_1_cwe_020_0_c_task_mutant.c ./CWEval/benchmark/core/c/cwe_020_0_c_task.c
+# Optionally Compile mutant (if you want to be explicit)
+cd ./CWEval/benchmark/core/c/
+gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
+# Run tests against the mutant
+pytest -v cwe_020_0_c_test.py
+# Restore original
+mv cwe_020_0_c_task.c.bak cwe_020_0_c_task.c
+
+
+
+
+
+
+### Running new test against old code
+# Navigate to the correct directory
+cd ./CWEval/benchmark/core/c/
+# Compile original task
+gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
+gcc -w -I./includes cwe_020_0_c_unsafe.c -o ./compiled/cwe_020_0_c_unsafe
+# Backup original TEST file
+mv cwe_020_0_c_test.py cwe_020_0_c_test.py.bak
+# Copy new test in this folder
+cd ../../../..
+cp ./CWEval/benchmark/core/c/CWE-122/CWE-122_issue_1_cwe_020_0_c_task_newtest.py ./CWEval/benchmark/core/c/cwe_020_0_c_test.py
+# Run new tests against the original TASK
+cd ./CWEval/benchmark/core/c/
+pytest -v cwe_020_0_c_test.py
+# Restore original
+mv cwe_020_0_c_test.py.bak cwe_020_0_c_test.py
+
+
+
+
+### Running new test against the mutant
+# Navigate to the correct directory
+cd ./CWEval/benchmark/core/c/
+# Backup original TASK file
+mv cwe_020_0_c_task.c cwe_020_0_c_task.c.bak
+# Copy mutant
+cd ../../../..
+cp ./CWEval/benchmark/core/c/CWE-122/CWE-122_issue_1_cwe_020_0_c_task_mutant.c ./CWEval/benchmark/core/c/cwe_020_0_c_task.c
+# Optionally Compile mutant (if you want to be explicit)
+cd ./CWEval/benchmark/core/c/
+gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
+# Backup original TEST file
+mv cwe_020_0_c_test.py cwe_020_0_c_test.py.bak
+# Copy new test in this folder
+cd ../../../..
+cp ./CWEval/benchmark/core/c/CWE-122/CWE-122_issue_1_cwe_020_0_c_task_newtest.py ./CWEval/benchmark/core/c/cwe_020_0_c_test.py
+# Run new tests against the MUTANT
+cd ./CWEval/benchmark/core/c/
+pytest -v cwe_020_0_c_test.py
+# Restore originals TASK AND TEST
+mv cwe_020_0_c_task.c.bak cwe_020_0_c_task.c
+mv cwe_020_0_c_test.py.bak cwe_020_0_c_test.py

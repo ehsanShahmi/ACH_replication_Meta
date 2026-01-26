@@ -1,0 +1,59 @@
+The vulnerable issue: netfilter: nft_inner: validate mandatory meta and payload
+
+Check for mandatory netlink attributes in payload and meta expression
+when used embedded from the inner expression, otherwise NULL pointer
+dereference is possible from userspace.
+
+Fixes: a150d122b6bd ("netfilter: nft_meta: add inner match support")
+Fixes: 3a07327d10a0 ("netfilter: nft_inner: support for inner tunnel header matching")
+Signed-off-by: Davide Ornaghi <d.ornaghi97@gmail.com>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+The vulnerable function: static int nft_meta_inner_init(const struct nft_ctx *ctx,
+			       const struct nft_expr *expr,
+			       const struct nlattr * const tb[])
+{
+	struct nft_meta *priv = nft_expr_priv(expr);
+	unsigned int len;
+
+	priv->key = ntohl(nla_get_be32(tb[NFTA_META_KEY]));
+	switch (priv->key) {
+	case NFT_META_PROTOCOL:
+		len = sizeof(u16);
+		break;
+	case NFT_META_L4PROTO:
+		len = sizeof(u32);
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+	priv->len = len;
+
+	return nft_parse_register_store(ctx, tb[NFTA_META_DREG], &priv->dreg,
+					NULL, NFT_DATA_VALUE, len);
+}
+The corrected function: static int nft_meta_inner_init(const struct nft_ctx *ctx,
+			       const struct nft_expr *expr,
+			       const struct nlattr * const tb[])
+{
+	struct nft_meta *priv = nft_expr_priv(expr);
+	unsigned int len;
+
+	if (!tb[NFTA_META_KEY] || !tb[NFTA_META_DREG])
+		return -EINVAL;
+
+	priv->key = ntohl(nla_get_be32(tb[NFTA_META_KEY]));
+	switch (priv->key) {
+	case NFT_META_PROTOCOL:
+		len = sizeof(u16);
+		break;
+	case NFT_META_L4PROTO:
+		len = sizeof(u32);
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+	priv->len = len;
+
+	return nft_parse_register_store(ctx, tb[NFTA_META_DREG], &priv->dreg,
+					NULL, NFT_DATA_VALUE, len);
+}

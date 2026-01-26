@@ -1,0 +1,74 @@
+The vulnerable issue: get rid of s_files and files_lock
+
+The only thing we need it for is alt-sysrq-r (emergency remount r/o)
+and these days we can do just as well without going through the
+list of files.
+
+Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+The vulnerable function: struct file *get_empty_filp(void)
+{
+	const struct cred *cred = current_cred();
+	static long old_max;
+	struct file *f;
+	int error;
+
+	/*
+	 * Privileged users can go above max_files
+	 */
+	if (get_nr_files() >= files_stat.max_files && !capable(CAP_SYS_ADMIN)) {
+		/*
+		 * percpu_counters are inaccurate.  Do an expensive check before
+		 * we go and fail.
+		 */
+		if (percpu_counter_sum_positive(&nr_files) >= files_stat.max_files)
+			goto over;
+	}
+
+	f = kmem_cache_zalloc(filp_cachep, GFP_KERNEL);
+	if (unlikely(!f))
+		return ERR_PTR(-ENOMEM);
+
+	percpu_counter_inc(&nr_files);
+	f->f_cred = get_cred(cred);
+	error = security_file_alloc(f);
+	if (unlikely(error)) {
+		file_free(f);
+		return ERR_PTR(error);
+	}
+
+	INIT_LIST_HEAD(&f->f_u.fu_list);
+	atomic_long_set(&f->f_count, 1);
+	rwlock_init(&f->f_owner.lock);
+	spin_lock_init(&f->f_lock);
+	eventpoll_init_file(f);
+	/* f->f_version: 0 */
+	return f;
+
+over:
+	/* Ran out of filps - report that */
+	if (get_nr_files() > old_max) {
+		pr_info("VFS: file-max limit %lu reached\n", get_max_files());
+		old_max = get_nr_files();
+	}
+	return ERR_PTR(-ENFILE);
+}
+The corrected function: void mark_files_ro(struct super_block *sb)
+{
+	struct file *f;
+
+	lg_global_lock(&files_lglock);
+	do_file_list_for_each_entry(sb, f) {
+		if (!file_count(f))
+			continue;
+		if (!(f->f_mode & FMODE_WRITE))
+			continue;
+		spin_lock(&f->f_lock);
+		f->f_mode &= ~FMODE_WRITE;
+		spin_unlock(&f->f_lock);
+		if (file_check_writeable(f) != 0)
+			continue;
+		__mnt_drop_write(f->f_path.mnt);
+		file_release_write(f);
+	} while_file_list_for_each_entry;
+	lg_global_unlock(&files_lglock);
+}

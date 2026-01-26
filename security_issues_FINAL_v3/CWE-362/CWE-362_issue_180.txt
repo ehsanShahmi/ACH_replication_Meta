@@ -1,0 +1,100 @@
+The vulnerable issue: inet: add RCU protection to inet->opt
+
+We lack proper synchronization to manipulate inet->opt ip_options
+
+Problem is ip_make_skb() calls ip_setup_cork() and
+ip_setup_cork() possibly makes a copy of ipc->opt (struct ip_options),
+without any protection against another thread manipulating inet->opt.
+
+Another thread can change inet->opt pointer and free old one under us.
+
+Use RCU to protect inet->opt (changed to inet->inet_opt).
+
+Instead of handling atomic refcounts, just copy ip_options when
+necessary, to avoid cache line dirtying.
+
+We cant insert an rcu_head in struct ip_options since its included in
+skb->cb[], so this patch is large because I had to introduce a new
+ip_options_rcu structure.
+
+Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+Cc: Herbert Xu <herbert@gondor.apana.org.au>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: static int ip_setup_cork(struct sock *sk, struct inet_cork *cork,
+			 struct ipcm_cookie *ipc, struct rtable **rtp)
+{
+	struct inet_sock *inet = inet_sk(sk);
+	struct ip_options *opt;
+	struct rtable *rt;
+
+	/*
+	 * setup for corking.
+	 */
+	opt = ipc->opt;
+	if (opt) {
+		if (cork->opt == NULL) {
+			cork->opt = kmalloc(sizeof(struct ip_options) + 40,
+					    sk->sk_allocation);
+			if (unlikely(cork->opt == NULL))
+				return -ENOBUFS;
+		}
+		memcpy(cork->opt, opt, sizeof(struct ip_options) + opt->optlen);
+		cork->flags |= IPCORK_OPT;
+		cork->addr = ipc->addr;
+	}
+	rt = *rtp;
+	if (unlikely(!rt))
+		return -EFAULT;
+	/*
+	 * We steal reference to this route, caller should not release it
+	 */
+	*rtp = NULL;
+	cork->fragsize = inet->pmtudisc == IP_PMTUDISC_PROBE ?
+			 rt->dst.dev->mtu : dst_mtu(rt->dst.path);
+	cork->dst = &rt->dst;
+	cork->length = 0;
+	cork->tx_flags = ipc->tx_flags;
+	cork->page = NULL;
+	cork->off = 0;
+
+	return 0;
+}
+The corrected function: static int ip_setup_cork(struct sock *sk, struct inet_cork *cork,
+			 struct ipcm_cookie *ipc, struct rtable **rtp)
+{
+	struct inet_sock *inet = inet_sk(sk);
+	struct ip_options_rcu *opt;
+	struct rtable *rt;
+
+	/*
+	 * setup for corking.
+	 */
+	opt = ipc->opt;
+	if (opt) {
+		if (cork->opt == NULL) {
+			cork->opt = kmalloc(sizeof(struct ip_options) + 40,
+					    sk->sk_allocation);
+			if (unlikely(cork->opt == NULL))
+				return -ENOBUFS;
+		}
+		memcpy(cork->opt, &opt->opt, sizeof(struct ip_options) + opt->opt.optlen);
+		cork->flags |= IPCORK_OPT;
+		cork->addr = ipc->addr;
+	}
+	rt = *rtp;
+	if (unlikely(!rt))
+		return -EFAULT;
+	/*
+	 * We steal reference to this route, caller should not release it
+	 */
+	*rtp = NULL;
+	cork->fragsize = inet->pmtudisc == IP_PMTUDISC_PROBE ?
+			 rt->dst.dev->mtu : dst_mtu(rt->dst.path);
+	cork->dst = &rt->dst;
+	cork->length = 0;
+	cork->tx_flags = ipc->tx_flags;
+	cork->page = NULL;
+	cork->off = 0;
+
+	return 0;
+}

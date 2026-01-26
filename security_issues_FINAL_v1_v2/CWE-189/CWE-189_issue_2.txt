@@ -1,0 +1,13 @@
+perf, powerpc: Handle events that raise an exception without overflowing
+
+Events on POWER7 can roll back if a speculative event doesn't
+eventually complete. Unfortunately in some rare cases they will
+raise a performance monitor exception. We need to catch this to
+ensure we reset the PMC. In all cases the PMC will be 256 or less
+cycles from overflow.
+
+Signed-off-by: Anton Blanchard <anton@samba.org>
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: <stable@kernel.org> # as far back as it applies cleanly
+LKML-Reference: <20110309143842.6c22845e@kryten>
+Signed-off-by: Ingo Molnar <mingo@elte.hu>

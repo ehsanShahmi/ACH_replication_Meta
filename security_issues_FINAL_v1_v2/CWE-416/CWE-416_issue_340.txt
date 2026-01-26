@@ -1,0 +1,14 @@
+kunit: Fix kthread reference
+
+There is a race condition when a kthread finishes after the deadline and
+before the call to kthread_stop(), which may lead to use after free.
+
+Cc: Brendan Higgins <brendanhiggins@google.com>
+Cc: Shuah Khan <skhan@linuxfoundation.org>
+Reviewed-by: Kees Cook <keescook@chromium.org>
+Fixes: adf505457032 ("kunit: fix UAF when run kfence test case test_gfpzero")
+Reviewed-by: David Gow <davidgow@google.com>
+Reviewed-by: Rae Moar <rmoar@google.com>
+Signed-off-by: Mickaël Salaün <mic@digikod.net>
+Link: https://lore.kernel.org/r/20240408074625.65017-3-mic@digikod.net
+Signed-off-by: Shuah Khan <skhan@linuxfoundation.org>

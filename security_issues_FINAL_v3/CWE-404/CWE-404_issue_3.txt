@@ -1,0 +1,59 @@
+The vulnerable issue: HID: cp2112: fix sleep-while-atomic
+
+A recent commit fixing DMA-buffers on stack added a shared transfer
+buffer protected by a spinlock. This is broken as the USB HID request
+callbacks can sleep. Fix this up by replacing the spinlock with a mutex.
+
+Fixes: 1ffb3c40ffb5 ("HID: cp2112: make transfer buffers DMA capable")
+Cc: stable <stable@vger.kernel.org>	# 4.9
+Signed-off-by: Johan Hovold <johan@kernel.org>
+Reviewed-by: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+The vulnerable function: static int cp2112_gpio_get_all(struct gpio_chip *chip)
+{
+	struct cp2112_device *dev = gpiochip_get_data(chip);
+	struct hid_device *hdev = dev->hdev;
+	u8 *buf = dev->in_out_buffer;
+	unsigned long flags;
+	int ret;
+
+	spin_lock_irqsave(&dev->lock, flags);
+
+	ret = hid_hw_raw_request(hdev, CP2112_GPIO_GET, buf,
+				 CP2112_GPIO_GET_LENGTH, HID_FEATURE_REPORT,
+				 HID_REQ_GET_REPORT);
+	if (ret != CP2112_GPIO_GET_LENGTH) {
+		hid_err(hdev, "error requesting GPIO values: %d\n", ret);
+		ret = ret < 0 ? ret : -EIO;
+		goto exit;
+	}
+
+	ret = buf[1];
+
+exit:
+	spin_unlock_irqrestore(&dev->lock, flags);
+
+	return ret;
+}
+The corrected function: static void cp2112_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+{
+	struct cp2112_device *dev = gpiochip_get_data(chip);
+	struct hid_device *hdev = dev->hdev;
+	u8 *buf = dev->in_out_buffer;
+	unsigned long flags;
+	int ret;
+
+	spin_lock_irqsave(&dev->lock, flags);
+
+	buf[0] = CP2112_GPIO_SET;
+	buf[1] = value ? 0xff : 0;
+	buf[2] = 1 << offset;
+
+	ret = hid_hw_raw_request(hdev, CP2112_GPIO_SET, buf,
+				 CP2112_GPIO_SET_LENGTH, HID_FEATURE_REPORT,
+				 HID_REQ_SET_REPORT);
+	if (ret < 0)
+		hid_err(hdev, "error setting GPIO values: %d\n", ret);
+
+	spin_unlock_irqrestore(&dev->lock, flags);
+}

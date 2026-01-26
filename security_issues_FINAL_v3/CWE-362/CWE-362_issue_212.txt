@@ -1,0 +1,145 @@
+The vulnerable issue: inet: add RCU protection to inet->opt
+
+We lack proper synchronization to manipulate inet->opt ip_options
+
+Problem is ip_make_skb() calls ip_setup_cork() and
+ip_setup_cork() possibly makes a copy of ipc->opt (struct ip_options),
+without any protection against another thread manipulating inet->opt.
+
+Another thread can change inet->opt pointer and free old one under us.
+
+Use RCU to protect inet->opt (changed to inet->inet_opt).
+
+Instead of handling atomic refcounts, just copy ip_options when
+necessary, to avoid cache line dirtying.
+
+We cant insert an rcu_head in struct ip_options since its included in
+skb->cb[], so this patch is large because I had to introduce a new
+ip_options_rcu structure.
+
+Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+Cc: Herbert Xu <herbert@gondor.apana.org.au>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: int cipso_v4_sock_setattr(struct sock *sk,
+			  const struct cipso_v4_doi *doi_def,
+			  const struct netlbl_lsm_secattr *secattr)
+{
+	int ret_val = -EPERM;
+	unsigned char *buf = NULL;
+	u32 buf_len;
+	u32 opt_len;
+	struct ip_options *opt = NULL;
+	struct inet_sock *sk_inet;
+	struct inet_connection_sock *sk_conn;
+
+	/* In the case of sock_create_lite(), the sock->sk field is not
+	 * defined yet but it is not a problem as the only users of these
+	 * "lite" PF_INET sockets are functions which do an accept() call
+	 * afterwards so we will label the socket as part of the accept(). */
+	if (sk == NULL)
+		return 0;
+
+	/* We allocate the maximum CIPSO option size here so we are probably
+	 * being a little wasteful, but it makes our life _much_ easier later
+	 * on and after all we are only talking about 40 bytes. */
+	buf_len = CIPSO_V4_OPT_LEN_MAX;
+	buf = kmalloc(buf_len, GFP_ATOMIC);
+	if (buf == NULL) {
+		ret_val = -ENOMEM;
+		goto socket_setattr_failure;
+	}
+
+	ret_val = cipso_v4_genopt(buf, buf_len, doi_def, secattr);
+	if (ret_val < 0)
+		goto socket_setattr_failure;
+	buf_len = ret_val;
+
+	/* We can't use ip_options_get() directly because it makes a call to
+	 * ip_options_get_alloc() which allocates memory with GFP_KERNEL and
+	 * we won't always have CAP_NET_RAW even though we _always_ want to
+	 * set the IPOPT_CIPSO option. */
+	opt_len = (buf_len + 3) & ~3;
+	opt = kzalloc(sizeof(*opt) + opt_len, GFP_ATOMIC);
+	if (opt == NULL) {
+		ret_val = -ENOMEM;
+		goto socket_setattr_failure;
+	}
+	memcpy(opt->__data, buf, buf_len);
+	opt->optlen = opt_len;
+	opt->cipso = sizeof(struct iphdr);
+	kfree(buf);
+	buf = NULL;
+
+	sk_inet = inet_sk(sk);
+	if (sk_inet->is_icsk) {
+		sk_conn = inet_csk(sk);
+		if (sk_inet->opt)
+			sk_conn->icsk_ext_hdr_len -= sk_inet->opt->optlen;
+		sk_conn->icsk_ext_hdr_len += opt->optlen;
+		sk_conn->icsk_sync_mss(sk, sk_conn->icsk_pmtu_cookie);
+	}
+	opt = xchg(&sk_inet->opt, opt);
+	kfree(opt);
+
+	return 0;
+
+socket_setattr_failure:
+	kfree(buf);
+	kfree(opt);
+	return ret_val;
+}
+The corrected function: static int cipso_v4_delopt(struct ip_options_rcu **opt_ptr)
+{
+	int hdr_delta = 0;
+	struct ip_options_rcu *opt = *opt_ptr;
+
+	if (opt->opt.srr || opt->opt.rr || opt->opt.ts || opt->opt.router_alert) {
+		u8 cipso_len;
+		u8 cipso_off;
+		unsigned char *cipso_ptr;
+		int iter;
+		int optlen_new;
+
+		cipso_off = opt->opt.cipso - sizeof(struct iphdr);
+		cipso_ptr = &opt->opt.__data[cipso_off];
+		cipso_len = cipso_ptr[1];
+
+		if (opt->opt.srr > opt->opt.cipso)
+			opt->opt.srr -= cipso_len;
+		if (opt->opt.rr > opt->opt.cipso)
+			opt->opt.rr -= cipso_len;
+		if (opt->opt.ts > opt->opt.cipso)
+			opt->opt.ts -= cipso_len;
+		if (opt->opt.router_alert > opt->opt.cipso)
+			opt->opt.router_alert -= cipso_len;
+		opt->opt.cipso = 0;
+
+		memmove(cipso_ptr, cipso_ptr + cipso_len,
+			opt->opt.optlen - cipso_off - cipso_len);
+
+		/* determining the new total option length is tricky because of
+		 * the padding necessary, the only thing i can think to do at
+		 * this point is walk the options one-by-one, skipping the
+		 * padding at the end to determine the actual option size and
+		 * from there we can determine the new total option length */
+		iter = 0;
+		optlen_new = 0;
+		while (iter < opt->opt.optlen)
+			if (opt->opt.__data[iter] != IPOPT_NOP) {
+				iter += opt->opt.__data[iter + 1];
+				optlen_new = iter;
+			} else
+				iter++;
+		hdr_delta = opt->opt.optlen;
+		opt->opt.optlen = (optlen_new + 3) & ~3;
+		hdr_delta -= opt->opt.optlen;
+	} else {
+		/* only the cipso option was present on the socket so we can
+		 * remove the entire option struct */
+		*opt_ptr = NULL;
+		hdr_delta = opt->opt.optlen;
+		call_rcu(&opt->rcu, opt_kfree_rcu);
+	}
+
+	return hdr_delta;
+}

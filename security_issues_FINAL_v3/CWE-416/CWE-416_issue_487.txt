@@ -1,0 +1,50 @@
+The vulnerable issue: drm/nouveau/mmu: add more general vmm free/node handling functions
+
+Aside from being a nice cleanup, these will to allow the upcoming direct
+page mapping interfaces to play nicely with normal mappings.
+
+Signed-off-by: Ben Skeggs <bskeggs@redhat.com>
+The vulnerable function: nvkm_vmm_unmap_region(struct nvkm_vmm *vmm, struct nvkm_vma *vma)
+{
+	struct nvkm_vma *next;
+
+	nvkm_memory_tags_put(vma->memory, vmm->mmu->subdev.device, &vma->tags);
+	nvkm_memory_unref(&vma->memory);
+
+	if (vma->part) {
+		struct nvkm_vma *prev = node(vma, prev);
+		if (!prev->memory) {
+			prev->size += vma->size;
+			rb_erase(&vma->tree, &vmm->root);
+			list_del(&vma->head);
+			kfree(vma);
+			vma = prev;
+		}
+	}
+
+	next = node(vma, next);
+	if (next && next->part) {
+		if (!next->memory) {
+			vma->size += next->size;
+			rb_erase(&next->tree, &vmm->root);
+			list_del(&next->head);
+			kfree(next);
+		}
+	}
+}
+The corrected function: static inline bool cfs_rq_is_decayed(struct cfs_rq *cfs_rq)
+{
+	if (cfs_rq->load.weight)
+		return false;
+
+	if (cfs_rq->avg.load_sum)
+		return false;
+
+	if (cfs_rq->avg.util_sum)
+		return false;
+
+	if (cfs_rq->avg.runnable_load_sum)
+		return false;
+
+	return true;
+}

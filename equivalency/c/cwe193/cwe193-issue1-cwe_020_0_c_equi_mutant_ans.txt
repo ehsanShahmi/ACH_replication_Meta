@@ -1,0 +1,19 @@
+{no}
+
+The first version of the file checks if the `domain` is a substring of the target URL's network location (using `strstr`). The second version performs a strict validation to ensure the target URL's network location is either exactly the `domain` or a valid subdomain (ending in `.domain`).
+
+Here is a concrete example of how they differ:
+
+**Inputs:**
+*   `target`: `"https://fakeexample.com"`
+*   `domain`: `"example.com"`
+
+**Execution:**
+1.  **File 1:** The function extracts the netloc `"fakeexample.com"`. It calls `strstr("fakeexample.com", "example.com")`. Since `"example.com"` is present as a substring (at the end), the check passes.
+    *   **Result:** It returns the original target: `"https://fakeexample.com"`.
+2.  **File 2:** The function extracts the netloc `"fakeexample.com"`.
+    *   It checks `strcmp`, which is false.
+    *   It checks if it ends with `".example.com"`. Since the character preceding `"example.com"` is `'e'` (not `'.'`), this check fails.
+    *   **Result:** It returns the fallback URL: `"https://example.com"`.
+
+This demonstrates that the first version allows potentially malicious domains that merely contain the legitimate domain string, while the second version correctly rejects them.

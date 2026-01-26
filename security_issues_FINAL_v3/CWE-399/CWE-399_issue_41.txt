@@ -1,0 +1,436 @@
+The vulnerable issue: ipv6: ip6_append_data_mtu did not care about pmtudisc and frag_size
+
+If the socket had an IPV6_MTU value set, ip6_append_data_mtu lost track
+of this when appending the second frame on a corked socket. This results
+in the following splat:
+
+[37598.993962] ------------[ cut here ]------------
+[37598.994008] kernel BUG at net/core/skbuff.c:2064!
+[37598.994008] invalid opcode: 0000 [#1] SMP
+[37598.994008] Modules linked in: tcp_lp uvcvideo videobuf2_vmalloc videobuf2_memops videobuf2_core videodev media vfat fat usb_storage fuse ebtable_nat xt_CHECKSUM bridge stp llc ipt_MASQUERADE nf_conntrack_netbios_ns nf_conntrack_broadcast ip6table_mangle ip6t_REJECT nf_conntrack_ipv6 nf_defrag_ipv6 iptable_nat
++nf_nat_ipv4 nf_nat iptable_mangle nf_conntrack_ipv4 nf_defrag_ipv4 xt_conntrack nf_conntrack ebtable_filter ebtables ip6table_filter ip6_tables be2iscsi iscsi_boot_sysfs bnx2i cnic uio cxgb4i cxgb4 cxgb3i cxgb3 mdio libcxgbi ib_iser rdma_cm ib_addr iw_cm ib_cm ib_sa ib_mad ib_core iscsi_tcp libiscsi_tcp libiscsi
++scsi_transport_iscsi rfcomm bnep iTCO_wdt iTCO_vendor_support snd_hda_codec_conexant arc4 iwldvm mac80211 snd_hda_intel acpi_cpufreq mperf coretemp snd_hda_codec microcode cdc_wdm cdc_acm
+[37598.994008]  snd_hwdep cdc_ether snd_seq snd_seq_device usbnet mii joydev btusb snd_pcm bluetooth i2c_i801 e1000e lpc_ich mfd_core ptp iwlwifi pps_core snd_page_alloc mei cfg80211 snd_timer thinkpad_acpi snd tpm_tis soundcore rfkill tpm tpm_bios vhost_net tun macvtap macvlan kvm_intel kvm uinput binfmt_misc
++dm_crypt i915 i2c_algo_bit drm_kms_helper drm i2c_core wmi video
+[37598.994008] CPU 0
+[37598.994008] Pid: 27320, comm: t2 Not tainted 3.9.6-200.fc18.x86_64 #1 LENOVO 27744PG/27744PG
+[37598.994008] RIP: 0010:[<ffffffff815443a5>]  [<ffffffff815443a5>] skb_copy_and_csum_bits+0x325/0x330
+[37598.994008] RSP: 0018:ffff88003670da18  EFLAGS: 00010202
+[37598.994008] RAX: ffff88018105c018 RBX: 0000000000000004 RCX: 00000000000006c0
+[37598.994008] RDX: ffff88018105a6c0 RSI: ffff88018105a000 RDI: ffff8801e1b0aa00
+[37598.994008] RBP: ffff88003670da78 R08: 0000000000000000 R09: ffff88018105c040
+[37598.994008] R10: ffff8801e1b0aa00 R11: 0000000000000000 R12: 000000000000fff8
+[37598.994008] R13: 00000000000004fc R14: 00000000ffff0504 R15: 0000000000000000
+[37598.994008] FS:  00007f28eea59740(0000) GS:ffff88023bc00000(0000) knlGS:0000000000000000
+[37598.994008] CS:  0010 DS: 0000 ES: 0000 CR0: 000000008005003b
+[37598.994008] CR2: 0000003d935789e0 CR3: 00000000365cb000 CR4: 00000000000407f0
+[37598.994008] DR0: 0000000000000000 DR1: 0000000000000000 DR2: 0000000000000000
+[37598.994008] DR3: 0000000000000000 DR6: 00000000ffff0ff0 DR7: 0000000000000400
+[37598.994008] Process t2 (pid: 27320, threadinfo ffff88003670c000, task ffff88022c162ee0)
+[37598.994008] Stack:
+[37598.994008]  ffff88022e098a00 ffff88020f973fc0 0000000000000008 00000000000004c8
+[37598.994008]  ffff88020f973fc0 00000000000004c4 ffff88003670da78 ffff8801e1b0a200
+[37598.994008]  0000000000000018 00000000000004c8 ffff88020f973fc0 00000000000004c4
+[37598.994008] Call Trace:
+[37598.994008]  [<ffffffff815fc21f>] ip6_append_data+0xccf/0xfe0
+[37598.994008]  [<ffffffff8158d9f0>] ? ip_copy_metadata+0x1a0/0x1a0
+[37598.994008]  [<ffffffff81661f66>] ? _raw_spin_lock_bh+0x16/0x40
+[37598.994008]  [<ffffffff8161548d>] udpv6_sendmsg+0x1ed/0xc10
+[37598.994008]  [<ffffffff812a2845>] ? sock_has_perm+0x75/0x90
+[37598.994008]  [<ffffffff815c3693>] inet_sendmsg+0x63/0xb0
+[37598.994008]  [<ffffffff812a2973>] ? selinux_socket_sendmsg+0x23/0x30
+[37598.994008]  [<ffffffff8153a450>] sock_sendmsg+0xb0/0xe0
+[37598.994008]  [<ffffffff810135d1>] ? __switch_to+0x181/0x4a0
+[37598.994008]  [<ffffffff8153d97d>] sys_sendto+0x12d/0x180
+[37598.994008]  [<ffffffff810dfb64>] ? __audit_syscall_entry+0x94/0xf0
+[37598.994008]  [<ffffffff81020ed1>] ? syscall_trace_enter+0x231/0x240
+[37598.994008]  [<ffffffff8166a7e7>] tracesys+0xdd/0xe2
+[37598.994008] Code: fe 07 00 00 48 c7 c7 04 28 a6 81 89 45 a0 4c 89 4d b8 44 89 5d a8 e8 1b ac b1 ff 44 8b 5d a8 4c 8b 4d b8 8b 45 a0 e9 cf fe ff ff <0f> 0b 66 0f 1f 84 00 00 00 00 00 66 66 66 66 90 55 48 89 e5 48
+[37598.994008] RIP  [<ffffffff815443a5>] skb_copy_and_csum_bits+0x325/0x330
+[37598.994008]  RSP <ffff88003670da18>
+[37599.007323] ---[ end trace d69f6a17f8ac8eee ]---
+
+While there, also check if path mtu discovery is activated for this
+socket. The logic was adapted from ip6_append_data when first writing
+on the corked socket.
+
+This bug was introduced with commit
+0c1833797a5a6ec23ea9261d979aa18078720b74 ("ipv6: fix incorrect ipsec
+fragment").
+
+v2:
+a) Replace IPV6_PMTU_DISC_DO with IPV6_PMTUDISC_PROBE.
+b) Don't pass ipv6_pinfo to ip6_append_data_mtu (suggestion by Gao
+   feng, thanks!).
+c) Change mtu to unsigned int, else we get a warning about
+   non-matching types because of the min()-macro type-check.
+
+Acked-by: Gao feng <gaofeng@cn.fujitsu.com>
+Cc: YOSHIFUJI Hideaki <yoshfuji@linux-ipv6.org>
+Signed-off-by: Hannes Frederic Sowa <hannes@stressinduktion.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: int ip6_append_data(struct sock *sk, int getfrag(void *from, char *to,
+	int offset, int len, int odd, struct sk_buff *skb),
+	void *from, int length, int transhdrlen,
+	int hlimit, int tclass, struct ipv6_txoptions *opt, struct flowi6 *fl6,
+	struct rt6_info *rt, unsigned int flags, int dontfrag)
+{
+	struct inet_sock *inet = inet_sk(sk);
+	struct ipv6_pinfo *np = inet6_sk(sk);
+	struct inet_cork *cork;
+	struct sk_buff *skb, *skb_prev = NULL;
+	unsigned int maxfraglen, fragheaderlen;
+	int exthdrlen;
+	int dst_exthdrlen;
+	int hh_len;
+	int mtu;
+	int copy;
+	int err;
+	int offset = 0;
+	__u8 tx_flags = 0;
+
+	if (flags&MSG_PROBE)
+		return 0;
+	cork = &inet->cork.base;
+	if (skb_queue_empty(&sk->sk_write_queue)) {
+		/*
+		 * setup for corking
+		 */
+		if (opt) {
+			if (WARN_ON(np->cork.opt))
+				return -EINVAL;
+
+			np->cork.opt = kzalloc(opt->tot_len, sk->sk_allocation);
+			if (unlikely(np->cork.opt == NULL))
+				return -ENOBUFS;
+
+			np->cork.opt->tot_len = opt->tot_len;
+			np->cork.opt->opt_flen = opt->opt_flen;
+			np->cork.opt->opt_nflen = opt->opt_nflen;
+
+			np->cork.opt->dst0opt = ip6_opt_dup(opt->dst0opt,
+							    sk->sk_allocation);
+			if (opt->dst0opt && !np->cork.opt->dst0opt)
+				return -ENOBUFS;
+
+			np->cork.opt->dst1opt = ip6_opt_dup(opt->dst1opt,
+							    sk->sk_allocation);
+			if (opt->dst1opt && !np->cork.opt->dst1opt)
+				return -ENOBUFS;
+
+			np->cork.opt->hopopt = ip6_opt_dup(opt->hopopt,
+							   sk->sk_allocation);
+			if (opt->hopopt && !np->cork.opt->hopopt)
+				return -ENOBUFS;
+
+			np->cork.opt->srcrt = ip6_rthdr_dup(opt->srcrt,
+							    sk->sk_allocation);
+			if (opt->srcrt && !np->cork.opt->srcrt)
+				return -ENOBUFS;
+
+			/* need source address above miyazawa*/
+		}
+		dst_hold(&rt->dst);
+		cork->dst = &rt->dst;
+		inet->cork.fl.u.ip6 = *fl6;
+		np->cork.hop_limit = hlimit;
+		np->cork.tclass = tclass;
+		if (rt->dst.flags & DST_XFRM_TUNNEL)
+			mtu = np->pmtudisc == IPV6_PMTUDISC_PROBE ?
+			      rt->dst.dev->mtu : dst_mtu(&rt->dst);
+		else
+			mtu = np->pmtudisc == IPV6_PMTUDISC_PROBE ?
+			      rt->dst.dev->mtu : dst_mtu(rt->dst.path);
+		if (np->frag_size < mtu) {
+			if (np->frag_size)
+				mtu = np->frag_size;
+		}
+		cork->fragsize = mtu;
+		if (dst_allfrag(rt->dst.path))
+			cork->flags |= IPCORK_ALLFRAG;
+		cork->length = 0;
+		exthdrlen = (opt ? opt->opt_flen : 0);
+		length += exthdrlen;
+		transhdrlen += exthdrlen;
+		dst_exthdrlen = rt->dst.header_len - rt->rt6i_nfheader_len;
+	} else {
+		rt = (struct rt6_info *)cork->dst;
+		fl6 = &inet->cork.fl.u.ip6;
+		opt = np->cork.opt;
+		transhdrlen = 0;
+		exthdrlen = 0;
+		dst_exthdrlen = 0;
+		mtu = cork->fragsize;
+	}
+
+	hh_len = LL_RESERVED_SPACE(rt->dst.dev);
+
+	fragheaderlen = sizeof(struct ipv6hdr) + rt->rt6i_nfheader_len +
+			(opt ? opt->opt_nflen : 0);
+	maxfraglen = ((mtu - fragheaderlen) & ~7) + fragheaderlen - sizeof(struct frag_hdr);
+
+	if (mtu <= sizeof(struct ipv6hdr) + IPV6_MAXPLEN) {
+		if (cork->length + length > sizeof(struct ipv6hdr) + IPV6_MAXPLEN - fragheaderlen) {
+			ipv6_local_error(sk, EMSGSIZE, fl6, mtu-exthdrlen);
+			return -EMSGSIZE;
+		}
+	}
+
+	/* For UDP, check if TX timestamp is enabled */
+	if (sk->sk_type == SOCK_DGRAM)
+		sock_tx_timestamp(sk, &tx_flags);
+
+	/*
+	 * Let's try using as much space as possible.
+	 * Use MTU if total length of the message fits into the MTU.
+	 * Otherwise, we need to reserve fragment header and
+	 * fragment alignment (= 8-15 octects, in total).
+	 *
+	 * Note that we may need to "move" the data from the tail of
+	 * of the buffer to the new fragment when we split
+	 * the message.
+	 *
+	 * FIXME: It may be fragmented into multiple chunks
+	 *        at once if non-fragmentable extension headers
+	 *        are too large.
+	 * --yoshfuji
+	 */
+
+	cork->length += length;
+	if (length > mtu) {
+		int proto = sk->sk_protocol;
+		if (dontfrag && (proto == IPPROTO_UDP || proto == IPPROTO_RAW)){
+			ipv6_local_rxpmtu(sk, fl6, mtu-exthdrlen);
+			return -EMSGSIZE;
+		}
+
+		if (proto == IPPROTO_UDP &&
+		    (rt->dst.dev->features & NETIF_F_UFO)) {
+
+			err = ip6_ufo_append_data(sk, getfrag, from, length,
+						  hh_len, fragheaderlen,
+						  transhdrlen, mtu, flags, rt);
+			if (err)
+				goto error;
+			return 0;
+		}
+	}
+
+	if ((skb = skb_peek_tail(&sk->sk_write_queue)) == NULL)
+		goto alloc_new_skb;
+
+	while (length > 0) {
+		/* Check if the remaining data fits into current packet. */
+		copy = (cork->length <= mtu && !(cork->flags & IPCORK_ALLFRAG) ? mtu : maxfraglen) - skb->len;
+		if (copy < length)
+			copy = maxfraglen - skb->len;
+
+		if (copy <= 0) {
+			char *data;
+			unsigned int datalen;
+			unsigned int fraglen;
+			unsigned int fraggap;
+			unsigned int alloclen;
+alloc_new_skb:
+			/* There's no room in the current skb */
+			if (skb)
+				fraggap = skb->len - maxfraglen;
+			else
+				fraggap = 0;
+			/* update mtu and maxfraglen if necessary */
+			if (skb == NULL || skb_prev == NULL)
+				ip6_append_data_mtu(&mtu, &maxfraglen,
+						    fragheaderlen, skb, rt);
+
+			skb_prev = skb;
+
+			/*
+			 * If remaining data exceeds the mtu,
+			 * we know we need more fragment(s).
+			 */
+			datalen = length + fraggap;
+
+			if (datalen > (cork->length <= mtu && !(cork->flags & IPCORK_ALLFRAG) ? mtu : maxfraglen) - fragheaderlen)
+				datalen = maxfraglen - fragheaderlen - rt->dst.trailer_len;
+			if ((flags & MSG_MORE) &&
+			    !(rt->dst.dev->features&NETIF_F_SG))
+				alloclen = mtu;
+			else
+				alloclen = datalen + fragheaderlen;
+
+			alloclen += dst_exthdrlen;
+
+			if (datalen != length + fraggap) {
+				/*
+				 * this is not the last fragment, the trailer
+				 * space is regarded as data space.
+				 */
+				datalen += rt->dst.trailer_len;
+			}
+
+			alloclen += rt->dst.trailer_len;
+			fraglen = datalen + fragheaderlen;
+
+			/*
+			 * We just reserve space for fragment header.
+			 * Note: this may be overallocation if the message
+			 * (without MSG_MORE) fits into the MTU.
+			 */
+			alloclen += sizeof(struct frag_hdr);
+
+			if (transhdrlen) {
+				skb = sock_alloc_send_skb(sk,
+						alloclen + hh_len,
+						(flags & MSG_DONTWAIT), &err);
+			} else {
+				skb = NULL;
+				if (atomic_read(&sk->sk_wmem_alloc) <=
+				    2 * sk->sk_sndbuf)
+					skb = sock_wmalloc(sk,
+							   alloclen + hh_len, 1,
+							   sk->sk_allocation);
+				if (unlikely(skb == NULL))
+					err = -ENOBUFS;
+				else {
+					/* Only the initial fragment
+					 * is time stamped.
+					 */
+					tx_flags = 0;
+				}
+			}
+			if (skb == NULL)
+				goto error;
+			/*
+			 *	Fill in the control structures
+			 */
+			skb->ip_summed = CHECKSUM_NONE;
+			skb->csum = 0;
+			/* reserve for fragmentation and ipsec header */
+			skb_reserve(skb, hh_len + sizeof(struct frag_hdr) +
+				    dst_exthdrlen);
+
+			if (sk->sk_type == SOCK_DGRAM)
+				skb_shinfo(skb)->tx_flags = tx_flags;
+
+			/*
+			 *	Find where to start putting bytes
+			 */
+			data = skb_put(skb, fraglen);
+			skb_set_network_header(skb, exthdrlen);
+			data += fragheaderlen;
+			skb->transport_header = (skb->network_header +
+						 fragheaderlen);
+			if (fraggap) {
+				skb->csum = skb_copy_and_csum_bits(
+					skb_prev, maxfraglen,
+					data + transhdrlen, fraggap, 0);
+				skb_prev->csum = csum_sub(skb_prev->csum,
+							  skb->csum);
+				data += fraggap;
+				pskb_trim_unique(skb_prev, maxfraglen);
+			}
+			copy = datalen - transhdrlen - fraggap;
+
+			if (copy < 0) {
+				err = -EINVAL;
+				kfree_skb(skb);
+				goto error;
+			} else if (copy > 0 && getfrag(from, data + transhdrlen, offset, copy, fraggap, skb) < 0) {
+				err = -EFAULT;
+				kfree_skb(skb);
+				goto error;
+			}
+
+			offset += copy;
+			length -= datalen - fraggap;
+			transhdrlen = 0;
+			exthdrlen = 0;
+			dst_exthdrlen = 0;
+
+			/*
+			 * Put the packet on the pending queue
+			 */
+			__skb_queue_tail(&sk->sk_write_queue, skb);
+			continue;
+		}
+
+		if (copy > length)
+			copy = length;
+
+		if (!(rt->dst.dev->features&NETIF_F_SG)) {
+			unsigned int off;
+
+			off = skb->len;
+			if (getfrag(from, skb_put(skb, copy),
+						offset, copy, off, skb) < 0) {
+				__skb_trim(skb, off);
+				err = -EFAULT;
+				goto error;
+			}
+		} else {
+			int i = skb_shinfo(skb)->nr_frags;
+			struct page_frag *pfrag = sk_page_frag(sk);
+
+			err = -ENOMEM;
+			if (!sk_page_frag_refill(sk, pfrag))
+				goto error;
+
+			if (!skb_can_coalesce(skb, i, pfrag->page,
+					      pfrag->offset)) {
+				err = -EMSGSIZE;
+				if (i == MAX_SKB_FRAGS)
+					goto error;
+
+				__skb_fill_page_desc(skb, i, pfrag->page,
+						     pfrag->offset, 0);
+				skb_shinfo(skb)->nr_frags = ++i;
+				get_page(pfrag->page);
+			}
+			copy = min_t(int, copy, pfrag->size - pfrag->offset);
+			if (getfrag(from,
+				    page_address(pfrag->page) + pfrag->offset,
+				    offset, copy, skb->len, skb) < 0)
+				goto error_efault;
+
+			pfrag->offset += copy;
+			skb_frag_size_add(&skb_shinfo(skb)->frags[i - 1], copy);
+			skb->len += copy;
+			skb->data_len += copy;
+			skb->truesize += copy;
+			atomic_add(copy, &sk->sk_wmem_alloc);
+		}
+		offset += copy;
+		length -= copy;
+	}
+
+	return 0;
+
+error_efault:
+	err = -EFAULT;
+error:
+	cork->length -= length;
+	IP6_INC_STATS(sock_net(sk), rt->rt6i_idev, IPSTATS_MIB_OUTDISCARDS);
+	return err;
+}
+The corrected function: static void ip6_append_data_mtu(int *mtu,
+				int *maxfraglen,
+				unsigned int fragheaderlen,
+				struct sk_buff *skb,
+				struct rt6_info *rt)
+{
+	if (!(rt->dst.flags & DST_XFRM_TUNNEL)) {
+		if (skb == NULL) {
+			/* first fragment, reserve header_len */
+			*mtu = *mtu - rt->dst.header_len;
+
+		} else {
+			/*
+			 * this fragment is not first, the headers
+			 * space is regarded as data space.
+			 */
+			*mtu = dst_mtu(rt->dst.path);
+		}
+		*maxfraglen = ((*mtu - fragheaderlen) & ~7)
+			      + fragheaderlen - sizeof(struct frag_hdr);
+	}
+}

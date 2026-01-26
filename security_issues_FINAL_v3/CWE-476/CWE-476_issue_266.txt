@@ -1,0 +1,104 @@
+The vulnerable issue: net: wangxun: fix kernel panic due to null pointer
+
+When the device uses a custom subsystem vendor ID, the function
+wx_sw_init() returns before the memory of 'wx->mac_table' is allocated.
+The null pointer will causes the kernel panic.
+
+Fixes: 79625f45ca73 ("net: wangxun: Move MAC address handling to libwx")
+Signed-off-by: Jiawen Wu <jiawenwu@trustnetic.com>
+Reviewed-by: Simon Horman <horms@kernel.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: static int ngbe_sw_init(struct wx *wx)
+{
+	struct pci_dev *pdev = wx->pdev;
+	u16 msix_count = 0;
+	int err = 0;
+
+	wx->mac.num_rar_entries = NGBE_RAR_ENTRIES;
+	wx->mac.max_rx_queues = NGBE_MAX_RX_QUEUES;
+	wx->mac.max_tx_queues = NGBE_MAX_TX_QUEUES;
+	wx->mac.mcft_size = NGBE_MC_TBL_SIZE;
+	wx->mac.vft_size = NGBE_SP_VFT_TBL_SIZE;
+	wx->mac.rx_pb_size = NGBE_RX_PB_SIZE;
+	wx->mac.tx_pb_size = NGBE_TDB_PB_SZ;
+
+	/* PCI config space info */
+	err = wx_sw_init(wx);
+	if (err < 0) {
+		wx_err(wx, "read of internal subsystem device id failed\n");
+		return err;
+	}
+
+	/* mac type, phy type , oem type */
+	ngbe_init_type_code(wx);
+
+	/* Set common capability flags and settings */
+	wx->max_q_vectors = NGBE_MAX_MSIX_VECTORS;
+	err = wx_get_pcie_msix_counts(wx, &msix_count, NGBE_MAX_MSIX_VECTORS);
+	if (err)
+		dev_err(&pdev->dev, "Do not support MSI-X\n");
+	wx->mac.max_msix_vectors = msix_count;
+
+	if (ngbe_init_rss_key(wx))
+		return -ENOMEM;
+
+	/* enable itr by default in dynamic mode */
+	wx->rx_itr_setting = 1;
+	wx->tx_itr_setting = 1;
+
+	/* set default ring sizes */
+	wx->tx_ring_count = NGBE_DEFAULT_TXD;
+	wx->rx_ring_count = NGBE_DEFAULT_RXD;
+
+	/* set default work limits */
+	wx->tx_work_limit = NGBE_DEFAULT_TX_WORK;
+	wx->rx_work_limit = NGBE_DEFAULT_RX_WORK;
+
+	return 0;
+}
+The corrected function: static int ngbe_sw_init(struct wx *wx)
+{
+	struct pci_dev *pdev = wx->pdev;
+	u16 msix_count = 0;
+	int err = 0;
+
+	wx->mac.num_rar_entries = NGBE_RAR_ENTRIES;
+	wx->mac.max_rx_queues = NGBE_MAX_RX_QUEUES;
+	wx->mac.max_tx_queues = NGBE_MAX_TX_QUEUES;
+	wx->mac.mcft_size = NGBE_MC_TBL_SIZE;
+	wx->mac.vft_size = NGBE_SP_VFT_TBL_SIZE;
+	wx->mac.rx_pb_size = NGBE_RX_PB_SIZE;
+	wx->mac.tx_pb_size = NGBE_TDB_PB_SZ;
+
+	/* PCI config space info */
+	err = wx_sw_init(wx);
+	if (err < 0)
+		return err;
+
+	/* mac type, phy type , oem type */
+	ngbe_init_type_code(wx);
+
+	/* Set common capability flags and settings */
+	wx->max_q_vectors = NGBE_MAX_MSIX_VECTORS;
+	err = wx_get_pcie_msix_counts(wx, &msix_count, NGBE_MAX_MSIX_VECTORS);
+	if (err)
+		dev_err(&pdev->dev, "Do not support MSI-X\n");
+	wx->mac.max_msix_vectors = msix_count;
+
+	if (ngbe_init_rss_key(wx))
+		return -ENOMEM;
+
+	/* enable itr by default in dynamic mode */
+	wx->rx_itr_setting = 1;
+	wx->tx_itr_setting = 1;
+
+	/* set default ring sizes */
+	wx->tx_ring_count = NGBE_DEFAULT_TXD;
+	wx->rx_ring_count = NGBE_DEFAULT_RXD;
+
+	/* set default work limits */
+	wx->tx_work_limit = NGBE_DEFAULT_TX_WORK;
+	wx->rx_work_limit = NGBE_DEFAULT_RX_WORK;
+
+	return 0;
+}

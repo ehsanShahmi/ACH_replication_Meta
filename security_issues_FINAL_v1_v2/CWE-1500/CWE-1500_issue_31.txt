@@ -1,0 +1,12 @@
+KVM: nVMX: add missing consistency checks for CR0 and CR4
+
+The effective values of the guest CR0 and CR4 registers may differ from
+those included in the VMCS12.  In particular, disabling EPT forces
+CR4.PAE=1 and disabling unrestricted guest mode forces CR0.PG=CR0.PE=1.
+
+Therefore, checks on these bits cannot be delegated to the processor
+and must be performed by KVM.
+
+Reported-by: Reima ISHII <ishiir@g.ecc.u-tokyo.ac.jp>
+Cc: stable@vger.kernel.org
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>

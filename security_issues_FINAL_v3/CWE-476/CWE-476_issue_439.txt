@@ -1,0 +1,58 @@
+The vulnerable issue: powerpc/pseries/dlpar: Fix a missing check in dlpar_parse_cc_property()
+
+In dlpar_parse_cc_property(), 'prop->name' is allocated by kstrdup().
+kstrdup() may return NULL, so it should be checked and handle error.
+And prop should be freed if 'prop->name' is NULL.
+
+Signed-off-by: Gen Zhang <blackgod016574@gmail.com>
+Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+The vulnerable function: static struct property *dlpar_parse_cc_property(struct cc_workarea *ccwa)
+{
+	struct property *prop;
+	char *name;
+	char *value;
+
+	prop = kzalloc(sizeof(*prop), GFP_KERNEL);
+	if (!prop)
+		return NULL;
+
+	name = (char *)ccwa + be32_to_cpu(ccwa->name_offset);
+	prop->name = kstrdup(name, GFP_KERNEL);
+
+	prop->length = be32_to_cpu(ccwa->prop_length);
+	value = (char *)ccwa + be32_to_cpu(ccwa->prop_offset);
+	prop->value = kmemdup(value, prop->length, GFP_KERNEL);
+	if (!prop->value) {
+		dlpar_free_cc_property(prop);
+		return NULL;
+	}
+
+	return prop;
+}
+The corrected function: static struct property *dlpar_parse_cc_property(struct cc_workarea *ccwa)
+{
+	struct property *prop;
+	char *name;
+	char *value;
+
+	prop = kzalloc(sizeof(*prop), GFP_KERNEL);
+	if (!prop)
+		return NULL;
+
+	name = (char *)ccwa + be32_to_cpu(ccwa->name_offset);
+	prop->name = kstrdup(name, GFP_KERNEL);
+	if (!prop->name) {
+		dlpar_free_cc_property(prop);
+		return NULL;
+	}
+
+	prop->length = be32_to_cpu(ccwa->prop_length);
+	value = (char *)ccwa + be32_to_cpu(ccwa->prop_offset);
+	prop->value = kmemdup(value, prop->length, GFP_KERNEL);
+	if (!prop->value) {
+		dlpar_free_cc_property(prop);
+		return NULL;
+	}
+
+	return prop;
+}

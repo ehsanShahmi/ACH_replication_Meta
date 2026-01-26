@@ -1,0 +1,11 @@
+[POWERPC] Never panic when taking altivec exceptions from userspace
+
+At the moment we rely on a cpu feature bit or a firmware property to
+detect altivec. If we dont have either of these and the cpu does in fact
+support altivec we can cause a panic from userspace.
+
+It seems safer to always send a signal if we manage to get an 0xf20
+exception from userspace.
+
+Signed-off-by: Anton Blanchard <anton@samba.org>
+Signed-off-by: Paul Mackerras <paulus@samba.org>

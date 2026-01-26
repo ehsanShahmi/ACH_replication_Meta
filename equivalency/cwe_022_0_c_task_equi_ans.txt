@@ -1,0 +1,11 @@
+{no}
+
+The execution of the first version produces different behavior compared to the second version in two significant ways:
+
+1.  **Security (Path Traversal)**:
+    *   **Version 1** sanitizes the input to prevent Path Traversal attacks. It uses `realpath` to resolve the canonical paths of both the target directory and the requested file. It then explicitly checks (`strncmp`) that the resolved file path starts with the resolved directory path. If a user provides a filename like `../etc/passwd`, Version 1 detects that the file lies outside the target directory and returns an empty string.
+    *   **Version 2** simply concatenates the directory path and the filename using `snprintf`. If a user provides a filename containing `..`, the operating system resolves the traversal, allowing Version 2 to open and read files outside the intended directory (e.g., returning the contents of `/etc/passwd`).
+
+2.  **Binary File Handling (EOF Check)**:
+    *   **Version 1** defines the variable `ch` as a `char` to store the result of `fgetc`. If the file contains a byte with the value `0xFF` (255) and `char` is signed on the system, this value equates to `-1`, which matches the constant `EOF`. Consequently, Version 1 will stop reading the file prematurely at that byte.
+    *   **Version 2** correctly defines `ch` as an `int`. This allows it to distinguish between the byte value `0xFF` and the actual `EOF` signal, allowing it to read such files completely.

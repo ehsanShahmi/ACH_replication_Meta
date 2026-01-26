@@ -1,0 +1,8 @@
+fuse: verify ioctl retries
+
+Verify that the total length of the iovec returned in FUSE_IOCTL_RETRY
+doesn't overflow iov_length().
+
+Signed-off-by: Miklos Szeredi <mszeredi@suse.cz>
+CC: Tejun Heo <tj@kernel.org>
+CC: <stable@kernel.org>         [2.6.31+]

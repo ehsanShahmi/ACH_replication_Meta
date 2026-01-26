@@ -1,0 +1,96 @@
+The vulnerable issue: cifs: fix off-by-one bug in build_unc_path_to_root
+
+commit 839db3d10a (cifs: fix up handling of prefixpath= option) changed
+the code such that the vol->prepath no longer contained a leading
+delimiter and then fixed up the places that accessed that field to
+account for that change.
+
+One spot in build_unc_path_to_root was missed however. When doing the
+pointer addition on pos, that patch failed to account for the fact that
+we had already incremented "pos" by one when adding the length of the
+prepath. This caused a buffer overrun by one byte.
+
+This patch fixes the problem by correcting the handling of "pos".
+
+Cc: <stable@vger.kernel.org> # v3.8+
+Reported-by: Marcus Moeller <marcus.moeller@gmx.ch>
+Reported-by: Ken Fallon <ken.fallon@gmail.com>
+Signed-off-by: Jeff Layton <jlayton@redhat.com>
+Signed-off-by: Steve French <sfrench@us.ibm.com>
+The vulnerable function: build_unc_path_to_root(const struct smb_vol *vol,
+		const struct cifs_sb_info *cifs_sb)
+{
+	char *full_path, *pos;
+	unsigned int pplen = vol->prepath ? strlen(vol->prepath) + 1 : 0;
+	unsigned int unc_len = strnlen(vol->UNC, MAX_TREE_SIZE + 1);
+
+	full_path = kmalloc(unc_len + pplen + 1, GFP_KERNEL);
+	if (full_path == NULL)
+		return ERR_PTR(-ENOMEM);
+
+	strncpy(full_path, vol->UNC, unc_len);
+	pos = full_path + unc_len;
+
+	if (pplen) {
+		*pos++ = CIFS_DIR_SEP(cifs_sb);
+		strncpy(pos, vol->prepath, pplen);
+		pos += pplen;
+	}
+
+	*pos = '\0'; /* add trailing null */
+	convert_delimiter(full_path, CIFS_DIR_SEP(cifs_sb));
+	cifs_dbg(FYI, "%s: full_path=%s\n", __func__, full_path);
+	return full_path;
+}
+The corrected function: long kvm_arch_vcpu_ioctl(struct file *filp,
+			 unsigned int ioctl, unsigned long arg)
+{
+	struct kvm_vcpu *vcpu = filp->private_data;
+	void __user *argp = (void __user *)arg;
+
+	switch (ioctl) {
+	case KVM_ARM_VCPU_INIT: {
+		struct kvm_vcpu_init init;
+
+		if (copy_from_user(&init, argp, sizeof(init)))
+			return -EFAULT;
+
+		return kvm_vcpu_set_target(vcpu, &init);
+
+	}
+	case KVM_SET_ONE_REG:
+	case KVM_GET_ONE_REG: {
+		struct kvm_one_reg reg;
+
+		if (unlikely(!kvm_vcpu_initialized(vcpu)))
+			return -ENOEXEC;
+
+		if (copy_from_user(&reg, argp, sizeof(reg)))
+			return -EFAULT;
+		if (ioctl == KVM_SET_ONE_REG)
+			return kvm_arm_set_reg(vcpu, &reg);
+		else
+			return kvm_arm_get_reg(vcpu, &reg);
+	}
+	case KVM_GET_REG_LIST: {
+		struct kvm_reg_list __user *user_list = argp;
+		struct kvm_reg_list reg_list;
+		unsigned n;
+
+		if (unlikely(!kvm_vcpu_initialized(vcpu)))
+			return -ENOEXEC;
+
+		if (copy_from_user(&reg_list, user_list, sizeof(reg_list)))
+			return -EFAULT;
+		n = reg_list.n;
+		reg_list.n = kvm_arm_num_regs(vcpu);
+		if (copy_to_user(user_list, &reg_list, sizeof(reg_list)))
+			return -EFAULT;
+		if (n < reg_list.n)
+			return -E2BIG;
+		return kvm_arm_copy_reg_indices(vcpu, user_list->reg);
+	}
+	default:
+		return -EINVAL;
+	}
+}

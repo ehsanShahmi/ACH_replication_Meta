@@ -1,0 +1,331 @@
+The vulnerable issue: drm/xe: Fix potential integer overflow in page size calculation
+
+Explicitly cast tbo->page_alignment to u64 before bit-shifting to
+prevent overflow when assigning to min_page_size.
+
+Cc: Matthew Auld <matthew.auld@intel.com>
+Cc: Matthew Brost <matthew.brost@intel.com>
+Signed-off-by: Nirmoy Das <nirmoy.das@intel.com>
+Reviewed-by: Matthew Auld <matthew.auld@intel.com>
+Signed-off-by: Matthew Auld <matthew.auld@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20240318164342.3094-1-nirmoy.das@intel.com
+The vulnerable function: static int xe_ttm_vram_mgr_new(struct ttm_resource_manager *man,
+			       struct ttm_buffer_object *tbo,
+			       const struct ttm_place *place,
+			       struct ttm_resource **res)
+{
+	struct xe_ttm_vram_mgr *mgr = to_xe_ttm_vram_mgr(man);
+	struct xe_ttm_vram_mgr_resource *vres;
+	struct drm_buddy *mm = &mgr->mm;
+	u64 size, remaining_size, min_page_size;
+	unsigned long lpfn;
+	int err;
+
+	lpfn = place->lpfn;
+	if (!lpfn || lpfn > man->size >> PAGE_SHIFT)
+		lpfn = man->size >> PAGE_SHIFT;
+
+	if (tbo->base.size >> PAGE_SHIFT > (lpfn - place->fpfn))
+		return -E2BIG; /* don't trigger eviction for the impossible */
+
+	vres = kzalloc(sizeof(*vres), GFP_KERNEL);
+	if (!vres)
+		return -ENOMEM;
+
+	ttm_resource_init(tbo, place, &vres->base);
+
+	/* bail out quickly if there's likely not enough VRAM for this BO */
+	if (ttm_resource_manager_usage(man) > man->size) {
+		err = -ENOSPC;
+		goto error_fini;
+	}
+
+	INIT_LIST_HEAD(&vres->blocks);
+
+	if (place->flags & TTM_PL_FLAG_TOPDOWN)
+		vres->flags |= DRM_BUDDY_TOPDOWN_ALLOCATION;
+
+	if (place->fpfn || lpfn != man->size >> PAGE_SHIFT)
+		vres->flags |= DRM_BUDDY_RANGE_ALLOCATION;
+
+	if (WARN_ON(!vres->base.size)) {
+		err = -EINVAL;
+		goto error_fini;
+	}
+	size = vres->base.size;
+
+	min_page_size = mgr->default_page_size;
+	if (tbo->page_alignment)
+		min_page_size = tbo->page_alignment << PAGE_SHIFT;
+
+	if (WARN_ON(min_page_size < mm->chunk_size)) {
+		err = -EINVAL;
+		goto error_fini;
+	}
+
+	if (WARN_ON(min_page_size > SZ_2G)) { /* FIXME: sg limit */
+		err = -EINVAL;
+		goto error_fini;
+	}
+
+	if (WARN_ON((size > SZ_2G &&
+		     (vres->base.placement & TTM_PL_FLAG_CONTIGUOUS)))) {
+		err = -EINVAL;
+		goto error_fini;
+	}
+
+	if (WARN_ON(!IS_ALIGNED(size, min_page_size))) {
+		err = -EINVAL;
+		goto error_fini;
+	}
+
+	mutex_lock(&mgr->lock);
+	if (lpfn <= mgr->visible_size >> PAGE_SHIFT && size > mgr->visible_avail) {
+		mutex_unlock(&mgr->lock);
+		err = -ENOSPC;
+		goto error_fini;
+	}
+
+	if (place->fpfn + (size >> PAGE_SHIFT) != place->lpfn &&
+	    place->flags & TTM_PL_FLAG_CONTIGUOUS) {
+		size = roundup_pow_of_two(size);
+		min_page_size = size;
+
+		lpfn = max_t(unsigned long, place->fpfn + (size >> PAGE_SHIFT), lpfn);
+	}
+
+	remaining_size = size;
+	do {
+		/*
+		 * Limit maximum size to 2GiB due to SG table limitations.
+		 * FIXME: Should maybe be handled as part of sg construction.
+		 */
+		u64 alloc_size = min_t(u64, remaining_size, SZ_2G);
+
+		err = drm_buddy_alloc_blocks(mm, (u64)place->fpfn << PAGE_SHIFT,
+					     (u64)lpfn << PAGE_SHIFT,
+					     alloc_size,
+					     min_page_size,
+					     &vres->blocks,
+					     vres->flags);
+		if (err)
+			goto error_free_blocks;
+
+		remaining_size -= alloc_size;
+	} while (remaining_size);
+
+	if (place->flags & TTM_PL_FLAG_CONTIGUOUS) {
+		if (!drm_buddy_block_trim(mm, vres->base.size, &vres->blocks))
+			size = vres->base.size;
+	}
+
+	if (lpfn <= mgr->visible_size >> PAGE_SHIFT) {
+		vres->used_visible_size = size;
+	} else {
+		struct drm_buddy_block *block;
+
+		list_for_each_entry(block, &vres->blocks, link) {
+			u64 start = drm_buddy_block_offset(block);
+
+			if (start < mgr->visible_size) {
+				u64 end = start + drm_buddy_block_size(mm, block);
+
+				vres->used_visible_size +=
+					min(end, mgr->visible_size) - start;
+			}
+		}
+	}
+
+	mgr->visible_avail -= vres->used_visible_size;
+	mutex_unlock(&mgr->lock);
+
+	if (!(vres->base.placement & TTM_PL_FLAG_CONTIGUOUS) &&
+	    xe_is_vram_mgr_blocks_contiguous(mm, &vres->blocks))
+		vres->base.placement |= TTM_PL_FLAG_CONTIGUOUS;
+
+	/*
+	 * For some kernel objects we still rely on the start when io mapping
+	 * the object.
+	 */
+	if (vres->base.placement & TTM_PL_FLAG_CONTIGUOUS) {
+		struct drm_buddy_block *block = list_first_entry(&vres->blocks,
+								 typeof(*block),
+								 link);
+
+		vres->base.start = drm_buddy_block_offset(block) >> PAGE_SHIFT;
+	} else {
+		vres->base.start = XE_BO_INVALID_OFFSET;
+	}
+
+	*res = &vres->base;
+	return 0;
+
+error_free_blocks:
+	drm_buddy_free_list(mm, &vres->blocks);
+	mutex_unlock(&mgr->lock);
+error_fini:
+	ttm_resource_fini(man, &vres->base);
+	kfree(vres);
+
+	return err;
+}
+The corrected function: static int xe_ttm_vram_mgr_new(struct ttm_resource_manager *man,
+			       struct ttm_buffer_object *tbo,
+			       const struct ttm_place *place,
+			       struct ttm_resource **res)
+{
+	struct xe_ttm_vram_mgr *mgr = to_xe_ttm_vram_mgr(man);
+	struct xe_ttm_vram_mgr_resource *vres;
+	struct drm_buddy *mm = &mgr->mm;
+	u64 size, remaining_size, min_page_size;
+	unsigned long lpfn;
+	int err;
+
+	lpfn = place->lpfn;
+	if (!lpfn || lpfn > man->size >> PAGE_SHIFT)
+		lpfn = man->size >> PAGE_SHIFT;
+
+	if (tbo->base.size >> PAGE_SHIFT > (lpfn - place->fpfn))
+		return -E2BIG; /* don't trigger eviction for the impossible */
+
+	vres = kzalloc(sizeof(*vres), GFP_KERNEL);
+	if (!vres)
+		return -ENOMEM;
+
+	ttm_resource_init(tbo, place, &vres->base);
+
+	/* bail out quickly if there's likely not enough VRAM for this BO */
+	if (ttm_resource_manager_usage(man) > man->size) {
+		err = -ENOSPC;
+		goto error_fini;
+	}
+
+	INIT_LIST_HEAD(&vres->blocks);
+
+	if (place->flags & TTM_PL_FLAG_TOPDOWN)
+		vres->flags |= DRM_BUDDY_TOPDOWN_ALLOCATION;
+
+	if (place->fpfn || lpfn != man->size >> PAGE_SHIFT)
+		vres->flags |= DRM_BUDDY_RANGE_ALLOCATION;
+
+	if (WARN_ON(!vres->base.size)) {
+		err = -EINVAL;
+		goto error_fini;
+	}
+	size = vres->base.size;
+
+	min_page_size = mgr->default_page_size;
+	if (tbo->page_alignment)
+		min_page_size = (u64)tbo->page_alignment << PAGE_SHIFT;
+
+	if (WARN_ON(min_page_size < mm->chunk_size)) {
+		err = -EINVAL;
+		goto error_fini;
+	}
+
+	if (WARN_ON(min_page_size > SZ_2G)) { /* FIXME: sg limit */
+		err = -EINVAL;
+		goto error_fini;
+	}
+
+	if (WARN_ON((size > SZ_2G &&
+		     (vres->base.placement & TTM_PL_FLAG_CONTIGUOUS)))) {
+		err = -EINVAL;
+		goto error_fini;
+	}
+
+	if (WARN_ON(!IS_ALIGNED(size, min_page_size))) {
+		err = -EINVAL;
+		goto error_fini;
+	}
+
+	mutex_lock(&mgr->lock);
+	if (lpfn <= mgr->visible_size >> PAGE_SHIFT && size > mgr->visible_avail) {
+		mutex_unlock(&mgr->lock);
+		err = -ENOSPC;
+		goto error_fini;
+	}
+
+	if (place->fpfn + (size >> PAGE_SHIFT) != place->lpfn &&
+	    place->flags & TTM_PL_FLAG_CONTIGUOUS) {
+		size = roundup_pow_of_two(size);
+		min_page_size = size;
+
+		lpfn = max_t(unsigned long, place->fpfn + (size >> PAGE_SHIFT), lpfn);
+	}
+
+	remaining_size = size;
+	do {
+		/*
+		 * Limit maximum size to 2GiB due to SG table limitations.
+		 * FIXME: Should maybe be handled as part of sg construction.
+		 */
+		u64 alloc_size = min_t(u64, remaining_size, SZ_2G);
+
+		err = drm_buddy_alloc_blocks(mm, (u64)place->fpfn << PAGE_SHIFT,
+					     (u64)lpfn << PAGE_SHIFT,
+					     alloc_size,
+					     min_page_size,
+					     &vres->blocks,
+					     vres->flags);
+		if (err)
+			goto error_free_blocks;
+
+		remaining_size -= alloc_size;
+	} while (remaining_size);
+
+	if (place->flags & TTM_PL_FLAG_CONTIGUOUS) {
+		if (!drm_buddy_block_trim(mm, vres->base.size, &vres->blocks))
+			size = vres->base.size;
+	}
+
+	if (lpfn <= mgr->visible_size >> PAGE_SHIFT) {
+		vres->used_visible_size = size;
+	} else {
+		struct drm_buddy_block *block;
+
+		list_for_each_entry(block, &vres->blocks, link) {
+			u64 start = drm_buddy_block_offset(block);
+
+			if (start < mgr->visible_size) {
+				u64 end = start + drm_buddy_block_size(mm, block);
+
+				vres->used_visible_size +=
+					min(end, mgr->visible_size) - start;
+			}
+		}
+	}
+
+	mgr->visible_avail -= vres->used_visible_size;
+	mutex_unlock(&mgr->lock);
+
+	if (!(vres->base.placement & TTM_PL_FLAG_CONTIGUOUS) &&
+	    xe_is_vram_mgr_blocks_contiguous(mm, &vres->blocks))
+		vres->base.placement |= TTM_PL_FLAG_CONTIGUOUS;
+
+	/*
+	 * For some kernel objects we still rely on the start when io mapping
+	 * the object.
+	 */
+	if (vres->base.placement & TTM_PL_FLAG_CONTIGUOUS) {
+		struct drm_buddy_block *block = list_first_entry(&vres->blocks,
+								 typeof(*block),
+								 link);
+
+		vres->base.start = drm_buddy_block_offset(block) >> PAGE_SHIFT;
+	} else {
+		vres->base.start = XE_BO_INVALID_OFFSET;
+	}
+
+	*res = &vres->base;
+	return 0;
+
+error_free_blocks:
+	drm_buddy_free_list(mm, &vres->blocks);
+	mutex_unlock(&mgr->lock);
+error_fini:
+	ttm_resource_fini(man, &vres->base);
+	kfree(vres);
+
+	return err;
+}

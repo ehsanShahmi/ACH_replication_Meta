@@ -1,0 +1,227 @@
+The vulnerable issue: perf: Remove the nmi parameter from the swevent and overflow interface
+
+The nmi parameter indicated if we could do wakeups from the current
+context, if not, we would set some state and self-IPI and let the
+resulting interrupt do the wakeup.
+
+For the various event classes:
+
+  - hardware: nmi=0; PMI is in fact an NMI or we run irq_work_run from
+    the PMI-tail (ARM etc.)
+  - tracepoint: nmi=0; since tracepoint could be from NMI context.
+  - software: nmi=[0,1]; some, like the schedule thing cannot
+    perform wakeups, and hence need 0.
+
+As one can see, there is very little nmi=1 usage, and the down-side of
+not using it is that on some platforms some software events can have a
+jiffy delay in wakeup (when arch_irq_work_raise isn't implemented).
+
+The up-side however is that we can remove the nmi parameter and save a
+bunch of conditionals in fast paths.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: Michael Cree <mcree@orcon.net.nz>
+Cc: Will Deacon <will.deacon@arm.com>
+Cc: Deng-Cheng Zhu <dengcheng.zhu@gmail.com>
+Cc: Anton Blanchard <anton@samba.org>
+Cc: Eric B Munson <emunson@mgebm.net>
+Cc: Heiko Carstens <heiko.carstens@de.ibm.com>
+Cc: Paul Mundt <lethal@linux-sh.org>
+Cc: David S. Miller <davem@davemloft.net>
+Cc: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Jason Wessel <jason.wessel@windriver.com>
+Cc: Don Zickus <dzickus@redhat.com>
+Link: http://lkml.kernel.org/n/tip-agjev8eu666tvknpb3iaj0fg@git.kernel.org
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+The vulnerable function: int vis_emul(struct pt_regs *regs, unsigned int insn)
+{
+	unsigned long pc = regs->tpc;
+	unsigned int opf;
+
+	BUG_ON(regs->tstate & TSTATE_PRIV);
+
+	perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS, 1, 0, regs, 0);
+
+	if (test_thread_flag(TIF_32BIT))
+		pc = (u32)pc;
+
+	if (get_user(insn, (u32 __user *) pc))
+		return -EFAULT;
+
+	save_and_clear_fpu();
+
+	opf = (insn & VIS_OPF_MASK) >> VIS_OPF_SHIFT;
+	switch (opf) {
+	default:
+		return -EINVAL;
+
+	/* Pixel Formatting Instructions.  */
+	case FPACK16_OPF:
+	case FPACK32_OPF:
+	case FPACKFIX_OPF:
+	case FEXPAND_OPF:
+	case FPMERGE_OPF:
+		pformat(regs, insn, opf);
+		break;
+
+	/* Partitioned Multiply Instructions  */
+	case FMUL8x16_OPF:
+	case FMUL8x16AU_OPF:
+	case FMUL8x16AL_OPF:
+	case FMUL8SUx16_OPF:
+	case FMUL8ULx16_OPF:
+	case FMULD8SUx16_OPF:
+	case FMULD8ULx16_OPF:
+		pmul(regs, insn, opf);
+		break;
+
+	/* Pixel Compare Instructions  */
+	case FCMPGT16_OPF:
+	case FCMPGT32_OPF:
+	case FCMPLE16_OPF:
+	case FCMPLE32_OPF:
+	case FCMPNE16_OPF:
+	case FCMPNE32_OPF:
+	case FCMPEQ16_OPF:
+	case FCMPEQ32_OPF:
+		pcmp(regs, insn, opf);
+		break;
+
+	/* Edge Handling Instructions  */
+	case EDGE8_OPF:
+	case EDGE8N_OPF:
+	case EDGE8L_OPF:
+	case EDGE8LN_OPF:
+	case EDGE16_OPF:
+	case EDGE16N_OPF:
+	case EDGE16L_OPF:
+	case EDGE16LN_OPF:
+	case EDGE32_OPF:
+	case EDGE32N_OPF:
+	case EDGE32L_OPF:
+	case EDGE32LN_OPF:
+		edge(regs, insn, opf);
+		break;
+
+	/* Pixel Component Distance  */
+	case PDIST_OPF:
+		pdist(regs, insn);
+		break;
+
+	/* Three-Dimensional Array Addressing Instructions  */
+	case ARRAY8_OPF:
+	case ARRAY16_OPF:
+	case ARRAY32_OPF:
+		array(regs, insn, opf);
+		break;
+
+	/* Byte Mask and Shuffle Instructions  */
+	case BMASK_OPF:
+		bmask(regs, insn);
+		break;
+
+	case BSHUFFLE_OPF:
+		bshuffle(regs, insn);
+		break;
+	}
+
+	regs->tpc = regs->tnpc;
+	regs->tnpc += 4;
+	return 0;
+}
+The corrected function: int vis_emul(struct pt_regs *regs, unsigned int insn)
+{
+	unsigned long pc = regs->tpc;
+	unsigned int opf;
+
+	BUG_ON(regs->tstate & TSTATE_PRIV);
+
+	perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS, 1, regs, 0);
+
+	if (test_thread_flag(TIF_32BIT))
+		pc = (u32)pc;
+
+	if (get_user(insn, (u32 __user *) pc))
+		return -EFAULT;
+
+	save_and_clear_fpu();
+
+	opf = (insn & VIS_OPF_MASK) >> VIS_OPF_SHIFT;
+	switch (opf) {
+	default:
+		return -EINVAL;
+
+	/* Pixel Formatting Instructions.  */
+	case FPACK16_OPF:
+	case FPACK32_OPF:
+	case FPACKFIX_OPF:
+	case FEXPAND_OPF:
+	case FPMERGE_OPF:
+		pformat(regs, insn, opf);
+		break;
+
+	/* Partitioned Multiply Instructions  */
+	case FMUL8x16_OPF:
+	case FMUL8x16AU_OPF:
+	case FMUL8x16AL_OPF:
+	case FMUL8SUx16_OPF:
+	case FMUL8ULx16_OPF:
+	case FMULD8SUx16_OPF:
+	case FMULD8ULx16_OPF:
+		pmul(regs, insn, opf);
+		break;
+
+	/* Pixel Compare Instructions  */
+	case FCMPGT16_OPF:
+	case FCMPGT32_OPF:
+	case FCMPLE16_OPF:
+	case FCMPLE32_OPF:
+	case FCMPNE16_OPF:
+	case FCMPNE32_OPF:
+	case FCMPEQ16_OPF:
+	case FCMPEQ32_OPF:
+		pcmp(regs, insn, opf);
+		break;
+
+	/* Edge Handling Instructions  */
+	case EDGE8_OPF:
+	case EDGE8N_OPF:
+	case EDGE8L_OPF:
+	case EDGE8LN_OPF:
+	case EDGE16_OPF:
+	case EDGE16N_OPF:
+	case EDGE16L_OPF:
+	case EDGE16LN_OPF:
+	case EDGE32_OPF:
+	case EDGE32N_OPF:
+	case EDGE32L_OPF:
+	case EDGE32LN_OPF:
+		edge(regs, insn, opf);
+		break;
+
+	/* Pixel Component Distance  */
+	case PDIST_OPF:
+		pdist(regs, insn);
+		break;
+
+	/* Three-Dimensional Array Addressing Instructions  */
+	case ARRAY8_OPF:
+	case ARRAY16_OPF:
+	case ARRAY32_OPF:
+		array(regs, insn, opf);
+		break;
+
+	/* Byte Mask and Shuffle Instructions  */
+	case BMASK_OPF:
+		bmask(regs, insn);
+		break;
+
+	case BSHUFFLE_OPF:
+		bshuffle(regs, insn);
+		break;
+	}
+
+	regs->tpc = regs->tnpc;
+	regs->tnpc += 4;
+	return 0;
+}

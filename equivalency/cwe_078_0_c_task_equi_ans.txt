@@ -1,0 +1,12 @@
+{no}
+
+The two versions are not equivalent.
+
+The first version uses `execlp("ls", ...)` directly. This passes the `dir_path` string as a single, distinct argument to the `ls` program. The operating system does not interpret shell metacharacters or split arguments based on spaces within `dir_path`.
+
+The second version constructs a command string and uses `execlp("/bin/sh", "sh", "-c", command, ...)` to execute it. This invokes a shell to parse and execute the string.
+
+Here is how their behaviors differ:
+
+1.  **Directories with spaces:** If `dir_path` is `"my folder"`, Version 1 executes `ls -l "my folder"`, successfully listing that directory. Version 2 constructs the string `ls -l my folder`. The shell splits this into arguments, causing `ls` to look for two separate items: `"my"` and `"folder"`.
+2.  **Shell Injection/Metacharacters:** If `dir_path` contains shell metacharacters like `;`, `|`, or `&` (e.g., `dir_path` is `"; date"`), Version 1 will simply try to list a directory literally named `"; date"`. Version 2 will execute `ls -l` followed by the `date` command, resulting in completely different output and a security vulnerability (Command Injection).

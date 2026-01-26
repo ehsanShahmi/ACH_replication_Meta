@@ -1,0 +1,27 @@
+The vulnerable issue: NFSv4: Convert the open and close ops to use fmode
+
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+The vulnerable function: nfs4_state_set_mode_locked(struct nfs4_state *state, mode_t mode)
+{
+	if (state->state == mode)
+		return;
+	/* NB! List reordering - see the reclaim code for why.  */
+	if ((mode & FMODE_WRITE) != (state->state & FMODE_WRITE)) {
+		if (mode & FMODE_WRITE)
+			list_move(&state->open_states, &state->owner->so_states);
+		else
+			list_move_tail(&state->open_states, &state->owner->so_states);
+	}
+	state->state = mode;
+}
+The corrected function: static int encode_open_downgrade(struct xdr_stream *xdr, const struct nfs_closeargs *arg)
+{
+	__be32 *p;
+
+	RESERVE_SPACE(4+NFS4_STATEID_SIZE+4);
+	WRITE32(OP_OPEN_DOWNGRADE);
+	WRITEMEM(arg->stateid->data, NFS4_STATEID_SIZE);
+	WRITE32(arg->seqid->sequence->counter);
+	encode_share_access(xdr, arg->fmode);
+	return 0;
+}

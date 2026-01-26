@@ -1,0 +1,83 @@
+The vulnerable issue: ASoC: SOF: ipc4-topology: Fix input format query of process modules without base extension
+
+If a process module does not have base config extension then the same
+format applies to all of it's inputs and the process->base_config_ext is
+NULL, causing NULL dereference when specifically crafted topology and
+sequences used.
+
+Fixes: 648fea128476 ("ASoC: SOF: ipc4-topology: set copier output format for process module")
+Signed-off-by: Peter Ujfalusi <peter.ujfalusi@linux.intel.com>
+Reviewed-by: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Reviewed-by: Seppo Ingalsuo <seppo.ingalsuo@linux.intel.com>
+Reviewed-by: Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
+Cc: stable@vger.kernel.org
+Link: https://msgid.link/r/20240529121201.14687-1-peter.ujfalusi@linux.intel.com
+Signed-off-by: Mark Brown <broonie@kernel.org>
+The vulnerable function: static const struct sof_ipc4_audio_format *
+sof_ipc4_get_input_pin_audio_fmt(struct snd_sof_widget *swidget, int pin_index)
+{
+	struct sof_ipc4_base_module_cfg_ext *base_cfg_ext;
+	struct sof_ipc4_process *process;
+	int i;
+
+	if (swidget->id != snd_soc_dapm_effect) {
+		struct sof_ipc4_base_module_cfg *base = swidget->private;
+
+		/* For non-process modules, base module config format is used for all input pins */
+		return &base->audio_fmt;
+	}
+
+	process = swidget->private;
+	base_cfg_ext = process->base_config_ext;
+
+	/*
+	 * If there are multiple input formats available for a pin, the first available format
+	 * is chosen.
+	 */
+	for (i = 0; i < base_cfg_ext->num_input_pin_fmts; i++) {
+		struct sof_ipc4_pin_format *pin_format = &base_cfg_ext->pin_formats[i];
+
+		if (pin_format->pin_index == pin_index)
+			return &pin_format->audio_fmt;
+	}
+
+	return NULL;
+}
+The corrected function: static const struct sof_ipc4_audio_format *
+sof_ipc4_get_input_pin_audio_fmt(struct snd_sof_widget *swidget, int pin_index)
+{
+	struct sof_ipc4_base_module_cfg_ext *base_cfg_ext;
+	struct sof_ipc4_process *process;
+	int i;
+
+	if (swidget->id != snd_soc_dapm_effect) {
+		struct sof_ipc4_base_module_cfg *base = swidget->private;
+
+		/* For non-process modules, base module config format is used for all input pins */
+		return &base->audio_fmt;
+	}
+
+	process = swidget->private;
+
+	/*
+	 * For process modules without base config extension, base module config
+	 * format is used for all input pins
+	 */
+	if (process->init_config != SOF_IPC4_MODULE_INIT_CONFIG_TYPE_BASE_CFG_WITH_EXT)
+		return &process->base_config.audio_fmt;
+
+	base_cfg_ext = process->base_config_ext;
+
+	/*
+	 * If there are multiple input formats available for a pin, the first available format
+	 * is chosen.
+	 */
+	for (i = 0; i < base_cfg_ext->num_input_pin_fmts; i++) {
+		struct sof_ipc4_pin_format *pin_format = &base_cfg_ext->pin_formats[i];
+
+		if (pin_format->pin_index == pin_index)
+			return &pin_format->audio_fmt;
+	}
+
+	return NULL;
+}

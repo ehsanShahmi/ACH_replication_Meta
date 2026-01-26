@@ -1,0 +1,10 @@
+TOMOYO: Fix oops in tomoyo_mount_acl().
+
+In tomoyo_mount_acl() since 2.6.36, kern_path() was called without checking
+dev_name != NULL. As a result, an unprivileged user can trigger oops by issuing
+mount(NULL, "/", "ext3", 0, NULL) request.
+Fix this by checking dev_name != NULL before calling kern_path(dev_name).
+
+Signed-off-by: Tetsuo Handa <penguin-kernel@I-love.SAKURA.ne.jp>
+Cc: stable@kernel.org
+Signed-off-by: James Morris <jmorris@namei.org>

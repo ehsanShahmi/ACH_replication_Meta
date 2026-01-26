@@ -1,0 +1,16 @@
+ksmbd: validate length in smb2_write()
+
+The SMB2 Write packet contains data that is to be written
+to a file or to a pipe. Depending on the client, there may
+be padding between the header and the data field.
+Currently, the length is validated only in the case padding
+is present.
+
+Since the DataOffset field always points to the beginning
+of the data, there is no need to have a special case for
+padding. By removing this, the length is validated in both
+cases.
+
+Signed-off-by: Marios Makassikis <mmakassikis@freebox.fr>
+Acked-by: Namjae Jeon <linkinjeon@kernel.org>
+Signed-off-by: Steve French <stfrench@microsoft.com>

@@ -1,0 +1,12 @@
+perf: Fix perf_event_validate_size()
+
+Budimir noted that perf_event_validate_size() only checks the size of
+the newly added event, even though the sizes of all existing events
+can also change due to not all events having the same read_format.
+
+When we attach the new event, perf_group_attach(), we do re-compute
+the size for all events.
+
+Fixes: a723968c0ed3 ("perf: Fix u16 overflows")
+Reported-by: Budimir Markovic <markovicbudimir@gmail.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>

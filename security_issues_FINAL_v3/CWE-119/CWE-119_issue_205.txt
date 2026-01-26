@@ -1,0 +1,86 @@
+The vulnerable issue: HID: corsair: fix DMA buffers on stack
+
+Not all platforms support DMA to the stack, and specifically since v4.9
+this is no longer supported on x86 with VMAP_STACK either.
+
+Note that the macro-mode buffer was larger than necessary.
+
+Fixes: 6f78193ee9ea ("HID: corsair: Add Corsair Vengeance K90 driver")
+Cc: stable <stable@vger.kernel.org>
+Signed-off-by: Johan Hovold <johan@kernel.org>
+Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+The vulnerable function: static ssize_t k90_show_macro_mode(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	int ret;
+	struct usb_interface *usbif = to_usb_interface(dev->parent);
+	struct usb_device *usbdev = interface_to_usbdev(usbif);
+	const char *macro_mode;
+	char data[8];
+
+	ret = usb_control_msg(usbdev, usb_rcvctrlpipe(usbdev, 0),
+			      K90_REQUEST_GET_MODE,
+			      USB_DIR_IN | USB_TYPE_VENDOR |
+			      USB_RECIP_DEVICE, 0, 0, data, 2,
+			      USB_CTRL_SET_TIMEOUT);
+	if (ret < 0) {
+		dev_warn(dev, "Failed to get K90 initial mode (error %d).\n",
+			 ret);
+		return -EIO;
+	}
+
+	switch (data[0]) {
+	case K90_MACRO_MODE_HW:
+		macro_mode = "HW";
+		break;
+
+	case K90_MACRO_MODE_SW:
+		macro_mode = "SW";
+		break;
+	default:
+		dev_warn(dev, "K90 in unknown mode: %02hhx.\n",
+			 data[0]);
+		return -EIO;
+	}
+
+	return snprintf(buf, PAGE_SIZE, "%s\n", macro_mode);
+}
+The corrected function: static enum led_brightness k90_backlight_get(struct led_classdev *led_cdev)
+{
+	int ret;
+	struct k90_led *led = container_of(led_cdev, struct k90_led, cdev);
+	struct device *dev = led->cdev.dev->parent;
+	struct usb_interface *usbif = to_usb_interface(dev->parent);
+	struct usb_device *usbdev = interface_to_usbdev(usbif);
+	int brightness;
+	char *data;
+
+	data = kmalloc(8, GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	ret = usb_control_msg(usbdev, usb_rcvctrlpipe(usbdev, 0),
+			      K90_REQUEST_STATUS,
+			      USB_DIR_IN | USB_TYPE_VENDOR |
+			      USB_RECIP_DEVICE, 0, 0, data, 8,
+			      USB_CTRL_SET_TIMEOUT);
+	if (ret < 0) {
+		dev_warn(dev, "Failed to get K90 initial state (error %d).\n",
+			 ret);
+		ret = -EIO;
+		goto out;
+	}
+	brightness = data[4];
+	if (brightness < 0 || brightness > 3) {
+		dev_warn(dev,
+			 "Read invalid backlight brightness: %02hhx.\n",
+			 data[4]);
+		ret = -EIO;
+		goto out;
+	}
+	ret = brightness;
+out:
+	kfree(data);
+
+	return ret;
+}

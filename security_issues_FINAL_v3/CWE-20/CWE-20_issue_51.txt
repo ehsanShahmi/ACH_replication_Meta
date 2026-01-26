@@ -1,0 +1,85 @@
+The vulnerable issue: KVM: Fix bounds checking in ioapic indirect register reads (CVE-2013-1798)
+
+If the guest specifies a IOAPIC_REG_SELECT with an invalid value and follows
+that with a read of the IOAPIC_REG_WINDOW KVM does not properly validate
+that request.  ioapic_read_indirect contains an
+ASSERT(redir_index < IOAPIC_NUM_PINS), but the ASSERT has no effect in
+non-debug builds.  In recent kernels this allows a guest to cause a kernel
+oops by reading invalid memory.  In older kernels (pre-3.3) this allows a
+guest to read from large ranges of host memory.
+
+Tested: tested against apic unit tests.
+
+Signed-off-by: Andrew Honig <ahonig@google.com>
+Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+The vulnerable function: static unsigned long ioapic_read_indirect(struct kvm_ioapic *ioapic,
+					  unsigned long addr,
+					  unsigned long length)
+{
+	unsigned long result = 0;
+
+	switch (ioapic->ioregsel) {
+	case IOAPIC_REG_VERSION:
+		result = ((((IOAPIC_NUM_PINS - 1) & 0xff) << 16)
+			  | (IOAPIC_VERSION_ID & 0xff));
+		break;
+
+	case IOAPIC_REG_APIC_ID:
+	case IOAPIC_REG_ARB_ID:
+		result = ((ioapic->id & 0xf) << 24);
+		break;
+
+	default:
+		{
+			u32 redir_index = (ioapic->ioregsel - 0x10) >> 1;
+			u64 redir_content;
+
+			ASSERT(redir_index < IOAPIC_NUM_PINS);
+
+			redir_content = ioapic->redirtbl[redir_index].bits;
+			result = (ioapic->ioregsel & 0x1) ?
+			    (redir_content >> 32) & 0xffffffff :
+			    redir_content & 0xffffffff;
+			break;
+		}
+	}
+
+	return result;
+}
+The corrected function: static unsigned long ioapic_read_indirect(struct kvm_ioapic *ioapic,
+					  unsigned long addr,
+					  unsigned long length)
+{
+	unsigned long result = 0;
+
+	switch (ioapic->ioregsel) {
+	case IOAPIC_REG_VERSION:
+		result = ((((IOAPIC_NUM_PINS - 1) & 0xff) << 16)
+			  | (IOAPIC_VERSION_ID & 0xff));
+		break;
+
+	case IOAPIC_REG_APIC_ID:
+	case IOAPIC_REG_ARB_ID:
+		result = ((ioapic->id & 0xf) << 24);
+		break;
+
+	default:
+		{
+			u32 redir_index = (ioapic->ioregsel - 0x10) >> 1;
+			u64 redir_content;
+
+			if (redir_index < IOAPIC_NUM_PINS)
+				redir_content =
+					ioapic->redirtbl[redir_index].bits;
+			else
+				redir_content = ~0ULL;
+
+			result = (ioapic->ioregsel & 0x1) ?
+			    (redir_content >> 32) & 0xffffffff :
+			    redir_content & 0xffffffff;
+			break;
+		}
+	}
+
+	return result;
+}

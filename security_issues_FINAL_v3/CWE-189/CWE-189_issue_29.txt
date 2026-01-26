@@ -1,0 +1,93 @@
+The vulnerable issue: ext4: fix undefined behavior in ext4_fill_flex_info()
+
+Commit 503358ae01b70ce6909d19dd01287093f6b6271c ("ext4: avoid divide by
+zero when trying to mount a corrupted file system") fixes CVE-2009-4307
+by performing a sanity check on s_log_groups_per_flex, since it can be
+set to a bogus value by an attacker.
+
+	sbi->s_log_groups_per_flex = sbi->s_es->s_log_groups_per_flex;
+	groups_per_flex = 1 << sbi->s_log_groups_per_flex;
+
+	if (groups_per_flex < 2) { ... }
+
+This patch fixes two potential issues in the previous commit.
+
+1) The sanity check might only work on architectures like PowerPC.
+On x86, 5 bits are used for the shifting amount.  That means, given a
+large s_log_groups_per_flex value like 36, groups_per_flex = 1 << 36
+is essentially 1 << 4 = 16, rather than 0.  This will bypass the check,
+leaving s_log_groups_per_flex and groups_per_flex inconsistent.
+
+2) The sanity check relies on undefined behavior, i.e., oversized shift.
+A standard-confirming C compiler could rewrite the check in unexpected
+ways.  Consider the following equivalent form, assuming groups_per_flex
+is unsigned for simplicity.
+
+	groups_per_flex = 1 << sbi->s_log_groups_per_flex;
+	if (groups_per_flex == 0 || groups_per_flex == 1) {
+
+We compile the code snippet using Clang 3.0 and GCC 4.6.  Clang will
+completely optimize away the check groups_per_flex == 0, leaving the
+patched code as vulnerable as the original.  GCC keeps the check, but
+there is no guarantee that future versions will do the same.
+
+Signed-off-by: Xi Wang <xi.wang@gmail.com>
+Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+Cc: stable@vger.kernel.org
+The vulnerable function: static int ext4_fill_flex_info(struct super_block *sb)
+{
+	struct ext4_sb_info *sbi = EXT4_SB(sb);
+	struct ext4_group_desc *gdp = NULL;
+	ext4_group_t flex_group_count;
+	ext4_group_t flex_group;
+	int groups_per_flex = 0;
+	size_t size;
+	int i;
+
+	sbi->s_log_groups_per_flex = sbi->s_es->s_log_groups_per_flex;
+	groups_per_flex = 1 << sbi->s_log_groups_per_flex;
+
+	if (groups_per_flex < 2) {
+		sbi->s_log_groups_per_flex = 0;
+		return 1;
+	}
+
+	/* We allocate both existing and potentially added groups */
+	flex_group_count = ((sbi->s_groups_count + groups_per_flex - 1) +
+			((le16_to_cpu(sbi->s_es->s_reserved_gdt_blocks) + 1) <<
+			      EXT4_DESC_PER_BLOCK_BITS(sb))) / groups_per_flex;
+	size = flex_group_count * sizeof(struct flex_groups);
+	sbi->s_flex_groups = ext4_kvzalloc(size, GFP_KERNEL);
+	if (sbi->s_flex_groups == NULL) {
+		ext4_msg(sb, KERN_ERR, "not enough memory for %u flex groups",
+			 flex_group_count);
+		goto failed;
+	}
+
+	for (i = 0; i < sbi->s_groups_count; i++) {
+		gdp = ext4_get_group_desc(sb, i, NULL);
+
+		flex_group = ext4_flex_group(sbi, i);
+		atomic_add(ext4_free_inodes_count(sb, gdp),
+			   &sbi->s_flex_groups[flex_group].free_inodes);
+		atomic_add(ext4_free_group_clusters(sb, gdp),
+			   &sbi->s_flex_groups[flex_group].free_clusters);
+		atomic_add(ext4_used_dirs_count(sb, gdp),
+			   &sbi->s_flex_groups[flex_group].used_dirs);
+	}
+
+	return 1;
+failed:
+	return 0;
+}
+The corrected function: int scsi_cmd_blk_ioctl(struct block_device *bd, fmode_t mode,
+		       unsigned int cmd, void __user *arg)
+{
+	int ret;
+
+	ret = scsi_verify_blk_ioctl(bd, cmd);
+	if (ret < 0)
+		return ret;
+
+	return scsi_cmd_ioctl(bd->bd_disk->queue, bd->bd_disk, mode, cmd, arg);
+}

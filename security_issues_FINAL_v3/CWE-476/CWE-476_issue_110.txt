@@ -1,0 +1,175 @@
+The vulnerable issue: usb: cdnsp: Fix a NULL pointer dereference in cdnsp_endpoint_init()
+
+In cdnsp_endpoint_init(), cdnsp_ring_alloc() is assigned to pep->ring
+and there is a dereference of it in cdnsp_endpoint_init(), which could
+lead to a NULL pointer dereference on failure of cdnsp_ring_alloc().
+
+Fix this bug by adding a check of pep->ring.
+
+This bug was found by a static analyzer. The analysis employs
+differential checking to identify inconsistent security operations
+(e.g., checks or kfrees) between two code paths and confirms that the
+inconsistent operations are not recovered in the current function or
+the callers, so they constitute bugs.
+
+Note that, as a bug found by static analysis, it can be a false
+positive or hard to trigger. Multiple researchers have cross-reviewed
+the bug.
+
+Builds with CONFIG_USB_CDNSP_GADGET=y show no new warnings,
+and our static analyzer no longer warns about this code.
+
+Fixes: 3d82904559f4 ("usb: cdnsp: cdns3 Add main part of Cadence USBSSP DRD Driver")
+Cc: stable <stable@vger.kernel.org>
+Acked-by: Pawel Laszczak <pawell@cadence.com>
+Acked-by: Peter Chen <peter.chen@kernel.org>
+Signed-off-by: Zhou Qingyang <zhou1615@umn.edu>
+Link: https://lore.kernel.org/r/20211130172700.206650-1-zhou1615@umn.edu
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+The vulnerable function: int cdnsp_endpoint_init(struct cdnsp_device *pdev,
+			struct cdnsp_ep *pep,
+			gfp_t mem_flags)
+{
+	enum cdnsp_ring_type ring_type;
+	struct cdnsp_ep_ctx *ep_ctx;
+	unsigned int err_count = 0;
+	unsigned int avg_trb_len;
+	unsigned int max_packet;
+	unsigned int max_burst;
+	unsigned int interval;
+	u32 max_esit_payload;
+	unsigned int mult;
+	u32 endpoint_type;
+	int ret;
+
+	ep_ctx = pep->in_ctx;
+
+	endpoint_type = cdnsp_get_endpoint_type(pep->endpoint.desc);
+	if (!endpoint_type)
+		return -EINVAL;
+
+	ring_type = usb_endpoint_type(pep->endpoint.desc);
+
+	/*
+	 * Get values to fill the endpoint context, mostly from ep descriptor.
+	 * The average TRB buffer length for bulk endpoints is unclear as we
+	 * have no clue on scatter gather list entry size. For Isoc and Int,
+	 * set it to max available.
+	 */
+	max_esit_payload = cdnsp_get_max_esit_payload(&pdev->gadget, pep);
+	interval = cdnsp_get_endpoint_interval(&pdev->gadget, pep);
+	mult = cdnsp_get_endpoint_mult(&pdev->gadget, pep);
+	max_packet = usb_endpoint_maxp(pep->endpoint.desc);
+	max_burst = cdnsp_get_endpoint_max_burst(&pdev->gadget, pep);
+	avg_trb_len = max_esit_payload;
+
+	/* Allow 3 retries for everything but isoc, set CErr = 3. */
+	if (!usb_endpoint_xfer_isoc(pep->endpoint.desc))
+		err_count = 3;
+	if (usb_endpoint_xfer_bulk(pep->endpoint.desc) &&
+	    pdev->gadget.speed == USB_SPEED_HIGH)
+		max_packet = 512;
+	/* Controller spec indicates that ctrl ep avg TRB Length should be 8. */
+	if (usb_endpoint_xfer_control(pep->endpoint.desc))
+		avg_trb_len = 8;
+
+	/* Set up the endpoint ring. */
+	pep->ring = cdnsp_ring_alloc(pdev, 2, ring_type, max_packet, mem_flags);
+	pep->skip = false;
+
+	/* Fill the endpoint context */
+	ep_ctx->ep_info = cpu_to_le32(EP_MAX_ESIT_PAYLOAD_HI(max_esit_payload) |
+				EP_INTERVAL(interval) | EP_MULT(mult));
+	ep_ctx->ep_info2 = cpu_to_le32(EP_TYPE(endpoint_type) |
+				MAX_PACKET(max_packet) | MAX_BURST(max_burst) |
+				ERROR_COUNT(err_count));
+	ep_ctx->deq = cpu_to_le64(pep->ring->first_seg->dma |
+				  pep->ring->cycle_state);
+
+	ep_ctx->tx_info = cpu_to_le32(EP_MAX_ESIT_PAYLOAD_LO(max_esit_payload) |
+				EP_AVG_TRB_LENGTH(avg_trb_len));
+
+	if (usb_endpoint_xfer_bulk(pep->endpoint.desc) &&
+	    pdev->gadget.speed > USB_SPEED_HIGH) {
+		ret = cdnsp_alloc_streams(pdev, pep);
+		if (ret < 0)
+			return ret;
+	}
+
+	return 0;
+}
+The corrected function: int cdnsp_endpoint_init(struct cdnsp_device *pdev,
+			struct cdnsp_ep *pep,
+			gfp_t mem_flags)
+{
+	enum cdnsp_ring_type ring_type;
+	struct cdnsp_ep_ctx *ep_ctx;
+	unsigned int err_count = 0;
+	unsigned int avg_trb_len;
+	unsigned int max_packet;
+	unsigned int max_burst;
+	unsigned int interval;
+	u32 max_esit_payload;
+	unsigned int mult;
+	u32 endpoint_type;
+	int ret;
+
+	ep_ctx = pep->in_ctx;
+
+	endpoint_type = cdnsp_get_endpoint_type(pep->endpoint.desc);
+	if (!endpoint_type)
+		return -EINVAL;
+
+	ring_type = usb_endpoint_type(pep->endpoint.desc);
+
+	/*
+	 * Get values to fill the endpoint context, mostly from ep descriptor.
+	 * The average TRB buffer length for bulk endpoints is unclear as we
+	 * have no clue on scatter gather list entry size. For Isoc and Int,
+	 * set it to max available.
+	 */
+	max_esit_payload = cdnsp_get_max_esit_payload(&pdev->gadget, pep);
+	interval = cdnsp_get_endpoint_interval(&pdev->gadget, pep);
+	mult = cdnsp_get_endpoint_mult(&pdev->gadget, pep);
+	max_packet = usb_endpoint_maxp(pep->endpoint.desc);
+	max_burst = cdnsp_get_endpoint_max_burst(&pdev->gadget, pep);
+	avg_trb_len = max_esit_payload;
+
+	/* Allow 3 retries for everything but isoc, set CErr = 3. */
+	if (!usb_endpoint_xfer_isoc(pep->endpoint.desc))
+		err_count = 3;
+	if (usb_endpoint_xfer_bulk(pep->endpoint.desc) &&
+	    pdev->gadget.speed == USB_SPEED_HIGH)
+		max_packet = 512;
+	/* Controller spec indicates that ctrl ep avg TRB Length should be 8. */
+	if (usb_endpoint_xfer_control(pep->endpoint.desc))
+		avg_trb_len = 8;
+
+	/* Set up the endpoint ring. */
+	pep->ring = cdnsp_ring_alloc(pdev, 2, ring_type, max_packet, mem_flags);
+	if (!pep->ring)
+		return -ENOMEM;
+
+	pep->skip = false;
+
+	/* Fill the endpoint context */
+	ep_ctx->ep_info = cpu_to_le32(EP_MAX_ESIT_PAYLOAD_HI(max_esit_payload) |
+				EP_INTERVAL(interval) | EP_MULT(mult));
+	ep_ctx->ep_info2 = cpu_to_le32(EP_TYPE(endpoint_type) |
+				MAX_PACKET(max_packet) | MAX_BURST(max_burst) |
+				ERROR_COUNT(err_count));
+	ep_ctx->deq = cpu_to_le64(pep->ring->first_seg->dma |
+				  pep->ring->cycle_state);
+
+	ep_ctx->tx_info = cpu_to_le32(EP_MAX_ESIT_PAYLOAD_LO(max_esit_payload) |
+				EP_AVG_TRB_LENGTH(avg_trb_len));
+
+	if (usb_endpoint_xfer_bulk(pep->endpoint.desc) &&
+	    pdev->gadget.speed > USB_SPEED_HIGH) {
+		ret = cdnsp_alloc_streams(pdev, pep);
+		if (ret < 0)
+			return ret;
+	}
+
+	return 0;
+}

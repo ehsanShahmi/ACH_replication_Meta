@@ -1,0 +1,1 @@
+fs: umount on symlink leaks mnt count  Currently umount on symlink blocks following umount:  /vz is separate mount  # ls /vz/ -al | grep test drwxr-xr-x. 1 root root         11 Jul 19 01:16 testlink -> /vz/testdir # umount -l /vz/testlink umount: /vz/testlink: not mounted (expected)  # lsof /vz # umount /vz umount: /vz: device is busy.

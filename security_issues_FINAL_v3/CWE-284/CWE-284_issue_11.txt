@@ -1,0 +1,339 @@
+The vulnerable issue: tcp: take care of truncations done by sk_filter()
+
+With syzkaller help, Marco Grassi found a bug in TCP stack,
+crashing in tcp_collapse()
+
+Root cause is that sk_filter() can truncate the incoming skb,
+but TCP stack was not really expecting this to happen.
+It probably was expecting a simple DROP or ACCEPT behavior.
+
+We first need to make sure no part of TCP header could be removed.
+Then we need to adjust TCP_SKB_CB(skb)->end_seq
+
+Many thanks to syzkaller team and Marco for giving us a reproducer.
+
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Reported-by: Marco Grassi <marco.gra@gmail.com>
+Reported-by: Vladis Dronov <vdronov@redhat.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: static int tcp_v6_do_rcv(struct sock *sk, struct sk_buff *skb)
+{
+	struct ipv6_pinfo *np = inet6_sk(sk);
+	struct tcp_sock *tp;
+	struct sk_buff *opt_skb = NULL;
+
+	/* Imagine: socket is IPv6. IPv4 packet arrives,
+	   goes to IPv4 receive handler and backlogged.
+	   From backlog it always goes here. Kerboom...
+	   Fortunately, tcp_rcv_established and rcv_established
+	   handle them correctly, but it is not case with
+	   tcp_v6_hnd_req and tcp_v6_send_reset().   --ANK
+	 */
+
+	if (skb->protocol == htons(ETH_P_IP))
+		return tcp_v4_do_rcv(sk, skb);
+
+	if (sk_filter(sk, skb))
+		goto discard;
+
+	/*
+	 *	socket locking is here for SMP purposes as backlog rcv
+	 *	is currently called with bh processing disabled.
+	 */
+
+	/* Do Stevens' IPV6_PKTOPTIONS.
+
+	   Yes, guys, it is the only place in our code, where we
+	   may make it not affecting IPv4.
+	   The rest of code is protocol independent,
+	   and I do not like idea to uglify IPv4.
+
+	   Actually, all the idea behind IPV6_PKTOPTIONS
+	   looks not very well thought. For now we latch
+	   options, received in the last packet, enqueued
+	   by tcp. Feel free to propose better solution.
+					       --ANK (980728)
+	 */
+	if (np->rxopt.all)
+		opt_skb = skb_clone(skb, sk_gfp_mask(sk, GFP_ATOMIC));
+
+	if (sk->sk_state == TCP_ESTABLISHED) { /* Fast path */
+		struct dst_entry *dst = sk->sk_rx_dst;
+
+		sock_rps_save_rxhash(sk, skb);
+		sk_mark_napi_id(sk, skb);
+		if (dst) {
+			if (inet_sk(sk)->rx_dst_ifindex != skb->skb_iif ||
+			    dst->ops->check(dst, np->rx_dst_cookie) == NULL) {
+				dst_release(dst);
+				sk->sk_rx_dst = NULL;
+			}
+		}
+
+		tcp_rcv_established(sk, skb, tcp_hdr(skb), skb->len);
+		if (opt_skb)
+			goto ipv6_pktoptions;
+		return 0;
+	}
+
+	if (tcp_checksum_complete(skb))
+		goto csum_err;
+
+	if (sk->sk_state == TCP_LISTEN) {
+		struct sock *nsk = tcp_v6_cookie_check(sk, skb);
+
+		if (!nsk)
+			goto discard;
+
+		if (nsk != sk) {
+			sock_rps_save_rxhash(nsk, skb);
+			sk_mark_napi_id(nsk, skb);
+			if (tcp_child_process(sk, nsk, skb))
+				goto reset;
+			if (opt_skb)
+				__kfree_skb(opt_skb);
+			return 0;
+		}
+	} else
+		sock_rps_save_rxhash(sk, skb);
+
+	if (tcp_rcv_state_process(sk, skb))
+		goto reset;
+	if (opt_skb)
+		goto ipv6_pktoptions;
+	return 0;
+
+reset:
+	tcp_v6_send_reset(sk, skb);
+discard:
+	if (opt_skb)
+		__kfree_skb(opt_skb);
+	kfree_skb(skb);
+	return 0;
+csum_err:
+	TCP_INC_STATS(sock_net(sk), TCP_MIB_CSUMERRORS);
+	TCP_INC_STATS(sock_net(sk), TCP_MIB_INERRS);
+	goto discard;
+
+
+ipv6_pktoptions:
+	/* Do you ask, what is it?
+
+	   1. skb was enqueued by tcp.
+	   2. skb is added to tail of read queue, rather than out of order.
+	   3. socket is not in passive state.
+	   4. Finally, it really contains options, which user wants to receive.
+	 */
+	tp = tcp_sk(sk);
+	if (TCP_SKB_CB(opt_skb)->end_seq == tp->rcv_nxt &&
+	    !((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_LISTEN))) {
+		if (np->rxopt.bits.rxinfo || np->rxopt.bits.rxoinfo)
+			np->mcast_oif = tcp_v6_iif(opt_skb);
+		if (np->rxopt.bits.rxhlim || np->rxopt.bits.rxohlim)
+			np->mcast_hops = ipv6_hdr(opt_skb)->hop_limit;
+		if (np->rxopt.bits.rxflow || np->rxopt.bits.rxtclass)
+			np->rcv_flowinfo = ip6_flowinfo(ipv6_hdr(opt_skb));
+		if (np->repflow)
+			np->flow_label = ip6_flowlabel(ipv6_hdr(opt_skb));
+		if (ipv6_opt_accepted(sk, opt_skb, &TCP_SKB_CB(opt_skb)->header.h6)) {
+			skb_set_owner_r(opt_skb, sk);
+			tcp_v6_restore_cb(opt_skb);
+			opt_skb = xchg(&np->pktoptions, opt_skb);
+		} else {
+			__kfree_skb(opt_skb);
+			opt_skb = xchg(&np->pktoptions, NULL);
+		}
+	}
+
+	kfree_skb(opt_skb);
+	return 0;
+}
+The corrected function: static int tcp_v6_rcv(struct sk_buff *skb)
+{
+	const struct tcphdr *th;
+	const struct ipv6hdr *hdr;
+	bool refcounted;
+	struct sock *sk;
+	int ret;
+	struct net *net = dev_net(skb->dev);
+
+	if (skb->pkt_type != PACKET_HOST)
+		goto discard_it;
+
+	/*
+	 *	Count it even if it's bad.
+	 */
+	__TCP_INC_STATS(net, TCP_MIB_INSEGS);
+
+	if (!pskb_may_pull(skb, sizeof(struct tcphdr)))
+		goto discard_it;
+
+	th = (const struct tcphdr *)skb->data;
+
+	if (unlikely(th->doff < sizeof(struct tcphdr)/4))
+		goto bad_packet;
+	if (!pskb_may_pull(skb, th->doff*4))
+		goto discard_it;
+
+	if (skb_checksum_init(skb, IPPROTO_TCP, ip6_compute_pseudo))
+		goto csum_error;
+
+	th = (const struct tcphdr *)skb->data;
+	hdr = ipv6_hdr(skb);
+
+lookup:
+	sk = __inet6_lookup_skb(&tcp_hashinfo, skb, __tcp_hdrlen(th),
+				th->source, th->dest, inet6_iif(skb),
+				&refcounted);
+	if (!sk)
+		goto no_tcp_socket;
+
+process:
+	if (sk->sk_state == TCP_TIME_WAIT)
+		goto do_time_wait;
+
+	if (sk->sk_state == TCP_NEW_SYN_RECV) {
+		struct request_sock *req = inet_reqsk(sk);
+		struct sock *nsk;
+
+		sk = req->rsk_listener;
+		tcp_v6_fill_cb(skb, hdr, th);
+		if (tcp_v6_inbound_md5_hash(sk, skb)) {
+			sk_drops_add(sk, skb);
+			reqsk_put(req);
+			goto discard_it;
+		}
+		if (unlikely(sk->sk_state != TCP_LISTEN)) {
+			inet_csk_reqsk_queue_drop_and_put(sk, req);
+			goto lookup;
+		}
+		sock_hold(sk);
+		refcounted = true;
+		nsk = tcp_check_req(sk, skb, req, false);
+		if (!nsk) {
+			reqsk_put(req);
+			goto discard_and_relse;
+		}
+		if (nsk == sk) {
+			reqsk_put(req);
+			tcp_v6_restore_cb(skb);
+		} else if (tcp_child_process(sk, nsk, skb)) {
+			tcp_v6_send_reset(nsk, skb);
+			goto discard_and_relse;
+		} else {
+			sock_put(sk);
+			return 0;
+		}
+	}
+	if (hdr->hop_limit < inet6_sk(sk)->min_hopcount) {
+		__NET_INC_STATS(net, LINUX_MIB_TCPMINTTLDROP);
+		goto discard_and_relse;
+	}
+
+	if (!xfrm6_policy_check(sk, XFRM_POLICY_IN, skb))
+		goto discard_and_relse;
+
+	tcp_v6_fill_cb(skb, hdr, th);
+
+	if (tcp_v6_inbound_md5_hash(sk, skb))
+		goto discard_and_relse;
+
+	if (sk_filter(sk, skb))
+		goto discard_and_relse;
+
+	skb->dev = NULL;
+
+	if (sk->sk_state == TCP_LISTEN) {
+		ret = tcp_v6_do_rcv(sk, skb);
+		goto put_and_return;
+	}
+
+	sk_incoming_cpu_update(sk);
+
+	bh_lock_sock_nested(sk);
+	tcp_segs_in(tcp_sk(sk), skb);
+	ret = 0;
+	if (!sock_owned_by_user(sk)) {
+		if (!tcp_prequeue(sk, skb))
+			ret = tcp_v6_do_rcv(sk, skb);
+	} else if (tcp_add_backlog(sk, skb)) {
+		goto discard_and_relse;
+	}
+	bh_unlock_sock(sk);
+
+put_and_return:
+	if (refcounted)
+		sock_put(sk);
+	return ret ? -1 : 0;
+
+no_tcp_socket:
+	if (!xfrm6_policy_check(NULL, XFRM_POLICY_IN, skb))
+		goto discard_it;
+
+	tcp_v6_fill_cb(skb, hdr, th);
+
+	if (tcp_checksum_complete(skb)) {
+csum_error:
+		__TCP_INC_STATS(net, TCP_MIB_CSUMERRORS);
+bad_packet:
+		__TCP_INC_STATS(net, TCP_MIB_INERRS);
+	} else {
+		tcp_v6_send_reset(NULL, skb);
+	}
+
+discard_it:
+	kfree_skb(skb);
+	return 0;
+
+discard_and_relse:
+	sk_drops_add(sk, skb);
+	if (refcounted)
+		sock_put(sk);
+	goto discard_it;
+
+do_time_wait:
+	if (!xfrm6_policy_check(NULL, XFRM_POLICY_IN, skb)) {
+		inet_twsk_put(inet_twsk(sk));
+		goto discard_it;
+	}
+
+	tcp_v6_fill_cb(skb, hdr, th);
+
+	if (tcp_checksum_complete(skb)) {
+		inet_twsk_put(inet_twsk(sk));
+		goto csum_error;
+	}
+
+	switch (tcp_timewait_state_process(inet_twsk(sk), skb, th)) {
+	case TCP_TW_SYN:
+	{
+		struct sock *sk2;
+
+		sk2 = inet6_lookup_listener(dev_net(skb->dev), &tcp_hashinfo,
+					    skb, __tcp_hdrlen(th),
+					    &ipv6_hdr(skb)->saddr, th->source,
+					    &ipv6_hdr(skb)->daddr,
+					    ntohs(th->dest), tcp_v6_iif(skb));
+		if (sk2) {
+			struct inet_timewait_sock *tw = inet_twsk(sk);
+			inet_twsk_deschedule_put(tw);
+			sk = sk2;
+			tcp_v6_restore_cb(skb);
+			refcounted = false;
+			goto process;
+		}
+		/* Fall through to ACK */
+	}
+	case TCP_TW_ACK:
+		tcp_v6_timewait_ack(sk, skb);
+		break;
+	case TCP_TW_RST:
+		tcp_v6_restore_cb(skb);
+		tcp_v6_send_reset(sk, skb);
+		inet_twsk_deschedule_put(inet_twsk(sk));
+		goto discard_it;
+	case TCP_TW_SUCCESS:
+		;
+	}
+	goto discard_it;
+}

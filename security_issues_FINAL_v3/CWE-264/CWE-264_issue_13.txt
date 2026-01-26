@@ -1,0 +1,32 @@
+The vulnerable issue: dm: do not forward ioctls from logical volumes to the underlying device
+
+A logical volume can map to just part of underlying physical volume.
+In this case, it must be treated like a partition.
+
+Based on a patch from Alasdair G Kergon.
+
+Cc: Alasdair G Kergon <agk@redhat.com>
+Cc: dm-devel@redhat.com
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+The vulnerable function: static int flakey_ioctl(struct dm_target *ti, unsigned int cmd, unsigned long arg)
+{
+	struct flakey_c *fc = ti->private;
+
+	return __blkdev_driver_ioctl(fc->dev->bdev, fc->dev->mode, cmd, arg);
+}
+The corrected function: static int flakey_ioctl(struct dm_target *ti, unsigned int cmd, unsigned long arg)
+{
+	struct flakey_c *fc = ti->private;
+	struct dm_dev *dev = fc->dev;
+	int r = 0;
+
+	/*
+	 * Only pass ioctls through if the device sizes match exactly.
+	 */
+	if (fc->start ||
+	    ti->len != i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT)
+		r = scsi_verify_blk_ioctl(NULL, cmd);
+
+	return r ? : __blkdev_driver_ioctl(dev->bdev, dev->mode, cmd, arg);
+}

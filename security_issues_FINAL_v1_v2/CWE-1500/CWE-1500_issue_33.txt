@@ -1,0 +1,8 @@
+x86/sev: Harden #VC instruction emulation somewhat
+
+Compare the opcode bytes at rIP for each #VC exit reason to verify the
+instruction which raised the #VC exception is actually the right one.
+
+Signed-off-by: Borislav Petkov (AMD) <bp@alien8.de>
+Acked-by: Tom Lendacky <thomas.lendacky@amd.com>
+Link: https://lore.kernel.org/r/20240105101407.11694-1-bp@alien8.de

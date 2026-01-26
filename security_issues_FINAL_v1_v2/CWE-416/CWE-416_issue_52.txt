@@ -1,0 +1,15 @@
+netfilter: nf_tables: skip immediate deactivate in _PREPARE_ERROR
+
+On error when building the rule, the immediate expression unbinds the
+chain, hence objects can be deactivated by the transaction records.
+
+Otherwise, it is possible to trigger the following warning:
+
+ WARNING: CPU: 3 PID: 915 at net/netfilter/nf_tables_api.c:2013 nf_tables_chain_destroy+0x1f7/0x210 [nf_tables]
+ CPU: 3 PID: 915 Comm: chain-bind-err- Not tainted 6.1.39 #1
+ RIP: 0010:nf_tables_chain_destroy+0x1f7/0x210 [nf_tables]
+
+Fixes: 4bedf9eee016 ("netfilter: nf_tables: fix chain binding transaction logic")
+Reported-by: Kevin Rich <kevinrich1337@gmail.com>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+Signed-off-by: Florian Westphal <fw@strlen.de>

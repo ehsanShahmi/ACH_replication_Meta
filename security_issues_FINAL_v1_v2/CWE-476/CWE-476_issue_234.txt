@@ -1,0 +1,10 @@
+ALSA: usb-audio: Fix possible NULL pointer dereference in snd_usb_pcm_has_fixed_rate()
+
+The subs function argument may be NULL, so do not use it before the NULL check.
+
+Fixes: 291e9da91403 ("ALSA: usb-audio: Always initialize fixed_rate in snd_usb_find_implicit_fb_sync_format()")
+Reported-by: coverity-bot <keescook@chromium.org>
+Link: https://lore.kernel.org/alsa-devel/202301121424.4A79A485@keescook/
+Signed-off-by: Jaroslav Kysela <perex@perex.cz>
+Link: https://lore.kernel.org/r/20230113085311.623325-1-perex@perex.cz
+Signed-off-by: Takashi Iwai <tiwai@suse.de>

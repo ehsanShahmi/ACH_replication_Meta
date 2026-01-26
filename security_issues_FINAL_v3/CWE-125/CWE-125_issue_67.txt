@@ -1,0 +1,150 @@
+The vulnerable issue: vgacon: remove software scrollback support
+
+Yunhai Zhang recently fixed a VGA software scrollback bug in commit
+ebfdfeeae8c0 ("vgacon: Fix for missing check in scrollback handling"),
+but that then made people look more closely at some of this code, and
+there were more problems on the vgacon side, but also the fbcon software
+scrollback.
+
+We don't really have anybody who maintains this code - probably because
+nobody actually _uses_ it any more.  Sure, people still use both VGA and
+the framebuffer consoles, but they are no longer the main user
+interfaces to the kernel, and haven't been for decades, so these kinds
+of extra features end up bitrotting and not really being used.
+
+So rather than try to maintain a likely unused set of code, I'll just
+aggressively remove it, and see if anybody even notices.  Maybe there
+are people who haven't jumped on the whole GUI badnwagon yet, and think
+it's just a fad.  And maybe those people use the scrollback code.
+
+If that turns out to be the case, we can resurrect this again, once
+we've found the sucker^Wmaintainer for it who actually uses it.
+
+Reported-by: NopNop Nop <nopitydays@gmail.com>
+Tested-by: Willy Tarreau <w@1wt.eu>
+Cc: 张云海 <zhangyunhai@nsfocus.com>
+Acked-by: Andy Lutomirski <luto@amacapital.net>
+Acked-by: Willy Tarreau <w@1wt.eu>
+Reviewed-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+The vulnerable function: static void vgacon_scrolldelta(struct vc_data *c, int lines)
+{
+	int start, end, count, soff;
+
+	if (!lines) {
+		vgacon_restore_screen(c);
+		return;
+	}
+
+	if (!vgacon_scrollback_cur->data)
+		return;
+
+	if (!vgacon_scrollback_cur->save) {
+		vgacon_cursor(c, CM_ERASE);
+		vgacon_save_screen(c);
+		c->vc_origin = (unsigned long)c->vc_screenbuf;
+		vgacon_scrollback_cur->save = 1;
+	}
+
+	vgacon_scrollback_cur->restore = 0;
+	start = vgacon_scrollback_cur->cur + lines;
+	end = start + abs(lines);
+
+	if (start < 0)
+		start = 0;
+
+	if (start > vgacon_scrollback_cur->cnt)
+		start = vgacon_scrollback_cur->cnt;
+
+	if (end < 0)
+		end = 0;
+
+	if (end > vgacon_scrollback_cur->cnt)
+		end = vgacon_scrollback_cur->cnt;
+
+	vgacon_scrollback_cur->cur = start;
+	count = end - start;
+	soff = vgacon_scrollback_cur->tail -
+		((vgacon_scrollback_cur->cnt - end) * c->vc_size_row);
+	soff -= count * c->vc_size_row;
+
+	if (soff < 0)
+		soff += vgacon_scrollback_cur->size;
+
+	count = vgacon_scrollback_cur->cnt - start;
+
+	if (count > c->vc_rows)
+		count = c->vc_rows;
+
+	if (count) {
+		int copysize;
+
+		int diff = c->vc_rows - count;
+		void *d = (void *) c->vc_visible_origin;
+		void *s = (void *) c->vc_screenbuf;
+
+		count *= c->vc_size_row;
+		/* how much memory to end of buffer left? */
+		copysize = min(count, vgacon_scrollback_cur->size - soff);
+		scr_memcpyw(d, vgacon_scrollback_cur->data + soff, copysize);
+		d += copysize;
+		count -= copysize;
+
+		if (count) {
+			scr_memcpyw(d, vgacon_scrollback_cur->data, count);
+			d += count;
+		}
+
+		if (diff)
+			scr_memcpyw(d, s, diff * c->vc_size_row);
+	} else
+		vgacon_cursor(c, CM_MOVE);
+}
+The corrected function: static bool vgacon_scroll(struct vc_data *c, unsigned int t, unsigned int b,
+		enum con_scroll dir, unsigned int lines)
+{
+	unsigned long oldo;
+	unsigned int delta;
+
+	if (t || b != c->vc_rows || vga_is_gfx || c->vc_mode != KD_TEXT)
+		return false;
+
+	if (!vga_hardscroll_enabled || lines >= c->vc_rows / 2)
+		return false;
+
+	vgacon_restore_screen(c);
+	oldo = c->vc_origin;
+	delta = lines * c->vc_size_row;
+	if (dir == SM_UP) {
+		vgacon_scrollback_update(c, t, lines);
+		if (c->vc_scr_end + delta >= vga_vram_end) {
+			scr_memcpyw((u16 *) vga_vram_base,
+				    (u16 *) (oldo + delta),
+				    c->vc_screenbuf_size - delta);
+			c->vc_origin = vga_vram_base;
+			vga_rolled_over = oldo - vga_vram_base;
+		} else
+			c->vc_origin += delta;
+		scr_memsetw((u16 *) (c->vc_origin + c->vc_screenbuf_size -
+				     delta), c->vc_video_erase_char,
+			    delta);
+	} else {
+		if (oldo - delta < vga_vram_base) {
+			scr_memmovew((u16 *) (vga_vram_end -
+					      c->vc_screenbuf_size +
+					      delta), (u16 *) oldo,
+				     c->vc_screenbuf_size - delta);
+			c->vc_origin = vga_vram_end - c->vc_screenbuf_size;
+			vga_rolled_over = 0;
+		} else
+			c->vc_origin -= delta;
+		c->vc_scr_end = c->vc_origin + c->vc_screenbuf_size;
+		scr_memsetw((u16 *) (c->vc_origin), c->vc_video_erase_char,
+			    delta);
+	}
+	c->vc_scr_end = c->vc_origin + c->vc_screenbuf_size;
+	c->vc_visible_origin = c->vc_origin;
+	vga_set_mem_top(c);
+	c->vc_pos = (c->vc_pos - oldo) + c->vc_origin;
+	return true;
+}

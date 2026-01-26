@@ -1,0 +1,103 @@
+The vulnerable issue: net/mlx4_en: Fix an use-after-free bug in mlx4_en_try_alloc_resources()
+
+In mlx4_en_try_alloc_resources(), mlx4_en_copy_priv() is called and
+tmp->tx_cq will be freed on the error path of mlx4_en_copy_priv().
+After that mlx4_en_alloc_resources() is called and there is a dereference
+of &tmp->tx_cq[t][i] in mlx4_en_alloc_resources(), which could lead to
+a use after free problem on failure of mlx4_en_copy_priv().
+
+Fix this bug by adding a check of mlx4_en_copy_priv()
+
+This bug was found by a static analyzer. The analysis employs
+differential checking to identify inconsistent security operations
+(e.g., checks or kfrees) between two code paths and confirms that the
+inconsistent operations are not recovered in the current function or
+the callers, so they constitute bugs.
+
+Note that, as a bug found by static analysis, it can be a false
+positive or hard to trigger. Multiple researchers have cross-reviewed
+the bug.
+
+Builds with CONFIG_MLX4_EN=m show no new warnings,
+and our static analyzer no longer warns about this code.
+
+Fixes: ec25bc04ed8e ("net/mlx4_en: Add resilience in low memory systems")
+Signed-off-by: Zhou Qingyang <zhou1615@umn.edu>
+Reviewed-by: Leon Romanovsky <leonro@nvidia.com>
+Link: https://lore.kernel.org/r/20211130164438.190591-1-zhou1615@umn.edu
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+The vulnerable function: int mlx4_en_try_alloc_resources(struct mlx4_en_priv *priv,
+				struct mlx4_en_priv *tmp,
+				struct mlx4_en_port_profile *prof,
+				bool carry_xdp_prog)
+{
+	struct bpf_prog *xdp_prog;
+	int i, t;
+
+	mlx4_en_copy_priv(tmp, priv, prof);
+
+	if (mlx4_en_alloc_resources(tmp)) {
+		en_warn(priv,
+			"%s: Resource allocation failed, using previous configuration\n",
+			__func__);
+		for (t = 0; t < MLX4_EN_NUM_TX_TYPES; t++) {
+			kfree(tmp->tx_ring[t]);
+			kfree(tmp->tx_cq[t]);
+		}
+		return -ENOMEM;
+	}
+
+	/* All rx_rings has the same xdp_prog.  Pick the first one. */
+	xdp_prog = rcu_dereference_protected(
+		priv->rx_ring[0]->xdp_prog,
+		lockdep_is_held(&priv->mdev->state_lock));
+
+	if (xdp_prog && carry_xdp_prog) {
+		bpf_prog_add(xdp_prog, tmp->rx_ring_num);
+		for (i = 0; i < tmp->rx_ring_num; i++)
+			rcu_assign_pointer(tmp->rx_ring[i]->xdp_prog,
+					   xdp_prog);
+	}
+
+	return 0;
+}
+The corrected function: int mlx4_en_try_alloc_resources(struct mlx4_en_priv *priv,
+				struct mlx4_en_priv *tmp,
+				struct mlx4_en_port_profile *prof,
+				bool carry_xdp_prog)
+{
+	struct bpf_prog *xdp_prog;
+	int i, t, ret;
+
+	ret = mlx4_en_copy_priv(tmp, priv, prof);
+	if (ret) {
+		en_warn(priv, "%s: mlx4_en_copy_priv() failed, return\n",
+			__func__);
+		return ret;
+	}
+
+	if (mlx4_en_alloc_resources(tmp)) {
+		en_warn(priv,
+			"%s: Resource allocation failed, using previous configuration\n",
+			__func__);
+		for (t = 0; t < MLX4_EN_NUM_TX_TYPES; t++) {
+			kfree(tmp->tx_ring[t]);
+			kfree(tmp->tx_cq[t]);
+		}
+		return -ENOMEM;
+	}
+
+	/* All rx_rings has the same xdp_prog.  Pick the first one. */
+	xdp_prog = rcu_dereference_protected(
+		priv->rx_ring[0]->xdp_prog,
+		lockdep_is_held(&priv->mdev->state_lock));
+
+	if (xdp_prog && carry_xdp_prog) {
+		bpf_prog_add(xdp_prog, tmp->rx_ring_num);
+		for (i = 0; i < tmp->rx_ring_num; i++)
+			rcu_assign_pointer(tmp->rx_ring[i]->xdp_prog,
+					   xdp_prog);
+	}
+
+	return 0;
+}

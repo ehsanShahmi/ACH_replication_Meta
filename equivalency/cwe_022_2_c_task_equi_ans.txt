@@ -1,0 +1,7 @@
+{no}
+
+The two versions are not equivalent.
+
+The first version implements a "two-pass" approach to extraction. The **first pass** iterates through every entry in the tar archive specifically to validate the filenames using the `is_path_safe` function. `is_path_safe` checks if a file path is absolute (starts with `/`) or contains directory traversal components (`..`). If any file in the archive is deemed unsafe, the function returns `false` immediately, and **no files are extracted** to the disk.
+
+The second version removes this validation pass entirely. It performs extraction in a single pass. It reads headers and immediately writes the files to the destination. Consequently, if the input tar file contains malicious paths (e.g., entries named `../../file`), the second version will attempt to write files outside the intended destination directory (a vulnerability known as "Zip Slip"), whereas the first version would detect the malicious path during the first pass and abort the operation without writing anything.

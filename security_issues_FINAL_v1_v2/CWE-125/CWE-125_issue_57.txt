@@ -1,0 +1,9 @@
+ksmbd: validate mech token in session setup
+
+If client send invalid mech token in session setup request, ksmbd
+validate and make the error if it is invalid.
+
+Cc: stable@vger.kernel.org
+Reported-by: zdi-disclosures@trendmicro.com # ZDI-CAN-22890
+Signed-off-by: Namjae Jeon <linkinjeon@kernel.org>
+Signed-off-by: Steve French <stfrench@microsoft.com>

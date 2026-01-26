@@ -1,0 +1,13 @@
+KVM: X86: Don't report L2 emulation failures to user-space
+
+This patch prevents that emulation failures which result
+from emulating an instruction for an L2-Guest results in
+being reported to userspace.
+Without this patch a malicious L2-Guest would be able to
+kill the L1 by triggering a race-condition between an vmexit
+and the instruction emulator.
+With this patch the L2 will most likely only kill itself in
+this situation.
+
+Signed-off-by: Joerg Roedel <joerg.roedel@amd.com>
+Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>

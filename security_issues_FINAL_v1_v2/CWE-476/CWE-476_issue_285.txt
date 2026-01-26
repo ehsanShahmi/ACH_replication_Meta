@@ -1,0 +1,10 @@
+media: mediatek: vcodec: Fix VP8 stateless decoder smatch warning
+
+Fix a smatch static checker warning on vdec_vp8_req_if.c.
+Which leads to a kernel crash when fb is NULL.
+
+Fixes: 7a7ae26fd458 ("media: mediatek: vcodec: support stateless VP8 decoding")
+Signed-off-by: Yunfei Dong <yunfei.dong@mediatek.com>
+Reviewed-by: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+Signed-off-by: Sebastian Fricke <sebastian.fricke@collabora.com>
+Signed-off-by: Hans Verkuil <hverkuil-cisco@xs4all.nl>

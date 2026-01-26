@@ -1,0 +1,132 @@
+The vulnerable issue: tracing/syscalls: Ignore numbers outside NR_syscalls' range
+
+ARM has some private syscalls (for example, set_tls(2)) which lie
+outside the range of NR_syscalls.  If any of these are called while
+syscall tracing is being performed, out-of-bounds array access will
+occur in the ftrace and perf sys_{enter,exit} handlers.
+
+ # trace-cmd record -e raw_syscalls:* true && trace-cmd report
+ ...
+ true-653   [000]   384.675777: sys_enter:            NR 192 (0, 1000, 3, 4000022, ffffffff, 0)
+ true-653   [000]   384.675812: sys_exit:             NR 192 = 1995915264
+ true-653   [000]   384.675971: sys_enter:            NR 983045 (76f74480, 76f74000, 76f74b28, 76f74480, 76f76f74, 1)
+ true-653   [000]   384.675988: sys_exit:             NR 983045 = 0
+ ...
+
+ # trace-cmd record -e syscalls:* true
+ [   17.289329] Unable to handle kernel paging request at virtual address aaaaaace
+ [   17.289590] pgd = 9e71c000
+ [   17.289696] [aaaaaace] *pgd=00000000
+ [   17.289985] Internal error: Oops: 5 [#1] PREEMPT SMP ARM
+ [   17.290169] Modules linked in:
+ [   17.290391] CPU: 0 PID: 704 Comm: true Not tainted 3.18.0-rc2+ #21
+ [   17.290585] task: 9f4dab00 ti: 9e710000 task.ti: 9e710000
+ [   17.290747] PC is at ftrace_syscall_enter+0x48/0x1f8
+ [   17.290866] LR is at syscall_trace_enter+0x124/0x184
+
+Fix this by ignoring out-of-NR_syscalls-bounds syscall numbers.
+
+Commit cd0980fc8add "tracing: Check invalid syscall nr while tracing syscalls"
+added the check for less than zero, but it should have also checked
+for greater than NR_syscalls.
+
+Link: http://lkml.kernel.org/p/1414620418-29472-1-git-send-email-rabin@rab.in
+
+Fixes: cd0980fc8add "tracing: Check invalid syscall nr while tracing syscalls"
+Cc: stable@vger.kernel.org # 2.6.33+
+Signed-off-by: Rabin Vincent <rabin@rab.in>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+The vulnerable function: static void ftrace_syscall_enter(void *data, struct pt_regs *regs, long id)
+{
+	struct trace_array *tr = data;
+	struct ftrace_event_file *ftrace_file;
+	struct syscall_trace_enter *entry;
+	struct syscall_metadata *sys_data;
+	struct ring_buffer_event *event;
+	struct ring_buffer *buffer;
+	unsigned long irq_flags;
+	int pc;
+	int syscall_nr;
+	int size;
+
+	syscall_nr = trace_get_syscall_nr(current, regs);
+	if (syscall_nr < 0)
+		return;
+
+	/* Here we're inside tp handler's rcu_read_lock_sched (__DO_TRACE) */
+	ftrace_file = rcu_dereference_sched(tr->enter_syscall_files[syscall_nr]);
+	if (!ftrace_file)
+		return;
+
+	if (ftrace_trigger_soft_disabled(ftrace_file))
+		return;
+
+	sys_data = syscall_nr_to_meta(syscall_nr);
+	if (!sys_data)
+		return;
+
+	size = sizeof(*entry) + sizeof(unsigned long) * sys_data->nb_args;
+
+	local_save_flags(irq_flags);
+	pc = preempt_count();
+
+	buffer = tr->trace_buffer.buffer;
+	event = trace_buffer_lock_reserve(buffer,
+			sys_data->enter_event->event.type, size, irq_flags, pc);
+	if (!event)
+		return;
+
+	entry = ring_buffer_event_data(event);
+	entry->nr = syscall_nr;
+	syscall_get_arguments(current, regs, 0, sys_data->nb_args, entry->args);
+
+	event_trigger_unlock_commit(ftrace_file, buffer, event, entry,
+				    irq_flags, pc);
+}
+The corrected function: static void ftrace_syscall_enter(void *data, struct pt_regs *regs, long id)
+{
+	struct trace_array *tr = data;
+	struct ftrace_event_file *ftrace_file;
+	struct syscall_trace_enter *entry;
+	struct syscall_metadata *sys_data;
+	struct ring_buffer_event *event;
+	struct ring_buffer *buffer;
+	unsigned long irq_flags;
+	int pc;
+	int syscall_nr;
+	int size;
+
+	syscall_nr = trace_get_syscall_nr(current, regs);
+	if (syscall_nr < 0 || syscall_nr >= NR_syscalls)
+		return;
+
+	/* Here we're inside tp handler's rcu_read_lock_sched (__DO_TRACE) */
+	ftrace_file = rcu_dereference_sched(tr->enter_syscall_files[syscall_nr]);
+	if (!ftrace_file)
+		return;
+
+	if (ftrace_trigger_soft_disabled(ftrace_file))
+		return;
+
+	sys_data = syscall_nr_to_meta(syscall_nr);
+	if (!sys_data)
+		return;
+
+	size = sizeof(*entry) + sizeof(unsigned long) * sys_data->nb_args;
+
+	local_save_flags(irq_flags);
+	pc = preempt_count();
+
+	buffer = tr->trace_buffer.buffer;
+	event = trace_buffer_lock_reserve(buffer,
+			sys_data->enter_event->event.type, size, irq_flags, pc);
+	if (!event)
+		return;
+
+	entry = ring_buffer_event_data(event);
+	entry->nr = syscall_nr;
+	syscall_get_arguments(current, regs, 0, sys_data->nb_args, entry->args);
+
+	event_trigger_unlock_commit(ftrace_file, buffer, event, entry,
+				    irq_flags, pc);
+}

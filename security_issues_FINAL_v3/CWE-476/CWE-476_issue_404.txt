@@ -1,0 +1,63 @@
+The vulnerable issue: eventfs: Fix a possible null pointer dereference in eventfs_find_events()
+
+In function eventfs_find_events,there is a potential null pointer
+that may be caused by calling update_events_attr which will perform
+some operations on the members of the ei struct when ei is NULL.
+
+Hence,When ei->is_freed is set,return NULL directly.
+
+Link: https://lore.kernel.org/linux-trace-kernel/20240513053338.63017-1-hao.ge@linux.dev
+
+Cc: stable@vger.kernel.org
+Fixes: 8186fff7ab64 ("tracefs/eventfs: Use root and instance inodes as default ownership")
+Signed-off-by: Hao Ge <gehao@kylinos.cn>
+Signed-off-by: Steven Rostedt (Google) <rostedt@goodmis.org>
+The vulnerable function: static struct eventfs_inode *eventfs_find_events(struct dentry *dentry)
+{
+	struct eventfs_inode *ei;
+
+	do {
+		// The parent is stable because we do not do renames
+		dentry = dentry->d_parent;
+		// ... and directories always have d_fsdata
+		ei = dentry->d_fsdata;
+
+		/*
+		 * If the ei is being freed, the ownership of the children
+		 * doesn't matter.
+		 */
+		if (ei->is_freed) {
+			ei = NULL;
+			break;
+		}
+		// Walk upwards until you find the events inode
+	} while (!ei->is_events);
+
+	update_events_attr(ei, dentry->d_sb);
+
+	return ei;
+}
+The corrected function: static struct eventfs_inode *eventfs_find_events(struct dentry *dentry)
+{
+	struct eventfs_inode *ei;
+
+	do {
+		// The parent is stable because we do not do renames
+		dentry = dentry->d_parent;
+		// ... and directories always have d_fsdata
+		ei = dentry->d_fsdata;
+
+		/*
+		 * If the ei is being freed, the ownership of the children
+		 * doesn't matter.
+		 */
+		if (ei->is_freed)
+			return NULL;
+
+		// Walk upwards until you find the events inode
+	} while (!ei->is_events);
+
+	update_events_attr(ei, dentry->d_sb);
+
+	return ei;
+}

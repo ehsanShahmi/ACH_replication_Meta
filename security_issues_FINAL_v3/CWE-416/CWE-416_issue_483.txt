@@ -1,0 +1,78 @@
+The vulnerable issue: mm: get rid of vmacache_flush_all() entirely
+
+Jann Horn points out that the vmacache_flush_all() function is not only
+potentially expensive, it's buggy too.  It also happens to be entirely
+unnecessary, because the sequence number overflow case can be avoided by
+simply making the sequence number be 64-bit.  That doesn't even grow the
+data structures in question, because the other adjacent fields are
+already 64-bit.
+
+So simplify the whole thing by just making the sequence number overflow
+case go away entirely, which gets rid of all the complications and makes
+the code faster too.  Win-win.
+
+[ Oleg Nesterov points out that the VMACACHE_FULL_FLUSHES statistics
+  also just goes away entirely with this ]
+
+Reported-by: Jann Horn <jannh@google.com>
+Suggested-by: Will Deacon <will.deacon@arm.com>
+Acked-by: Davidlohr Bueso <dave@stgolabs.net>
+Cc: Oleg Nesterov <oleg@redhat.com>
+Cc: stable@kernel.org
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+The vulnerable function: void vmacache_flush_all(struct mm_struct *mm)
+{
+	struct task_struct *g, *p;
+
+	count_vm_vmacache_event(VMACACHE_FULL_FLUSHES);
+
+	/*
+	 * Single threaded tasks need not iterate the entire
+	 * list of process. We can avoid the flushing as well
+	 * since the mm's seqnum was increased and don't have
+	 * to worry about other threads' seqnum. Current's
+	 * flush will occur upon the next lookup.
+	 */
+	if (atomic_read(&mm->mm_users) == 1)
+		return;
+
+	rcu_read_lock();
+	for_each_process_thread(g, p) {
+		/*
+		 * Only flush the vmacache pointers as the
+		 * mm seqnum is already set and curr's will
+		 * be set upon invalidation when the next
+		 * lookup is done.
+		 */
+		if (mm == p->mm)
+			vmacache_flush(p);
+	}
+	rcu_read_unlock();
+}
+The corrected function: static int get_core_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg)
+{
+	/*
+	 * Because the kvm_regs structure is a mix of 32, 64 and
+	 * 128bit fields, we index it as if it was a 32bit
+	 * array. Hence below, nr_regs is the number of entries, and
+	 * off the index in the "array".
+	 */
+	__u32 __user *uaddr = (__u32 __user *)(unsigned long)reg->addr;
+	struct kvm_regs *regs = vcpu_gp_regs(vcpu);
+	int nr_regs = sizeof(*regs) / sizeof(__u32);
+	u32 off;
+
+	/* Our ID is an index into the kvm_regs struct. */
+	off = core_reg_offset_from_id(reg->id);
+	if (off >= nr_regs ||
+	    (off + (KVM_REG_SIZE(reg->id) / sizeof(__u32))) >= nr_regs)
+		return -ENOENT;
+
+	if (validate_core_offset(reg))
+		return -EINVAL;
+
+	if (copy_to_user(uaddr, ((u32 *)regs) + off, KVM_REG_SIZE(reg->id)))
+		return -EFAULT;
+
+	return 0;
+}

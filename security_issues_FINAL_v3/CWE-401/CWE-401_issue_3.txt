@@ -1,0 +1,51 @@
+The vulnerable issue: net: qrtr: fix memort leak in qrtr_tun_write_iter
+
+In qrtr_tun_write_iter the allocated kbuf should be release in case of
+error or success return.
+
+v2 Update: Thanks to David Miller for pointing out the release on success
+path as well.
+
+Signed-off-by: Navid Emamdoost <navid.emamdoost@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: static ssize_t qrtr_tun_write_iter(struct kiocb *iocb, struct iov_iter *from)
+{
+	struct file *filp = iocb->ki_filp;
+	struct qrtr_tun *tun = filp->private_data;
+	size_t len = iov_iter_count(from);
+	ssize_t ret;
+	void *kbuf;
+
+	kbuf = kzalloc(len, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+	if (!copy_from_iter_full(kbuf, len, from))
+		return -EFAULT;
+
+	ret = qrtr_endpoint_post(&tun->ep, kbuf, len);
+
+	return ret < 0 ? ret : len;
+}
+The corrected function: static ssize_t qrtr_tun_write_iter(struct kiocb *iocb, struct iov_iter *from)
+{
+	struct file *filp = iocb->ki_filp;
+	struct qrtr_tun *tun = filp->private_data;
+	size_t len = iov_iter_count(from);
+	ssize_t ret;
+	void *kbuf;
+
+	kbuf = kzalloc(len, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+	if (!copy_from_iter_full(kbuf, len, from)) {
+		kfree(kbuf);
+		return -EFAULT;
+	}
+
+	ret = qrtr_endpoint_post(&tun->ep, kbuf, len);
+
+	kfree(kbuf);
+	return ret < 0 ? ret : len;
+}

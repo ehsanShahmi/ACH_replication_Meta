@@ -1,0 +1,20 @@
+drm/msm/a6xx: Avoid a nullptr dereference when speedbin setting fails
+
+Calling a6xx_destroy() before adreno_gpu_init() leads to a null pointer
+dereference on:
+
+msm_gpu_cleanup() : platform_set_drvdata(gpu->pdev, NULL);
+
+as gpu->pdev is only assigned in:
+
+a6xx_gpu_init()
+|_ adreno_gpu_init
+    |_ msm_gpu_init()
+
+Instead of relying on handwavy null checks down the cleanup chain,
+explicitly de-allocate the LLC data and free a6xx_gpu instead.
+
+Fixes: 76efc2453d0e ("drm/msm/gpu: Fix crash during system suspend after unbind")
+Signed-off-by: Konrad Dybcio <konrad.dybcio@linaro.org>
+Patchwork: https://patchwork.freedesktop.org/patch/588919/
+Signed-off-by: Rob Clark <robdclark@chromium.org>

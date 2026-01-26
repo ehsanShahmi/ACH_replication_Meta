@@ -1,0 +1,168 @@
+The vulnerable issue: net: rework recvmsg handler msg_name and msg_namelen logic
+
+This patch now always passes msg->msg_namelen as 0. recvmsg handlers must
+set msg_namelen to the proper size <= sizeof(struct sockaddr_storage)
+to return msg_name to the user.
+
+This prevents numerous uninitialized memory leaks we had in the
+recvmsg handlers and makes it harder for new code to accidentally leak
+uninitialized memory.
+
+Optimize for the case recvfrom is called with NULL as address. We don't
+need to copy the address at all, so set it to NULL before invoking the
+recvmsg handler. We can do so, because all the recvmsg handlers must
+cope with the case a plain read() is called on them. read() also sets
+msg_name to NULL.
+
+Also document these changes in include/linux/net.h as suggested by David
+Miller.
+
+Changes since RFC:
+
+Set msg->msg_name = NULL if user specified a NULL in msg_name but had a
+non-null msg_namelen in verify_iovec/verify_compat_iovec. This doesn't
+affect sendto as it would bail out earlier while trying to copy-in the
+address. It also more naturally reflects the logic by the callers of
+verify_iovec.
+
+With this change in place I could remove "
+if (!uaddr || msg_sys->msg_namelen == 0)
+	msg->msg_name = NULL
+".
+
+This change does not alter the user visible error logic as we ignore
+msg_namelen as long as msg_name is NULL.
+
+Also remove two unnecessary curly brackets in ___sys_recvmsg and change
+comments to netdev style.
+
+Cc: David Miller <davem@davemloft.net>
+Suggested-by: Eric Dumazet <eric.dumazet@gmail.com>
+Signed-off-by: Hannes Frederic Sowa <hannes@stressinduktion.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: static int vmci_transport_dgram_dequeue(struct kiocb *kiocb,
+					struct vsock_sock *vsk,
+					struct msghdr *msg, size_t len,
+					int flags)
+{
+	int err;
+	int noblock;
+	struct vmci_datagram *dg;
+	size_t payload_len;
+	struct sk_buff *skb;
+
+	noblock = flags & MSG_DONTWAIT;
+
+	if (flags & MSG_OOB || flags & MSG_ERRQUEUE)
+		return -EOPNOTSUPP;
+
+	msg->msg_namelen = 0;
+
+	/* Retrieve the head sk_buff from the socket's receive queue. */
+	err = 0;
+	skb = skb_recv_datagram(&vsk->sk, flags, noblock, &err);
+	if (err)
+		return err;
+
+	if (!skb)
+		return -EAGAIN;
+
+	dg = (struct vmci_datagram *)skb->data;
+	if (!dg)
+		/* err is 0, meaning we read zero bytes. */
+		goto out;
+
+	payload_len = dg->payload_size;
+	/* Ensure the sk_buff matches the payload size claimed in the packet. */
+	if (payload_len != skb->len - sizeof(*dg)) {
+		err = -EINVAL;
+		goto out;
+	}
+
+	if (payload_len > len) {
+		payload_len = len;
+		msg->msg_flags |= MSG_TRUNC;
+	}
+
+	/* Place the datagram payload in the user's iovec. */
+	err = skb_copy_datagram_iovec(skb, sizeof(*dg), msg->msg_iov,
+		payload_len);
+	if (err)
+		goto out;
+
+	if (msg->msg_name) {
+		struct sockaddr_vm *vm_addr;
+
+		/* Provide the address of the sender. */
+		vm_addr = (struct sockaddr_vm *)msg->msg_name;
+		vsock_addr_init(vm_addr, dg->src.context, dg->src.resource);
+		msg->msg_namelen = sizeof(*vm_addr);
+	}
+	err = payload_len;
+
+out:
+	skb_free_datagram(&vsk->sk, skb);
+	return err;
+}
+The corrected function: static int vmci_transport_dgram_dequeue(struct kiocb *kiocb,
+					struct vsock_sock *vsk,
+					struct msghdr *msg, size_t len,
+					int flags)
+{
+	int err;
+	int noblock;
+	struct vmci_datagram *dg;
+	size_t payload_len;
+	struct sk_buff *skb;
+
+	noblock = flags & MSG_DONTWAIT;
+
+	if (flags & MSG_OOB || flags & MSG_ERRQUEUE)
+		return -EOPNOTSUPP;
+
+	/* Retrieve the head sk_buff from the socket's receive queue. */
+	err = 0;
+	skb = skb_recv_datagram(&vsk->sk, flags, noblock, &err);
+	if (err)
+		return err;
+
+	if (!skb)
+		return -EAGAIN;
+
+	dg = (struct vmci_datagram *)skb->data;
+	if (!dg)
+		/* err is 0, meaning we read zero bytes. */
+		goto out;
+
+	payload_len = dg->payload_size;
+	/* Ensure the sk_buff matches the payload size claimed in the packet. */
+	if (payload_len != skb->len - sizeof(*dg)) {
+		err = -EINVAL;
+		goto out;
+	}
+
+	if (payload_len > len) {
+		payload_len = len;
+		msg->msg_flags |= MSG_TRUNC;
+	}
+
+	/* Place the datagram payload in the user's iovec. */
+	err = skb_copy_datagram_iovec(skb, sizeof(*dg), msg->msg_iov,
+		payload_len);
+	if (err)
+		goto out;
+
+	if (msg->msg_name) {
+		struct sockaddr_vm *vm_addr;
+
+		/* Provide the address of the sender. */
+		vm_addr = (struct sockaddr_vm *)msg->msg_name;
+		vsock_addr_init(vm_addr, dg->src.context, dg->src.resource);
+		msg->msg_namelen = sizeof(*vm_addr);
+	}
+	err = payload_len;
+
+out:
+	skb_free_datagram(&vsk->sk, skb);
+	return err;
+}

@@ -1,0 +1,264 @@
+The vulnerable issue: unix: avoid use-after-free in ep_remove_wait_queue
+
+Rainer Weikusat <rweikusat@mobileactivedefense.com> writes:
+An AF_UNIX datagram socket being the client in an n:1 association with
+some server socket is only allowed to send messages to the server if the
+receive queue of this socket contains at most sk_max_ack_backlog
+datagrams. This implies that prospective writers might be forced to go
+to sleep despite none of the message presently enqueued on the server
+receive queue were sent by them. In order to ensure that these will be
+woken up once space becomes again available, the present unix_dgram_poll
+routine does a second sock_poll_wait call with the peer_wait wait queue
+of the server socket as queue argument (unix_dgram_recvmsg does a wake
+up on this queue after a datagram was received). This is inherently
+problematic because the server socket is only guaranteed to remain alive
+for as long as the client still holds a reference to it. In case the
+connection is dissolved via connect or by the dead peer detection logic
+in unix_dgram_sendmsg, the server socket may be freed despite "the
+polling mechanism" (in particular, epoll) still has a pointer to the
+corresponding peer_wait queue. There's no way to forcibly deregister a
+wait queue with epoll.
+
+Based on an idea by Jason Baron, the patch below changes the code such
+that a wait_queue_t belonging to the client socket is enqueued on the
+peer_wait queue of the server whenever the peer receive queue full
+condition is detected by either a sendmsg or a poll. A wake up on the
+peer queue is then relayed to the ordinary wait queue of the client
+socket via wake function. The connection to the peer wait queue is again
+dissolved if either a wake up is about to be relayed or the client
+socket reconnects or a dead peer is detected or the client socket is
+itself closed. This enables removing the second sock_poll_wait from
+unix_dgram_poll, thus avoiding the use-after-free, while still ensuring
+that no blocked writer sleeps forever.
+
+Signed-off-by: Rainer Weikusat <rweikusat@mobileactivedefense.com>
+Fixes: ec0d215f9420 ("af_unix: fix 'poll for write'/connected DGRAM sockets")
+Reviewed-by: Jason Baron <jbaron@akamai.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: static unsigned int unix_dgram_poll(struct file *file, struct socket *sock,
+				    poll_table *wait)
+{
+	struct sock *sk = sock->sk, *other;
+	unsigned int mask, writable;
+
+	sock_poll_wait(file, sk_sleep(sk), wait);
+	mask = 0;
+
+	/* exceptional events? */
+	if (sk->sk_err || !skb_queue_empty(&sk->sk_error_queue))
+		mask |= POLLERR |
+			(sock_flag(sk, SOCK_SELECT_ERR_QUEUE) ? POLLPRI : 0);
+
+	if (sk->sk_shutdown & RCV_SHUTDOWN)
+		mask |= POLLRDHUP | POLLIN | POLLRDNORM;
+	if (sk->sk_shutdown == SHUTDOWN_MASK)
+		mask |= POLLHUP;
+
+	/* readable? */
+	if (!skb_queue_empty(&sk->sk_receive_queue))
+		mask |= POLLIN | POLLRDNORM;
+
+	/* Connection-based need to check for termination and startup */
+	if (sk->sk_type == SOCK_SEQPACKET) {
+		if (sk->sk_state == TCP_CLOSE)
+			mask |= POLLHUP;
+		/* connection hasn't started yet? */
+		if (sk->sk_state == TCP_SYN_SENT)
+			return mask;
+	}
+
+	/* No write status requested, avoid expensive OUT tests. */
+	if (!(poll_requested_events(wait) & (POLLWRBAND|POLLWRNORM|POLLOUT)))
+		return mask;
+
+	writable = unix_writable(sk);
+	other = unix_peer_get(sk);
+	if (other) {
+		if (unix_peer(other) != sk) {
+			sock_poll_wait(file, &unix_sk(other)->peer_wait, wait);
+			if (unix_recvq_full(other))
+				writable = 0;
+		}
+		sock_put(other);
+	}
+
+	if (writable)
+		mask |= POLLOUT | POLLWRNORM | POLLWRBAND;
+	else
+		set_bit(SOCK_ASYNC_NOSPACE, &sk->sk_socket->flags);
+
+	return mask;
+}
+The corrected function: static int unix_dgram_sendmsg(struct socket *sock, struct msghdr *msg,
+			      size_t len)
+{
+	struct sock *sk = sock->sk;
+	struct net *net = sock_net(sk);
+	struct unix_sock *u = unix_sk(sk);
+	DECLARE_SOCKADDR(struct sockaddr_un *, sunaddr, msg->msg_name);
+	struct sock *other = NULL;
+	int namelen = 0; /* fake GCC */
+	int err;
+	unsigned int hash;
+	struct sk_buff *skb;
+	long timeo;
+	struct scm_cookie scm;
+	int max_level;
+	int data_len = 0;
+
+	wait_for_unix_gc();
+	err = scm_send(sock, msg, &scm, false);
+	if (err < 0)
+		return err;
+
+	err = -EOPNOTSUPP;
+	if (msg->msg_flags&MSG_OOB)
+		goto out;
+
+	if (msg->msg_namelen) {
+		err = unix_mkname(sunaddr, msg->msg_namelen, &hash);
+		if (err < 0)
+			goto out;
+		namelen = err;
+	} else {
+		sunaddr = NULL;
+		err = -ENOTCONN;
+		other = unix_peer_get(sk);
+		if (!other)
+			goto out;
+	}
+
+	if (test_bit(SOCK_PASSCRED, &sock->flags) && !u->addr
+	    && (err = unix_autobind(sock)) != 0)
+		goto out;
+
+	err = -EMSGSIZE;
+	if (len > sk->sk_sndbuf - 32)
+		goto out;
+
+	if (len > SKB_MAX_ALLOC) {
+		data_len = min_t(size_t,
+				 len - SKB_MAX_ALLOC,
+				 MAX_SKB_FRAGS * PAGE_SIZE);
+		data_len = PAGE_ALIGN(data_len);
+
+		BUILD_BUG_ON(SKB_MAX_ALLOC < PAGE_SIZE);
+	}
+
+	skb = sock_alloc_send_pskb(sk, len - data_len, data_len,
+				   msg->msg_flags & MSG_DONTWAIT, &err,
+				   PAGE_ALLOC_COSTLY_ORDER);
+	if (skb == NULL)
+		goto out;
+
+	err = unix_scm_to_skb(&scm, skb, true);
+	if (err < 0)
+		goto out_free;
+	max_level = err + 1;
+
+	skb_put(skb, len - data_len);
+	skb->data_len = data_len;
+	skb->len = len;
+	err = skb_copy_datagram_from_iter(skb, 0, &msg->msg_iter, len);
+	if (err)
+		goto out_free;
+
+	timeo = sock_sndtimeo(sk, msg->msg_flags & MSG_DONTWAIT);
+
+restart:
+	if (!other) {
+		err = -ECONNRESET;
+		if (sunaddr == NULL)
+			goto out_free;
+
+		other = unix_find_other(net, sunaddr, namelen, sk->sk_type,
+					hash, &err);
+		if (other == NULL)
+			goto out_free;
+	}
+
+	if (sk_filter(other, skb) < 0) {
+		/* Toss the packet but do not return any error to the sender */
+		err = len;
+		goto out_free;
+	}
+
+	unix_state_lock(other);
+	err = -EPERM;
+	if (!unix_may_send(sk, other))
+		goto out_unlock;
+
+	if (sock_flag(other, SOCK_DEAD)) {
+		/*
+		 *	Check with 1003.1g - what should
+		 *	datagram error
+		 */
+		unix_state_unlock(other);
+		sock_put(other);
+
+		err = 0;
+		unix_state_lock(sk);
+		if (unix_peer(sk) == other) {
+			unix_peer(sk) = NULL;
+			unix_state_unlock(sk);
+
+			unix_dgram_disconnected(sk, other);
+			sock_put(other);
+			err = -ECONNREFUSED;
+		} else {
+			unix_state_unlock(sk);
+		}
+
+		other = NULL;
+		if (err)
+			goto out_free;
+		goto restart;
+	}
+
+	err = -EPIPE;
+	if (other->sk_shutdown & RCV_SHUTDOWN)
+		goto out_unlock;
+
+	if (sk->sk_type != SOCK_SEQPACKET) {
+		err = security_unix_may_send(sk->sk_socket, other->sk_socket);
+		if (err)
+			goto out_unlock;
+	}
+
+	if (unix_peer(other) != sk && unix_recvq_full(other)) {
+		if (!timeo) {
+			err = -EAGAIN;
+			goto out_unlock;
+		}
+
+		timeo = unix_wait_for_peer(other, timeo);
+
+		err = sock_intr_errno(timeo);
+		if (signal_pending(current))
+			goto out_free;
+
+		goto restart;
+	}
+
+	if (sock_flag(other, SOCK_RCVTSTAMP))
+		__net_timestamp(skb);
+	maybe_add_creds(skb, sock, other);
+	skb_queue_tail(&other->sk_receive_queue, skb);
+	if (max_level > unix_sk(other)->recursion_level)
+		unix_sk(other)->recursion_level = max_level;
+	unix_state_unlock(other);
+	other->sk_data_ready(other);
+	sock_put(other);
+	scm_destroy(&scm);
+	return len;
+
+out_unlock:
+	unix_state_unlock(other);
+out_free:
+	kfree_skb(skb);
+out:
+	if (other)
+		sock_put(other);
+	scm_destroy(&scm);
+	return err;
+}

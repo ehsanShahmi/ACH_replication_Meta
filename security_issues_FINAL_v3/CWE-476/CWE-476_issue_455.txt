@@ -1,0 +1,43 @@
+The vulnerable issue: uio_hv_generic: Fix kernel NULL pointer dereference in hv_uio_rescind
+
+For primary VM Bus channels, primary_channel pointer is always NULL. This
+pointer is valid only for the secondary channels. Also, rescind callback
+is meant for primary channels only.
+
+Fix NULL pointer dereference by retrieving the device_obj from the parent
+for the primary channel.
+
+Cc: stable@vger.kernel.org
+Fixes: ca3cda6fcf1e ("uio_hv_generic: add rescind support")
+Signed-off-by: Saurabh Sengar <ssengar@linux.microsoft.com>
+Signed-off-by: Naman Jain <namjain@linux.microsoft.com>
+Link: https://lore.kernel.org/r/20240829071312.1595-2-namjain@linux.microsoft.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+The vulnerable function: static void hv_uio_rescind(struct vmbus_channel *channel)
+{
+	struct hv_device *hv_dev = channel->primary_channel->device_obj;
+	struct hv_uio_private_data *pdata = hv_get_drvdata(hv_dev);
+
+	/*
+	 * Turn off the interrupt file handle
+	 * Next read for event will return -EIO
+	 */
+	pdata->info.irq = 0;
+
+	/* Wake up reader */
+	uio_event_notify(&pdata->info);
+}
+The corrected function: static void hv_uio_rescind(struct vmbus_channel *channel)
+{
+	struct hv_device *hv_dev = channel->device_obj;
+	struct hv_uio_private_data *pdata = hv_get_drvdata(hv_dev);
+
+	/*
+	 * Turn off the interrupt file handle
+	 * Next read for event will return -EIO
+	 */
+	pdata->info.irq = 0;
+
+	/* Wake up reader */
+	uio_event_notify(&pdata->info);
+}

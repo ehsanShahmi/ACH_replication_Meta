@@ -1,0 +1,150 @@
+The vulnerable issue: ext4: fix slab-out-of-bounds in ext4_mb_find_good_group_avg_frag_lists()
+
+We can trigger a slab-out-of-bounds with the following commands:
+
+    mkfs.ext4 -F /dev/$disk 10G
+    mount /dev/$disk /tmp/test
+    echo 2147483647 > /sys/fs/ext4/$disk/mb_group_prealloc
+    echo test > /tmp/test/file && sync
+
+==================================================================
+BUG: KASAN: slab-out-of-bounds in ext4_mb_find_good_group_avg_frag_lists+0x8a/0x200 [ext4]
+Read of size 8 at addr ffff888121b9d0f0 by task kworker/u2:0/11
+CPU: 0 PID: 11 Comm: kworker/u2:0 Tainted: GL 6.7.0-next-20240118 #521
+Call Trace:
+ dump_stack_lvl+0x2c/0x50
+ kasan_report+0xb6/0xf0
+ ext4_mb_find_good_group_avg_frag_lists+0x8a/0x200 [ext4]
+ ext4_mb_regular_allocator+0x19e9/0x2370 [ext4]
+ ext4_mb_new_blocks+0x88a/0x1370 [ext4]
+ ext4_ext_map_blocks+0x14f7/0x2390 [ext4]
+ ext4_map_blocks+0x569/0xea0 [ext4]
+ ext4_do_writepages+0x10f6/0x1bc0 [ext4]
+[...]
+==================================================================
+
+The flow of issue triggering is as follows:
+
+// Set s_mb_group_prealloc to 2147483647 via sysfs
+ext4_mb_new_blocks
+  ext4_mb_normalize_request
+    ext4_mb_normalize_group_request
+      ac->ac_g_ex.fe_len = EXT4_SB(sb)->s_mb_group_prealloc
+  ext4_mb_regular_allocator
+    ext4_mb_choose_next_group
+      ext4_mb_choose_next_group_best_avail
+        mb_avg_fragment_size_order
+          order = fls(len) - 2 = 29
+        ext4_mb_find_good_group_avg_frag_lists
+          frag_list = &sbi->s_mb_avg_fragment_size[order]
+          if (list_empty(frag_list)) // Trigger SOOB!
+
+At 4k block size, the length of the s_mb_avg_fragment_size list is 14,
+but an oversized s_mb_group_prealloc is set, causing slab-out-of-bounds
+to be triggered by an attempt to access an element at index 29.
+
+Add a new attr_id attr_clusters_in_group with values in the range
+[0, sbi->s_clusters_per_group] and declare mb_group_prealloc as
+that type to fix the issue. In addition avoid returning an order
+from mb_avg_fragment_size_order() greater than MB_NUM_ORDERS(sb)
+and reduce some useless loops.
+
+Fixes: 7e170922f06b ("ext4: Add allocation criteria 1.5 (CR1_5)")
+CC: stable@vger.kernel.org
+Signed-off-by: Baokun Li <libaokun1@huawei.com>
+Reviewed-by: Jan Kara <jack@suse.cz>
+Reviewed-by: Ojaswin Mujoo <ojaswin@linux.ibm.com>
+Link: https://lore.kernel.org/r/20240319113325.3110393-5-libaokun1@huawei.com
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+The vulnerable function: static void ext4_mb_choose_next_group_best_avail(struct ext4_allocation_context *ac,
+		enum criteria *new_cr, ext4_group_t *group)
+{
+	struct ext4_sb_info *sbi = EXT4_SB(ac->ac_sb);
+	struct ext4_group_info *grp = NULL;
+	int i, order, min_order;
+	unsigned long num_stripe_clusters = 0;
+
+	if (unlikely(ac->ac_flags & EXT4_MB_CR_BEST_AVAIL_LEN_OPTIMIZED)) {
+		if (sbi->s_mb_stats)
+			atomic_inc(&sbi->s_bal_best_avail_bad_suggestions);
+	}
+
+	/*
+	 * mb_avg_fragment_size_order() returns order in a way that makes
+	 * retrieving back the length using (1 << order) inaccurate. Hence, use
+	 * fls() instead since we need to know the actual length while modifying
+	 * goal length.
+	 */
+	order = fls(ac->ac_g_ex.fe_len) - 1;
+	min_order = order - sbi->s_mb_best_avail_max_trim_order;
+	if (min_order < 0)
+		min_order = 0;
+
+	if (sbi->s_stripe > 0) {
+		/*
+		 * We are assuming that stripe size is always a multiple of
+		 * cluster ratio otherwise __ext4_fill_super exists early.
+		 */
+		num_stripe_clusters = EXT4_NUM_B2C(sbi, sbi->s_stripe);
+		if (1 << min_order < num_stripe_clusters)
+			/*
+			 * We consider 1 order less because later we round
+			 * up the goal len to num_stripe_clusters
+			 */
+			min_order = fls(num_stripe_clusters) - 1;
+	}
+
+	if (1 << min_order < ac->ac_o_ex.fe_len)
+		min_order = fls(ac->ac_o_ex.fe_len);
+
+	for (i = order; i >= min_order; i--) {
+		int frag_order;
+		/*
+		 * Scale down goal len to make sure we find something
+		 * in the free fragments list. Basically, reduce
+		 * preallocations.
+		 */
+		ac->ac_g_ex.fe_len = 1 << i;
+
+		if (num_stripe_clusters > 0) {
+			/*
+			 * Try to round up the adjusted goal length to
+			 * stripe size (in cluster units) multiple for
+			 * efficiency.
+			 */
+			ac->ac_g_ex.fe_len = roundup(ac->ac_g_ex.fe_len,
+						     num_stripe_clusters);
+		}
+
+		frag_order = mb_avg_fragment_size_order(ac->ac_sb,
+							ac->ac_g_ex.fe_len);
+
+		grp = ext4_mb_find_good_group_avg_frag_lists(ac, frag_order);
+		if (grp) {
+			*group = grp->bb_group;
+			ac->ac_flags |= EXT4_MB_CR_BEST_AVAIL_LEN_OPTIMIZED;
+			return;
+		}
+	}
+
+	/* Reset goal length to original goal length before falling into CR_GOAL_LEN_SLOW */
+	ac->ac_g_ex.fe_len = ac->ac_orig_goal_len;
+	*new_cr = CR_GOAL_LEN_SLOW;
+}
+The corrected function: static int mb_avg_fragment_size_order(struct super_block *sb, ext4_grpblk_t len)
+{
+	int order;
+
+	/*
+	 * We don't bother with a special lists groups with only 1 block free
+	 * extents and for completely empty groups.
+	 */
+	order = fls(len) - 2;
+	if (order < 0)
+		return 0;
+	if (order == MB_NUM_ORDERS(sb))
+		order--;
+	if (WARN_ON_ONCE(order > MB_NUM_ORDERS(sb)))
+		order = MB_NUM_ORDERS(sb) - 1;
+	return order;
+}

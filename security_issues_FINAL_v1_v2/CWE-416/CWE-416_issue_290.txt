@@ -1,0 +1,17 @@
+nbd: fix race between timeout and normal completion
+
+If request timetout is handled by nbd_requeue_cmd(), normal completion
+has to be stopped for avoiding to complete this requeued request, other
+use-after-free can be triggered.
+
+Fix the race by clearing NBD_CMD_INFLIGHT in nbd_requeue_cmd(), meantime
+make sure that cmd->lock is grabbed for clearing the flag and the
+requeue.
+
+Cc: Josef Bacik <josef@toxicpanda.com>
+Cc: Yu Kuai <yukuai3@huawei.com>
+Fixes: 2895f1831e91 ("nbd: don't clear 'NBD_CMD_INFLIGHT' flag if request is not completed")
+Signed-off-by: Ming Lei <ming.lei@redhat.com>
+Reviewed-by: Yu Kuai <yukuai3@huawei.com>
+Link: https://lore.kernel.org/r/20240830034145.1827742-1-ming.lei@redhat.com
+Signed-off-by: Jens Axboe <axboe@kernel.dk>

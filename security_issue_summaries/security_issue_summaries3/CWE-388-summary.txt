@@ -1,0 +1,1 @@
+kvm: nVMX: Allow L1 to intercept software exceptions (#BP and #OF)  When L2 exits to L0 due to "exception or NMI", software exceptions (#BP and #OF) for which L1 has requested an intercept should be handled by L1 rather than L0. Signed-off-by: Chris Salls <salls@cs.ucsb.edu> Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>

@@ -1,0 +1,28 @@
+drm/amd/display: Avoid race between dcn10_set_drr() and dc_state_destruct()
+
+dc_state_destruct() nulls the resource context of the DC state. The pipe
+context passed to dcn10_set_drr() is a member of this resource context.
+
+If dc_state_destruct() is called parallel to the IRQ processing (which
+calls dcn10_set_drr() at some point), we can end up using already nulled
+function callback fields of struct stream_resource.
+
+The logic in dcn10_set_drr() already tries to avoid this, by checking tg
+against NULL. But if the nulling happens exactly after the NULL check and
+before the next access, then we get a race.
+
+Avoid this by copying tg first to a local variable, and then use this
+variable for all the operations. This should work, as long as nobody
+frees the resource pool where the timing generators live.
+
+Closes: https://gitlab.freedesktop.org/drm/amd/-/issues/3142
+Fixes: 06ad7e164256 ("drm/amd/display: Destroy DC context while keeping DML and DML2")
+Signed-off-by: Tobias Jakobi <tjakobi@math.uni-bielefeld.de>
+Tested-by: Raoul van Rüschen <raoul.van.rueschen@gmail.com>
+Tested-by: Christopher Snowhill <chris@kode54.net>
+Reviewed-by: Harry Wentland <harry.wentland@amd.com>
+Tested-by: Sefa Eyeoglu <contact@scrumplex.net>
+Signed-off-by: Mario Limonciello <mario.limonciello@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+(cherry picked from commit a3cc326a43bdc48fbdf53443e1027a03e309b643)
+Cc: stable@vger.kernel.org

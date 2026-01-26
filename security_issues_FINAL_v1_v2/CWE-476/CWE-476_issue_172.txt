@@ -1,0 +1,9 @@
+power: supply: wm8350-power: Add missing free in free_charger_irq
+
+In free_charger_irq(), there is no free for 'WM8350_IRQ_CHG_FAST_RDY'.
+Therefore, it should be better to add it in order to avoid the memory leak.
+
+Fixes: 14431aa0c5a4 ("power_supply: Add support for WM8350 PMU")
+Signed-off-by: Jiasheng Jiang <jiasheng@iscas.ac.cn>
+Acked-by: Charles Keepax <ckeepax@opensource.cirrus.com>
+Signed-off-by: Sebastian Reichel <sebastian.reichel@collabora.com>

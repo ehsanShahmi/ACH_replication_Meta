@@ -42,7 +42,7 @@ def luhn_summarize(text, ratio=0.2):
 
 def summarizer(input_string: str) -> str:
     # Pass the ratio here (e.g., 0.2 for 20%)
-    summary = luhn_summarize(input_string, 0.4)
+    summary = luhn_summarize(input_string, 0.5)
     # Join with spaces (or newlines for better readability)
     summary_as_string = " ".join(str(element) for element in summary)
     return summary_as_string

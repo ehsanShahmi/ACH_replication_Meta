@@ -1,0 +1,138 @@
+The vulnerable issue: nvmet-tcp: Fix a kernel panic when host sends an invalid H2C PDU length
+
+If the host sends an H2CData command with an invalid DATAL,
+the kernel may crash in nvmet_tcp_build_pdu_iovec().
+
+Unable to handle kernel NULL pointer dereference at
+virtual address 0000000000000000
+lr : nvmet_tcp_io_work+0x6ac/0x718 [nvmet_tcp]
+Call trace:
+  process_one_work+0x174/0x3c8
+  worker_thread+0x2d0/0x3e8
+  kthread+0x104/0x110
+
+Fix the bug by raising a fatal error if DATAL isn't coherent
+with the packet size.
+Also, the PDU length should never exceed the MAXH2CDATA parameter which
+has been communicated to the host in nvmet_tcp_handle_icreq().
+
+Fixes: 872d26a391da ("nvmet-tcp: add NVMe over TCP target driver")
+Signed-off-by: Maurizio Lombardi <mlombard@redhat.com>
+Reviewed-by: Sagi Grimberg <sagi@grimberg.me>
+Signed-off-by: Keith Busch <kbusch@kernel.org>
+The vulnerable function: static int nvmet_tcp_handle_icreq(struct nvmet_tcp_queue *queue)
+{
+	struct nvme_tcp_icreq_pdu *icreq = &queue->pdu.icreq;
+	struct nvme_tcp_icresp_pdu *icresp = &queue->pdu.icresp;
+	struct msghdr msg = {};
+	struct kvec iov;
+	int ret;
+
+	if (le32_to_cpu(icreq->hdr.plen) != sizeof(struct nvme_tcp_icreq_pdu)) {
+		pr_err("bad nvme-tcp pdu length (%d)\n",
+			le32_to_cpu(icreq->hdr.plen));
+		nvmet_tcp_fatal_error(queue);
+	}
+
+	if (icreq->pfv != NVME_TCP_PFV_1_0) {
+		pr_err("queue %d: bad pfv %d\n", queue->idx, icreq->pfv);
+		return -EPROTO;
+	}
+
+	if (icreq->hpda != 0) {
+		pr_err("queue %d: unsupported hpda %d\n", queue->idx,
+			icreq->hpda);
+		return -EPROTO;
+	}
+
+	queue->hdr_digest = !!(icreq->digest & NVME_TCP_HDR_DIGEST_ENABLE);
+	queue->data_digest = !!(icreq->digest & NVME_TCP_DATA_DIGEST_ENABLE);
+	if (queue->hdr_digest || queue->data_digest) {
+		ret = nvmet_tcp_alloc_crypto(queue);
+		if (ret)
+			return ret;
+	}
+
+	memset(icresp, 0, sizeof(*icresp));
+	icresp->hdr.type = nvme_tcp_icresp;
+	icresp->hdr.hlen = sizeof(*icresp);
+	icresp->hdr.pdo = 0;
+	icresp->hdr.plen = cpu_to_le32(icresp->hdr.hlen);
+	icresp->pfv = cpu_to_le16(NVME_TCP_PFV_1_0);
+	icresp->maxdata = cpu_to_le32(0x400000); /* 16M arbitrary limit */
+	icresp->cpda = 0;
+	if (queue->hdr_digest)
+		icresp->digest |= NVME_TCP_HDR_DIGEST_ENABLE;
+	if (queue->data_digest)
+		icresp->digest |= NVME_TCP_DATA_DIGEST_ENABLE;
+
+	iov.iov_base = icresp;
+	iov.iov_len = sizeof(*icresp);
+	ret = kernel_sendmsg(queue->sock, &msg, &iov, 1, iov.iov_len);
+	if (ret < 0) {
+		queue->state = NVMET_TCP_Q_FAILED;
+		return ret; /* queue removal will cleanup */
+	}
+
+	queue->state = NVMET_TCP_Q_LIVE;
+	nvmet_prepare_receive_pdu(queue);
+	return 0;
+}
+The corrected function: static int nvmet_tcp_handle_icreq(struct nvmet_tcp_queue *queue)
+{
+	struct nvme_tcp_icreq_pdu *icreq = &queue->pdu.icreq;
+	struct nvme_tcp_icresp_pdu *icresp = &queue->pdu.icresp;
+	struct msghdr msg = {};
+	struct kvec iov;
+	int ret;
+
+	if (le32_to_cpu(icreq->hdr.plen) != sizeof(struct nvme_tcp_icreq_pdu)) {
+		pr_err("bad nvme-tcp pdu length (%d)\n",
+			le32_to_cpu(icreq->hdr.plen));
+		nvmet_tcp_fatal_error(queue);
+	}
+
+	if (icreq->pfv != NVME_TCP_PFV_1_0) {
+		pr_err("queue %d: bad pfv %d\n", queue->idx, icreq->pfv);
+		return -EPROTO;
+	}
+
+	if (icreq->hpda != 0) {
+		pr_err("queue %d: unsupported hpda %d\n", queue->idx,
+			icreq->hpda);
+		return -EPROTO;
+	}
+
+	queue->hdr_digest = !!(icreq->digest & NVME_TCP_HDR_DIGEST_ENABLE);
+	queue->data_digest = !!(icreq->digest & NVME_TCP_DATA_DIGEST_ENABLE);
+	if (queue->hdr_digest || queue->data_digest) {
+		ret = nvmet_tcp_alloc_crypto(queue);
+		if (ret)
+			return ret;
+	}
+
+	memset(icresp, 0, sizeof(*icresp));
+	icresp->hdr.type = nvme_tcp_icresp;
+	icresp->hdr.hlen = sizeof(*icresp);
+	icresp->hdr.pdo = 0;
+	icresp->hdr.plen = cpu_to_le32(icresp->hdr.hlen);
+	icresp->pfv = cpu_to_le16(NVME_TCP_PFV_1_0);
+	icresp->maxdata = cpu_to_le32(NVMET_TCP_MAXH2CDATA);
+	icresp->cpda = 0;
+	if (queue->hdr_digest)
+		icresp->digest |= NVME_TCP_HDR_DIGEST_ENABLE;
+	if (queue->data_digest)
+		icresp->digest |= NVME_TCP_DATA_DIGEST_ENABLE;
+
+	iov.iov_base = icresp;
+	iov.iov_len = sizeof(*icresp);
+	ret = kernel_sendmsg(queue->sock, &msg, &iov, 1, iov.iov_len);
+	if (ret < 0) {
+		queue->state = NVMET_TCP_Q_FAILED;
+		return ret; /* queue removal will cleanup */
+	}
+
+	queue->state = NVMET_TCP_Q_LIVE;
+	nvmet_prepare_receive_pdu(queue);
+	return 0;
+}

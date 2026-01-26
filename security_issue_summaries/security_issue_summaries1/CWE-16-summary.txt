@@ -1,0 +1,1 @@
+CVE-2012-0957  Reported-by: PaX Team <pageexec@freemail.hu> Signed-off-by: Kees Cook <keescook@chromium.org> Cc: Andi Kleen <ak@linux.intel.com> Cc: PaX Team <pageexec@freemail.hu> Cc: Brad Spengler <spender@grsecurity.net> Cc: <stable@vger.kernel.org> Signed-off-by: Andrew Morton <akpm@linux-foundation.org> Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>

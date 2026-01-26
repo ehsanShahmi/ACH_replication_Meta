@@ -1,0 +1,142 @@
+The vulnerable issue: net: fix infinite loop in __skb_recv_datagram()
+
+Tommi was fuzzing with trinity and reported the following problem :
+
+commit 3f518bf745 (datagram: Add offset argument to __skb_recv_datagram)
+missed that a raw socket receive queue can contain skbs with no payload.
+
+We can loop in __skb_recv_datagram() with MSG_PEEK mode, because
+wait_for_packet() is not prepared to skip these skbs.
+
+[   83.541011] INFO: rcu_sched detected stalls on CPUs/tasks: {}
+(detected by 0, t=26002 jiffies, g=27673, c=27672, q=75)
+[   83.541011] INFO: Stall ended before state dump start
+[  108.067010] BUG: soft lockup - CPU#0 stuck for 22s! [trinity-child31:2847]
+...
+[  108.067010] Call Trace:
+[  108.067010]  [<ffffffff818cc103>] __skb_recv_datagram+0x1a3/0x3b0
+[  108.067010]  [<ffffffff818cc33d>] skb_recv_datagram+0x2d/0x30
+[  108.067010]  [<ffffffff819ed43d>] rawv6_recvmsg+0xad/0x240
+[  108.067010]  [<ffffffff818c4b04>] sock_common_recvmsg+0x34/0x50
+[  108.067010]  [<ffffffff818bc8ec>] sock_recvmsg+0xbc/0xf0
+[  108.067010]  [<ffffffff818bf31e>] sys_recvfrom+0xde/0x150
+[  108.067010]  [<ffffffff81ca4329>] system_call_fastpath+0x16/0x1b
+
+Reported-by: Tommi Rantala <tt.rantala@gmail.com>
+Tested-by: Tommi Rantala <tt.rantala@gmail.com>
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Cc: Pavel Emelyanov <xemul@parallels.com>
+Acked-by: Pavel Emelyanov <xemul@parallels.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: struct sk_buff *__skb_recv_datagram(struct sock *sk, unsigned int flags,
+				    int *peeked, int *off, int *err)
+{
+	struct sk_buff *skb;
+	long timeo;
+	/*
+	 * Caller is allowed not to check sk->sk_err before skb_recv_datagram()
+	 */
+	int error = sock_error(sk);
+
+	if (error)
+		goto no_packet;
+
+	timeo = sock_rcvtimeo(sk, flags & MSG_DONTWAIT);
+
+	do {
+		/* Again only user level code calls this function, so nothing
+		 * interrupt level will suddenly eat the receive_queue.
+		 *
+		 * Look at current nfs client by the way...
+		 * However, this function was correct in any case. 8)
+		 */
+		unsigned long cpu_flags;
+		struct sk_buff_head *queue = &sk->sk_receive_queue;
+
+		spin_lock_irqsave(&queue->lock, cpu_flags);
+		skb_queue_walk(queue, skb) {
+			*peeked = skb->peeked;
+			if (flags & MSG_PEEK) {
+				if (*off >= skb->len) {
+					*off -= skb->len;
+					continue;
+				}
+				skb->peeked = 1;
+				atomic_inc(&skb->users);
+			} else
+				__skb_unlink(skb, queue);
+
+			spin_unlock_irqrestore(&queue->lock, cpu_flags);
+			return skb;
+		}
+		spin_unlock_irqrestore(&queue->lock, cpu_flags);
+
+		/* User doesn't want to wait */
+		error = -EAGAIN;
+		if (!timeo)
+			goto no_packet;
+
+	} while (!wait_for_packet(sk, err, &timeo));
+
+	return NULL;
+
+no_packet:
+	*err = error;
+	return NULL;
+}
+The corrected function: struct sk_buff *__skb_recv_datagram(struct sock *sk, unsigned int flags,
+				    int *peeked, int *off, int *err)
+{
+	struct sk_buff *skb;
+	long timeo;
+	/*
+	 * Caller is allowed not to check sk->sk_err before skb_recv_datagram()
+	 */
+	int error = sock_error(sk);
+
+	if (error)
+		goto no_packet;
+
+	timeo = sock_rcvtimeo(sk, flags & MSG_DONTWAIT);
+
+	do {
+		/* Again only user level code calls this function, so nothing
+		 * interrupt level will suddenly eat the receive_queue.
+		 *
+		 * Look at current nfs client by the way...
+		 * However, this function was correct in any case. 8)
+		 */
+		unsigned long cpu_flags;
+		struct sk_buff_head *queue = &sk->sk_receive_queue;
+
+		spin_lock_irqsave(&queue->lock, cpu_flags);
+		skb_queue_walk(queue, skb) {
+			*peeked = skb->peeked;
+			if (flags & MSG_PEEK) {
+				if (*off >= skb->len && skb->len) {
+					*off -= skb->len;
+					continue;
+				}
+				skb->peeked = 1;
+				atomic_inc(&skb->users);
+			} else
+				__skb_unlink(skb, queue);
+
+			spin_unlock_irqrestore(&queue->lock, cpu_flags);
+			return skb;
+		}
+		spin_unlock_irqrestore(&queue->lock, cpu_flags);
+
+		/* User doesn't want to wait */
+		error = -EAGAIN;
+		if (!timeo)
+			goto no_packet;
+
+	} while (!wait_for_packet(sk, err, &timeo));
+
+	return NULL;
+
+no_packet:
+	*err = error;
+	return NULL;
+}

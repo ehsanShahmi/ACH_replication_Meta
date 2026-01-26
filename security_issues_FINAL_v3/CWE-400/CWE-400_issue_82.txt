@@ -1,0 +1,68 @@
+The vulnerable issue: USB: check usb_get_extra_descriptor for proper size
+
+When reading an extra descriptor, we need to properly check the minimum
+and maximum size allowed, to prevent from invalid data being sent by a
+device.
+
+Reported-by: Hui Peng <benquike@gmail.com>
+Reported-by: Mathias Payer <mathias.payer@nebelwelt.net>
+Co-developed-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Hui Peng <benquike@gmail.com>
+Signed-off-by: Mathias Payer <mathias.payer@nebelwelt.net>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: stable <stable@kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+The vulnerable function: int __usb_get_extra_descriptor(char *buffer, unsigned size,
+			       unsigned char type, void **ptr)
+{
+	struct usb_descriptor_header *header;
+
+	while (size >= sizeof(struct usb_descriptor_header)) {
+		header = (struct usb_descriptor_header *)buffer;
+
+		if (header->bLength < 2) {
+			printk(KERN_ERR
+				"%s: bogus descriptor, type %d length %d\n",
+				usbcore_name,
+				header->bDescriptorType,
+				header->bLength);
+			return -1;
+		}
+
+		if (header->bDescriptorType == type) {
+			*ptr = header;
+			return 0;
+		}
+
+		buffer += header->bLength;
+		size -= header->bLength;
+	}
+	return -1;
+}
+The corrected function: int __usb_get_extra_descriptor(char *buffer, unsigned size,
+			       unsigned char type, void **ptr, size_t minsize)
+{
+	struct usb_descriptor_header *header;
+
+	while (size >= sizeof(struct usb_descriptor_header)) {
+		header = (struct usb_descriptor_header *)buffer;
+
+		if (header->bLength < 2 || header->bLength > size) {
+			printk(KERN_ERR
+				"%s: bogus descriptor, type %d length %d\n",
+				usbcore_name,
+				header->bDescriptorType,
+				header->bLength);
+			return -1;
+		}
+
+		if (header->bDescriptorType == type && header->bLength >= minsize) {
+			*ptr = header;
+			return 0;
+		}
+
+		buffer += header->bLength;
+		size -= header->bLength;
+	}
+	return -1;
+}

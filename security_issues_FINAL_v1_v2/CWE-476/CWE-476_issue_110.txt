@@ -1,0 +1,7 @@
+drm/amdgpu: Fix the null pointer dereference to ras_manager
+
+Check ras_manager before using it
+
+Signed-off-by: Ma Jun <Jun.Ma2@amd.com>
+Reviewed-by: Lijo Lazar <lijo.lazar@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>

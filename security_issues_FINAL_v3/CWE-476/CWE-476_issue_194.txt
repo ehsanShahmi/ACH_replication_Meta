@@ -1,0 +1,108 @@
+The vulnerable issue: drm: mxsfb: Fix NULL pointer dereference
+
+mxsfb should not ever dereference the NULL pointer which
+drm_atomic_get_new_bridge_state is allowed to return.
+Assume a fixed format instead.
+
+Fixes: b776b0f00f24 ("drm: mxsfb: Use bus_format from the nearest bridge if present")
+Signed-off-by: Alexander Stein <alexander.stein@ew.tq-group.com>
+Signed-off-by: Marek Vasut <marex@denx.de>
+Link: https://patchwork.freedesktop.org/patch/msgid/20220202081755.145716-3-alexander.stein@ew.tq-group.com
+The vulnerable function: static void mxsfb_crtc_atomic_enable(struct drm_crtc *crtc,
+				     struct drm_atomic_state *state)
+{
+	struct mxsfb_drm_private *mxsfb = to_mxsfb_drm_private(crtc->dev);
+	struct drm_bridge_state *bridge_state;
+	struct drm_device *drm = mxsfb->drm;
+	u32 bus_format = 0;
+	dma_addr_t paddr;
+
+	pm_runtime_get_sync(drm->dev);
+	mxsfb_enable_axi_clk(mxsfb);
+
+	drm_crtc_vblank_on(crtc);
+
+	/* If there is a bridge attached to the LCDIF, use its bus format */
+	if (mxsfb->bridge) {
+		bridge_state =
+			drm_atomic_get_new_bridge_state(state,
+							mxsfb->bridge);
+		bus_format = bridge_state->input_bus_cfg.format;
+		if (bus_format == MEDIA_BUS_FMT_FIXED) {
+			dev_warn_once(drm->dev,
+				      "Bridge does not provide bus format, assuming MEDIA_BUS_FMT_RGB888_1X24.\n"
+				      "Please fix bridge driver by handling atomic_get_input_bus_fmts.\n");
+			bus_format = MEDIA_BUS_FMT_RGB888_1X24;
+		}
+	}
+
+	/* If there is no bridge, use bus format from connector */
+	if (!bus_format && mxsfb->connector->display_info.num_bus_formats)
+		bus_format = mxsfb->connector->display_info.bus_formats[0];
+
+	/* If all else fails, default to RGB888_1X24 */
+	if (!bus_format)
+		bus_format = MEDIA_BUS_FMT_RGB888_1X24;
+
+	mxsfb_crtc_mode_set_nofb(mxsfb, bus_format);
+
+	/* Write cur_buf as well to avoid an initial corrupt frame */
+	paddr = mxsfb_get_fb_paddr(crtc->primary);
+	if (paddr) {
+		writel(paddr, mxsfb->base + mxsfb->devdata->cur_buf);
+		writel(paddr, mxsfb->base + mxsfb->devdata->next_buf);
+	}
+
+	mxsfb_enable_controller(mxsfb);
+}
+The corrected function: static void mxsfb_crtc_atomic_enable(struct drm_crtc *crtc,
+				     struct drm_atomic_state *state)
+{
+	struct mxsfb_drm_private *mxsfb = to_mxsfb_drm_private(crtc->dev);
+	struct drm_bridge_state *bridge_state;
+	struct drm_device *drm = mxsfb->drm;
+	u32 bus_format = 0;
+	dma_addr_t paddr;
+
+	pm_runtime_get_sync(drm->dev);
+	mxsfb_enable_axi_clk(mxsfb);
+
+	drm_crtc_vblank_on(crtc);
+
+	/* If there is a bridge attached to the LCDIF, use its bus format */
+	if (mxsfb->bridge) {
+		bridge_state =
+			drm_atomic_get_new_bridge_state(state,
+							mxsfb->bridge);
+		if (!bridge_state)
+			bus_format = MEDIA_BUS_FMT_FIXED;
+		else
+			bus_format = bridge_state->input_bus_cfg.format;
+
+		if (bus_format == MEDIA_BUS_FMT_FIXED) {
+			dev_warn_once(drm->dev,
+				      "Bridge does not provide bus format, assuming MEDIA_BUS_FMT_RGB888_1X24.\n"
+				      "Please fix bridge driver by handling atomic_get_input_bus_fmts.\n");
+			bus_format = MEDIA_BUS_FMT_RGB888_1X24;
+		}
+	}
+
+	/* If there is no bridge, use bus format from connector */
+	if (!bus_format && mxsfb->connector->display_info.num_bus_formats)
+		bus_format = mxsfb->connector->display_info.bus_formats[0];
+
+	/* If all else fails, default to RGB888_1X24 */
+	if (!bus_format)
+		bus_format = MEDIA_BUS_FMT_RGB888_1X24;
+
+	mxsfb_crtc_mode_set_nofb(mxsfb, bus_format);
+
+	/* Write cur_buf as well to avoid an initial corrupt frame */
+	paddr = mxsfb_get_fb_paddr(crtc->primary);
+	if (paddr) {
+		writel(paddr, mxsfb->base + mxsfb->devdata->cur_buf);
+		writel(paddr, mxsfb->base + mxsfb->devdata->next_buf);
+	}
+
+	mxsfb_enable_controller(mxsfb);
+}

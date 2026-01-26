@@ -1,0 +1,62 @@
+The vulnerable issue: crypto: pcrypt - fix freeing pcrypt instances
+
+pcrypt is using the old way of freeing instances, where the ->free()
+method specified in the 'struct crypto_template' is passed a pointer to
+the 'struct crypto_instance'.  But the crypto_instance is being
+kfree()'d directly, which is incorrect because the memory was actually
+allocated as an aead_instance, which contains the crypto_instance at a
+nonzero offset.  Thus, the wrong pointer was being kfree()'d.
+
+Fix it by switching to the new way to free aead_instance's where the
+->free() method is specified in the aead_instance itself.
+
+Reported-by: syzbot <syzkaller@googlegroups.com>
+Fixes: 0496f56065e0 ("crypto: pcrypt - Add support for new AEAD interface")
+Cc: <stable@vger.kernel.org> # v4.2+
+Signed-off-by: Eric Biggers <ebiggers@google.com>
+Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+The vulnerable function: static void pcrypt_free(struct crypto_instance *inst)
+{
+	struct pcrypt_instance_ctx *ctx = crypto_instance_ctx(inst);
+
+	crypto_drop_aead(&ctx->spawn);
+	kfree(inst);
+}
+The corrected function: int sas_smp_get_phy_events(struct sas_phy *phy)
+{
+	int res;
+	u8 *req;
+	u8 *resp;
+	struct sas_rphy *rphy = dev_to_rphy(phy->dev.parent);
+	struct domain_device *dev = sas_find_dev_by_rphy(rphy);
+
+	req = alloc_smp_req(RPEL_REQ_SIZE);
+	if (!req)
+		return -ENOMEM;
+
+	resp = alloc_smp_resp(RPEL_RESP_SIZE);
+	if (!resp) {
+		kfree(req);
+		return -ENOMEM;
+	}
+
+	req[1] = SMP_REPORT_PHY_ERR_LOG;
+	req[9] = phy->number;
+
+	res = smp_execute_task(dev, req, RPEL_REQ_SIZE,
+			            resp, RPEL_RESP_SIZE);
+
+	if (!res)
+		goto out;
+
+	phy->invalid_dword_count = scsi_to_u32(&resp[12]);
+	phy->running_disparity_error_count = scsi_to_u32(&resp[16]);
+	phy->loss_of_dword_sync_count = scsi_to_u32(&resp[20]);
+	phy->phy_reset_problem_count = scsi_to_u32(&resp[24]);
+
+ out:
+	kfree(req);
+	kfree(resp);
+	return res;
+
+}

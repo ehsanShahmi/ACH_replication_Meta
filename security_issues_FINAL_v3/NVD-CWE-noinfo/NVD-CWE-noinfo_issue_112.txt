@@ -1,0 +1,98 @@
+The vulnerable issue: af_key: add __GFP_ZERO flag for compose_sadb_supported in function pfkey_register
+
+Add __GFP_ZERO flag for compose_sadb_supported in function pfkey_register
+to initialize the buffer of supp_skb to fix a kernel-info-leak issue.
+1) Function pfkey_register calls compose_sadb_supported to request
+a sk_buff. 2) compose_sadb_supported calls alloc_sbk to allocate
+a sk_buff, but it doesn't zero it. 3) If auth_len is greater 0, then
+compose_sadb_supported treats the memory as a struct sadb_supported and
+begins to initialize. But it just initializes the field sadb_supported_len
+and field sadb_supported_exttype without field sadb_supported_reserved.
+
+Reported-by: TCS Robot <tcs_robot@tencent.com>
+Signed-off-by: Haimin Zhang <tcs_kernel@tencent.com>
+Signed-off-by: Steffen Klassert <steffen.klassert@secunet.com>
+The vulnerable function: static int pfkey_register(struct sock *sk, struct sk_buff *skb, const struct sadb_msg *hdr, void * const *ext_hdrs)
+{
+	struct pfkey_sock *pfk = pfkey_sk(sk);
+	struct sk_buff *supp_skb;
+
+	if (hdr->sadb_msg_satype > SADB_SATYPE_MAX)
+		return -EINVAL;
+
+	if (hdr->sadb_msg_satype != SADB_SATYPE_UNSPEC) {
+		if (pfk->registered&(1<<hdr->sadb_msg_satype))
+			return -EEXIST;
+		pfk->registered |= (1<<hdr->sadb_msg_satype);
+	}
+
+	xfrm_probe_algs();
+
+	supp_skb = compose_sadb_supported(hdr, GFP_KERNEL);
+	if (!supp_skb) {
+		if (hdr->sadb_msg_satype != SADB_SATYPE_UNSPEC)
+			pfk->registered &= ~(1<<hdr->sadb_msg_satype);
+
+		return -ENOBUFS;
+	}
+
+	pfkey_broadcast(supp_skb, GFP_KERNEL, BROADCAST_REGISTERED, sk,
+			sock_net(sk));
+	return 0;
+}
+The corrected function: void input_set_capability(struct input_dev *dev, unsigned int type, unsigned int code)
+{
+	if (type < EV_CNT && input_max_code[type] &&
+	    code > input_max_code[type]) {
+		pr_err("%s: invalid code %u for type %u\n", __func__, code,
+		       type);
+		dump_stack();
+		return;
+	}
+
+	switch (type) {
+	case EV_KEY:
+		__set_bit(code, dev->keybit);
+		break;
+
+	case EV_REL:
+		__set_bit(code, dev->relbit);
+		break;
+
+	case EV_ABS:
+		input_alloc_absinfo(dev);
+		__set_bit(code, dev->absbit);
+		break;
+
+	case EV_MSC:
+		__set_bit(code, dev->mscbit);
+		break;
+
+	case EV_SW:
+		__set_bit(code, dev->swbit);
+		break;
+
+	case EV_LED:
+		__set_bit(code, dev->ledbit);
+		break;
+
+	case EV_SND:
+		__set_bit(code, dev->sndbit);
+		break;
+
+	case EV_FF:
+		__set_bit(code, dev->ffbit);
+		break;
+
+	case EV_PWR:
+		/* do nothing */
+		break;
+
+	default:
+		pr_err("%s: unknown type %u (code %u)\n", __func__, type, code);
+		dump_stack();
+		return;
+	}
+
+	__set_bit(type, dev->evbit);
+}

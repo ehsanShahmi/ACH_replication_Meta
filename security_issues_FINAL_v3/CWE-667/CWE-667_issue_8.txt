@@ -1,0 +1,48 @@
+The vulnerable issue: sctp: fix potential deadlock on &net->sctp.addr_wq_lock
+
+As &net->sctp.addr_wq_lock is also acquired by the timer
+sctp_addr_wq_timeout_handler() in protocal.c, the same lock acquisition
+at sctp_auto_asconf_init() seems should disable irq since it is called
+from sctp_accept() under process context.
+
+Possible deadlock scenario:
+sctp_accept()
+    -> sctp_sock_migrate()
+    -> sctp_auto_asconf_init()
+    -> spin_lock(&net->sctp.addr_wq_lock)
+        <timer interrupt>
+        -> sctp_addr_wq_timeout_handler()
+        -> spin_lock_bh(&net->sctp.addr_wq_lock); (deadlock here)
+
+This flaw was found using an experimental static analysis tool we are
+developing for irq-related deadlock.
+
+The tentative patch fix the potential deadlock by spin_lock_bh().
+
+Signed-off-by: Chengfeng Ye <dg573847474@gmail.com>
+Fixes: 34e5b0118685 ("sctp: delay auto_asconf init until binding the first addr")
+Acked-by: Xin Long <lucien.xin@gmail.com>
+Link: https://lore.kernel.org/r/20230627120340.19432-1-dg573847474@gmail.com
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+The vulnerable function: static void sctp_auto_asconf_init(struct sctp_sock *sp)
+{
+	struct net *net = sock_net(&sp->inet.sk);
+
+	if (net->sctp.default_auto_asconf) {
+		spin_lock(&net->sctp.addr_wq_lock);
+		list_add_tail(&sp->auto_asconf_list, &net->sctp.auto_asconf_splist);
+		spin_unlock(&net->sctp.addr_wq_lock);
+		sp->do_auto_asconf = 1;
+	}
+}
+The corrected function: static void sctp_auto_asconf_init(struct sctp_sock *sp)
+{
+	struct net *net = sock_net(&sp->inet.sk);
+
+	if (net->sctp.default_auto_asconf) {
+		spin_lock_bh(&net->sctp.addr_wq_lock);
+		list_add_tail(&sp->auto_asconf_list, &net->sctp.auto_asconf_splist);
+		spin_unlock_bh(&net->sctp.addr_wq_lock);
+		sp->do_auto_asconf = 1;
+	}
+}

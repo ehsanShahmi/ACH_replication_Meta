@@ -1,0 +1,26 @@
+futex: Fix errors in nested key ref-counting
+
+futex_wait() is leaking key references due to futex_wait_setup()
+acquiring an additional reference via the queue_lock() routine. The
+nested key ref-counting has been masking bugs and complicating code
+analysis. queue_lock() is only called with a previously ref-counted
+key, so remove the additional ref-counting from the queue_(un)lock()
+functions.
+
+Also futex_wait_requeue_pi() drops one key reference too many in
+unqueue_me_pi(). Remove the key reference handling from
+unqueue_me_pi(). This was paired with a queue_lock() in
+futex_lock_pi(), so the count remains unchanged.
+
+Document remaining nested key ref-counting sites.
+
+Signed-off-by: Darren Hart <dvhart@linux.intel.com>
+Reported-and-tested-by: Matthieu Fertré<matthieu.fertre@kerlabs.com>
+Reported-by: Louis Rilling<louis.rilling@kerlabs.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Eric Dumazet <eric.dumazet@gmail.com>
+Cc: John Kacur <jkacur@redhat.com>
+Cc: Rusty Russell <rusty@rustcorp.com.au>
+LKML-Reference: <4CBB17A8.70401@linux.intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: stable@kernel.org

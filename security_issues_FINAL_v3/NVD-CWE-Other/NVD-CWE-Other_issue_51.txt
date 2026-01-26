@@ -1,0 +1,71 @@
+The vulnerable issue: USB: serial: visor: fix crash on detecting device without write_urbs
+
+The visor driver crashes in clie_5_attach() when a specially crafted USB
+device without bulk-out endpoint is detected. This fix adds a check that
+the device has proper configuration expected by the driver.
+
+Reported-by: Ralf Spenneberg <ralf@spenneberg.net>
+Signed-off-by: Vladis Dronov <vdronov@redhat.com>
+Fixes: cfb8da8f69b8 ("USB: visor: fix initialisation of UX50/TH55 devices")
+Cc: stable <stable@vger.kernel.org>
+Signed-off-by: Johan Hovold <johan@kernel.org>
+The vulnerable function: static int clie_5_attach(struct usb_serial *serial)
+{
+	struct usb_serial_port *port;
+	unsigned int pipe;
+	int j;
+
+	/* TH55 registers 2 ports.
+	   Communication in from the UX50/TH55 uses bulk_in_endpointAddress
+	   from port 0. Communication out to the UX50/TH55 uses
+	   bulk_out_endpointAddress from port 1
+
+	   Lets do a quick and dirty mapping
+	 */
+
+	/* some sanity check */
+	if (serial->num_ports < 2)
+		return -1;
+
+	/* port 0 now uses the modified endpoint Address */
+	port = serial->port[0];
+	port->bulk_out_endpointAddress =
+				serial->port[1]->bulk_out_endpointAddress;
+
+	pipe = usb_sndbulkpipe(serial->dev, port->bulk_out_endpointAddress);
+	for (j = 0; j < ARRAY_SIZE(port->write_urbs); ++j)
+		port->write_urbs[j]->pipe = pipe;
+
+	return 0;
+}
+The corrected function: static int clie_5_attach(struct usb_serial *serial)
+{
+	struct usb_serial_port *port;
+	unsigned int pipe;
+	int j;
+
+	/* TH55 registers 2 ports.
+	   Communication in from the UX50/TH55 uses bulk_in_endpointAddress
+	   from port 0. Communication out to the UX50/TH55 uses
+	   bulk_out_endpointAddress from port 1
+
+	   Lets do a quick and dirty mapping
+	 */
+
+	/* some sanity check */
+	if (serial->num_bulk_out < 2) {
+		dev_err(&serial->interface->dev, "missing bulk out endpoints\n");
+		return -ENODEV;
+	}
+
+	/* port 0 now uses the modified endpoint Address */
+	port = serial->port[0];
+	port->bulk_out_endpointAddress =
+				serial->port[1]->bulk_out_endpointAddress;
+
+	pipe = usb_sndbulkpipe(serial->dev, port->bulk_out_endpointAddress);
+	for (j = 0; j < ARRAY_SIZE(port->write_urbs); ++j)
+		port->write_urbs[j]->pipe = pipe;
+
+	return 0;
+}

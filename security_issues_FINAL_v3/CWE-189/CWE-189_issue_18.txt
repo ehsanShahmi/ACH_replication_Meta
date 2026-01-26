@@ -1,0 +1,154 @@
+The vulnerable issue: ARM: 6891/1: prevent heap corruption in OABI semtimedop
+
+When CONFIG_OABI_COMPAT is set, the wrapper for semtimedop does not
+bound the nsops argument.  A sufficiently large value will cause an
+integer overflow in allocation size, followed by copying too much data
+into the allocated buffer.  Fix this by restricting nsops to SEMOPM.
+Untested.
+
+Cc: stable@kernel.org
+Signed-off-by: Dan Rosenberg <drosenberg@vsecurity.com>
+Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>
+The vulnerable function: asmlinkage long sys_oabi_semtimedop(int semid,
+				    struct oabi_sembuf __user *tsops,
+				    unsigned nsops,
+				    const struct timespec __user *timeout)
+{
+	struct sembuf *sops;
+	struct timespec local_timeout;
+	long err;
+	int i;
+
+	if (nsops < 1)
+		return -EINVAL;
+	sops = kmalloc(sizeof(*sops) * nsops, GFP_KERNEL);
+	if (!sops)
+		return -ENOMEM;
+	err = 0;
+	for (i = 0; i < nsops; i++) {
+		__get_user_error(sops[i].sem_num, &tsops->sem_num, err);
+		__get_user_error(sops[i].sem_op,  &tsops->sem_op,  err);
+		__get_user_error(sops[i].sem_flg, &tsops->sem_flg, err);
+		tsops++;
+	}
+	if (timeout) {
+		/* copy this as well before changing domain protection */
+		err |= copy_from_user(&local_timeout, timeout, sizeof(*timeout));
+		timeout = &local_timeout;
+	}
+	if (err) {
+		err = -EFAULT;
+	} else {
+		mm_segment_t fs = get_fs();
+		set_fs(KERNEL_DS);
+		err = sys_semtimedop(semid, sops, nsops, timeout);
+		set_fs(fs);
+	}
+	kfree(sops);
+	return err;
+}
+The corrected function: static int ext4_ext_convert_to_initialized(handle_t *handle,
+					   struct inode *inode,
+					   struct ext4_map_blocks *map,
+					   struct ext4_ext_path *path)
+{
+	struct ext4_map_blocks split_map;
+	struct ext4_extent zero_ex;
+	struct ext4_extent *ex;
+	ext4_lblk_t ee_block, eof_block;
+	unsigned int allocated, ee_len, depth;
+	int err = 0;
+	int split_flag = 0;
+
+	ext_debug("ext4_ext_convert_to_initialized: inode %lu, logical"
+		"block %llu, max_blocks %u\n", inode->i_ino,
+		(unsigned long long)map->m_lblk, map->m_len);
+
+	eof_block = (inode->i_size + inode->i_sb->s_blocksize - 1) >>
+		inode->i_sb->s_blocksize_bits;
+	if (eof_block < map->m_lblk + map->m_len)
+		eof_block = map->m_lblk + map->m_len;
+
+	depth = ext_depth(inode);
+	ex = path[depth].p_ext;
+	ee_block = le32_to_cpu(ex->ee_block);
+	ee_len = ext4_ext_get_actual_len(ex);
+	allocated = ee_len - (map->m_lblk - ee_block);
+
+	WARN_ON(map->m_lblk < ee_block);
+	/*
+	 * It is safe to convert extent to initialized via explicit
+	 * zeroout only if extent is fully insde i_size or new_size.
+	 */
+	split_flag |= ee_block + ee_len <= eof_block ? EXT4_EXT_MAY_ZEROOUT : 0;
+
+	/* If extent has less than 2*EXT4_EXT_ZERO_LEN zerout directly */
+	if (ee_len <= 2*EXT4_EXT_ZERO_LEN &&
+	    (EXT4_EXT_MAY_ZEROOUT & split_flag)) {
+		err = ext4_ext_zeroout(inode, ex);
+		if (err)
+			goto out;
+
+		err = ext4_ext_get_access(handle, inode, path + depth);
+		if (err)
+			goto out;
+		ext4_ext_mark_initialized(ex);
+		ext4_ext_try_to_merge(inode, path, ex);
+		err = ext4_ext_dirty(handle, inode, path + depth);
+		goto out;
+	}
+
+	/*
+	 * four cases:
+	 * 1. split the extent into three extents.
+	 * 2. split the extent into two extents, zeroout the first half.
+	 * 3. split the extent into two extents, zeroout the second half.
+	 * 4. split the extent into two extents with out zeroout.
+	 */
+	split_map.m_lblk = map->m_lblk;
+	split_map.m_len = map->m_len;
+
+	if (allocated > map->m_len) {
+		if (allocated <= EXT4_EXT_ZERO_LEN &&
+		    (EXT4_EXT_MAY_ZEROOUT & split_flag)) {
+			/* case 3 */
+			zero_ex.ee_block =
+					 cpu_to_le32(map->m_lblk + map->m_len);
+			zero_ex.ee_len = cpu_to_le16(allocated - map->m_len);
+			ext4_ext_store_pblock(&zero_ex,
+				ext4_ext_pblock(ex) + map->m_lblk - ee_block);
+			err = ext4_ext_zeroout(inode, &zero_ex);
+			if (err)
+				goto out;
+			split_map.m_lblk = map->m_lblk;
+			split_map.m_len = allocated;
+		} else if ((map->m_lblk - ee_block + map->m_len <
+			   EXT4_EXT_ZERO_LEN) &&
+			   (EXT4_EXT_MAY_ZEROOUT & split_flag)) {
+			/* case 2 */
+			if (map->m_lblk != ee_block) {
+				zero_ex.ee_block = ex->ee_block;
+				zero_ex.ee_len = cpu_to_le16(map->m_lblk -
+							ee_block);
+				ext4_ext_store_pblock(&zero_ex,
+						      ext4_ext_pblock(ex));
+				err = ext4_ext_zeroout(inode, &zero_ex);
+				if (err)
+					goto out;
+			}
+
+			allocated = map->m_lblk - ee_block + map->m_len;
+
+			split_map.m_lblk = ee_block;
+			split_map.m_len = allocated;
+		}
+	}
+
+	allocated = ext4_split_extent(handle, inode, path,
+				       &split_map, split_flag, 0);
+	if (allocated < 0)
+		err = allocated;
+
+out:
+	return err ? err : allocated;
+}

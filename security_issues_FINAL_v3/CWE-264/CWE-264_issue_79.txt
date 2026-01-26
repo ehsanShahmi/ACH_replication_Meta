@@ -1,0 +1,53 @@
+The vulnerable issue: KVM: unmap pages from the iommu when slots are removed
+
+commit 32f6daad4651a748a58a3ab6da0611862175722f upstream.
+
+We've been adding new mappings, but not destroying old mappings.
+This can lead to a page leak as pages are pinned using
+get_user_pages, but only unpinned with put_page if they still
+exist in the memslots list on vm shutdown.  A memslot that is
+destroyed while an iommu domain is enabled for the guest will
+therefore result in an elevated page reference count that is
+never cleared.
+
+Additionally, without this fix, the iommu is only programmed
+with the first translation for a gpa.  This can result in
+peer-to-peer errors if a mapping is destroyed and replaced by a
+new mapping at the same gpa as the iommu will still be pointing
+to the original, pinned memory address.
+
+Signed-off-by: Alex Williamson <alex.williamson@redhat.com>
+Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+The vulnerable function: static int kvm_iommu_unmap_memslots(struct kvm *kvm)
+ {
+ 	int idx;
+	struct kvm_memslots *slots;
+	struct kvm_memory_slot *memslot;
+
+	idx = srcu_read_lock(&kvm->srcu);
+ 	slots = kvm_memslots(kvm);
+ 
+ 	kvm_for_each_memslot(memslot, slots)
+		kvm_iommu_put_pages(kvm, memslot->base_gfn, memslot->npages);
+ 
+ 	srcu_read_unlock(&kvm->srcu, idx);
+ 
+	return 0;
+}
+The corrected function: static int kvm_iommu_unmap_memslots(struct kvm *kvm)
+ {
+ 	int idx;
+	struct kvm_memslots *slots;
+	struct kvm_memory_slot *memslot;
+
+	idx = srcu_read_lock(&kvm->srcu);
+ 	slots = kvm_memslots(kvm);
+ 
+ 	kvm_for_each_memslot(memslot, slots)
+		kvm_iommu_unmap_pages(kvm, memslot);
+ 
+ 	srcu_read_unlock(&kvm->srcu, idx);
+ 
+	return 0;
+}

@@ -1,0 +1,105 @@
+The vulnerable issue: misc: sgi-gru: fix use-after-free error in gru_set_context_option, gru_fault and gru_handle_user_call_os
+
+In some bad situation, the gts may be freed gru_check_chiplet_assignment.
+The call chain can be gru_unload_context->gru_free_gru_context->gts_drop
+and kfree finally. However, the caller didn't know if the gts is freed
+or not and use it afterwards. This will trigger a Use after Free bug.
+
+Fix it by introducing a return value to see if it's in error path or not.
+Free the gts in caller if gru_check_chiplet_assignment check failed.
+
+Fixes: 55484c45dbec ("gru: allow users to specify gru chiplet 2")
+Signed-off-by: Zheng Wang <zyytlz.wz@163.com>
+Acked-by: Dimitri Sivanich <sivanich@hpe.com>
+Link: https://lore.kernel.org/r/20221110035033.19498-1-zyytlz.wz@163.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+The vulnerable function: int gru_handle_user_call_os(unsigned long cb)
+{
+	struct gru_tlb_fault_handle *tfh;
+	struct gru_thread_state *gts;
+	void *cbk;
+	int ucbnum, cbrnum, ret = -EINVAL;
+
+	STAT(call_os);
+
+	/* sanity check the cb pointer */
+	ucbnum = get_cb_number((void *)cb);
+	if ((cb & (GRU_HANDLE_STRIDE - 1)) || ucbnum >= GRU_NUM_CB)
+		return -EINVAL;
+
+	gts = gru_find_lock_gts(cb);
+	if (!gts)
+		return -EINVAL;
+	gru_dbg(grudev, "address 0x%lx, gid %d, gts 0x%p\n", cb, gts->ts_gru ? gts->ts_gru->gs_gid : -1, gts);
+
+	if (ucbnum >= gts->ts_cbr_au_count * GRU_CBR_AU_SIZE)
+		goto exit;
+
+	gru_check_context_placement(gts);
+
+	/*
+	 * CCH may contain stale data if ts_force_cch_reload is set.
+	 */
+	if (gts->ts_gru && gts->ts_force_cch_reload) {
+		gts->ts_force_cch_reload = 0;
+		gru_update_cch(gts);
+	}
+
+	ret = -EAGAIN;
+	cbrnum = thread_cbr_number(gts, ucbnum);
+	if (gts->ts_gru) {
+		tfh = get_tfh_by_index(gts->ts_gru, cbrnum);
+		cbk = get_gseg_base_address_cb(gts->ts_gru->gs_gru_base_vaddr,
+				gts->ts_ctxnum, ucbnum);
+		ret = gru_user_dropin(gts, tfh, cbk);
+	}
+exit:
+	gru_unlock_gts(gts);
+	return ret;
+}
+The corrected function: int gru_set_context_option(unsigned long arg)
+{
+	struct gru_thread_state *gts;
+	struct gru_set_context_option_req req;
+	int ret = 0;
+
+	STAT(set_context_option);
+	if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+		return -EFAULT;
+	gru_dbg(grudev, "op %d, gseg 0x%lx, value1 0x%lx\n", req.op, req.gseg, req.val1);
+
+	gts = gru_find_lock_gts(req.gseg);
+	if (!gts) {
+		gts = gru_alloc_locked_gts(req.gseg);
+		if (IS_ERR(gts))
+			return PTR_ERR(gts);
+	}
+
+	switch (req.op) {
+	case sco_blade_chiplet:
+		/* Select blade/chiplet for GRU context */
+		if (req.val0 < -1 || req.val0 >= GRU_CHIPLETS_PER_HUB ||
+		    req.val1 < -1 || req.val1 >= GRU_MAX_BLADES ||
+		    (req.val1 >= 0 && !gru_base[req.val1])) {
+			ret = -EINVAL;
+		} else {
+			gts->ts_user_blade_id = req.val1;
+			gts->ts_user_chiplet_id = req.val0;
+			gru_check_context_placement(gts);
+		}
+		break;
+	case sco_gseg_owner:
+ 		/* Register the current task as the GSEG owner */
+		gts->ts_tgid_owner = current->tgid;
+		break;
+	case sco_cch_req_slice:
+ 		/* Set the CCH slice option */
+		gts->ts_cch_req_slice = req.val1 & 3;
+		break;
+	default:
+		ret = -EINVAL;
+	}
+	gru_unlock_gts(gts);
+
+	return ret;
+}

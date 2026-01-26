@@ -1,0 +1,337 @@
+The vulnerable issue: NFS: fs_context: validate UDP retrans to prevent shift out-of-bounds
+
+Fix shift out-of-bounds in xprt_calc_majortimeo(). This is caused
+by a garbage timeout (retrans) mount option being passed to nfs mount,
+in this case from syzkaller.
+
+If the protocol is XPRT_TRANSPORT_UDP, then 'retrans' is a shift
+value for a 64-bit long integer, so 'retrans' cannot be >= 64.
+If it is >= 64, fail the mount and return an error.
+
+Fixes: 9954bf92c0cd ("NFS: Move mount parameterisation bits into their own file")
+Reported-by: syzbot+ba2e91df8f74809417fa@syzkaller.appspotmail.com
+Reported-by: syzbot+f3a0fa110fd630ab56c8@syzkaller.appspotmail.com
+Signed-off-by: Randy Dunlap <rdunlap@infradead.org>
+Cc: Trond Myklebust <trond.myklebust@hammerspace.com>
+Cc: Anna Schumaker <anna.schumaker@netapp.com>
+Cc: linux-nfs@vger.kernel.org
+Cc: David Howells <dhowells@redhat.com>
+Cc: Al Viro <viro@zeniv.linux.org.uk>
+Cc: stable@vger.kernel.org
+Signed-off-by: Trond Myklebust <trond.myklebust@hammerspace.com>
+The vulnerable function: static int nfs23_parse_monolithic(struct fs_context *fc,
+				  struct nfs_mount_data *data)
+{
+	struct nfs_fs_context *ctx = nfs_fc2context(fc);
+	struct nfs_fh *mntfh = ctx->mntfh;
+	struct sockaddr *sap = (struct sockaddr *)&ctx->nfs_server.address;
+	int extra_flags = NFS_MOUNT_LEGACY_INTERFACE;
+
+	if (data == NULL)
+		goto out_no_data;
+
+	ctx->version = NFS_DEFAULT_VERSION;
+	switch (data->version) {
+	case 1:
+		data->namlen = 0;
+		fallthrough;
+	case 2:
+		data->bsize = 0;
+		fallthrough;
+	case 3:
+		if (data->flags & NFS_MOUNT_VER3)
+			goto out_no_v3;
+		data->root.size = NFS2_FHSIZE;
+		memcpy(data->root.data, data->old_root.data, NFS2_FHSIZE);
+		/* Turn off security negotiation */
+		extra_flags |= NFS_MOUNT_SECFLAVOUR;
+		fallthrough;
+	case 4:
+		if (data->flags & NFS_MOUNT_SECFLAVOUR)
+			goto out_no_sec;
+		fallthrough;
+	case 5:
+		memset(data->context, 0, sizeof(data->context));
+		fallthrough;
+	case 6:
+		if (data->flags & NFS_MOUNT_VER3) {
+			if (data->root.size > NFS3_FHSIZE || data->root.size == 0)
+				goto out_invalid_fh;
+			mntfh->size = data->root.size;
+			ctx->version = 3;
+		} else {
+			mntfh->size = NFS2_FHSIZE;
+			ctx->version = 2;
+		}
+
+
+		memcpy(mntfh->data, data->root.data, mntfh->size);
+		if (mntfh->size < sizeof(mntfh->data))
+			memset(mntfh->data + mntfh->size, 0,
+			       sizeof(mntfh->data) - mntfh->size);
+
+		/*
+		 * Translate to nfs_fs_context, which nfs_fill_super
+		 * can deal with.
+		 */
+		ctx->flags	= data->flags & NFS_MOUNT_FLAGMASK;
+		ctx->flags	|= extra_flags;
+		ctx->rsize	= data->rsize;
+		ctx->wsize	= data->wsize;
+		ctx->timeo	= data->timeo;
+		ctx->retrans	= data->retrans;
+		ctx->acregmin	= data->acregmin;
+		ctx->acregmax	= data->acregmax;
+		ctx->acdirmin	= data->acdirmin;
+		ctx->acdirmax	= data->acdirmax;
+		ctx->need_mount	= false;
+
+		memcpy(sap, &data->addr, sizeof(data->addr));
+		ctx->nfs_server.addrlen = sizeof(data->addr);
+		ctx->nfs_server.port = ntohs(data->addr.sin_port);
+		if (sap->sa_family != AF_INET ||
+		    !nfs_verify_server_address(sap))
+			goto out_no_address;
+
+		if (!(data->flags & NFS_MOUNT_TCP))
+			ctx->nfs_server.protocol = XPRT_TRANSPORT_UDP;
+		/* N.B. caller will free nfs_server.hostname in all cases */
+		ctx->nfs_server.hostname = kstrdup(data->hostname, GFP_KERNEL);
+		if (!ctx->nfs_server.hostname)
+			goto out_nomem;
+
+		ctx->namlen		= data->namlen;
+		ctx->bsize		= data->bsize;
+
+		if (data->flags & NFS_MOUNT_SECFLAVOUR)
+			ctx->selected_flavor = data->pseudoflavor;
+		else
+			ctx->selected_flavor = RPC_AUTH_UNIX;
+
+		if (!(data->flags & NFS_MOUNT_NONLM))
+			ctx->flags &= ~(NFS_MOUNT_LOCAL_FLOCK|
+					 NFS_MOUNT_LOCAL_FCNTL);
+		else
+			ctx->flags |= (NFS_MOUNT_LOCAL_FLOCK|
+					NFS_MOUNT_LOCAL_FCNTL);
+
+		/*
+		 * The legacy version 6 binary mount data from userspace has a
+		 * field used only to transport selinux information into the
+		 * kernel.  To continue to support that functionality we
+		 * have a touch of selinux knowledge here in the NFS code. The
+		 * userspace code converted context=blah to just blah so we are
+		 * converting back to the full string selinux understands.
+		 */
+		if (data->context[0]){
+// #ifdef CONFIG_SECURITY_SELINUX
+			int ret;
+
+			data->context[NFS_MAX_CONTEXT_LEN] = '\0';
+			ret = vfs_parse_fs_string(fc, "context",
+						  data->context, strlen(data->context));
+			if (ret < 0)
+				return ret;
+#else
+			return -EINVAL;
+#endif
+		}
+
+		break;
+	default:
+		goto generic;
+	}
+
+	ctx->skip_reconfig_option_check = true;
+	return 0;
+
+generic:
+	return generic_parse_monolithic(fc, data);
+
+out_no_data:
+	if (is_remount_fc(fc)) {
+		ctx->skip_reconfig_option_check = true;
+		return 0;
+	}
+	return nfs_invalf(fc, "NFS: mount program didn't pass any mount data");
+
+out_no_v3:
+	return nfs_invalf(fc, "NFS: nfs_mount_data version does not support v3");
+
+out_no_sec:
+	return nfs_invalf(fc, "NFS: nfs_mount_data version supports only AUTH_SYS");
+
+out_nomem:
+	dfprintk(MOUNT, "NFS: not enough memory to handle mount options");
+	return -ENOMEM;
+
+out_no_address:
+	return nfs_invalf(fc, "NFS: mount program didn't pass remote address");
+
+out_invalid_fh:
+	return nfs_invalf(fc, "NFS: invalid root filehandle");
+}
+The corrected function: static int nfs23_parse_monolithic(struct fs_context *fc,
+				  struct nfs_mount_data *data)
+{
+	struct nfs_fs_context *ctx = nfs_fc2context(fc);
+	struct nfs_fh *mntfh = ctx->mntfh;
+	struct sockaddr *sap = (struct sockaddr *)&ctx->nfs_server.address;
+	int extra_flags = NFS_MOUNT_LEGACY_INTERFACE;
+
+	if (data == NULL)
+		goto out_no_data;
+
+	ctx->version = NFS_DEFAULT_VERSION;
+	switch (data->version) {
+	case 1:
+		data->namlen = 0;
+		fallthrough;
+	case 2:
+		data->bsize = 0;
+		fallthrough;
+	case 3:
+		if (data->flags & NFS_MOUNT_VER3)
+			goto out_no_v3;
+		data->root.size = NFS2_FHSIZE;
+		memcpy(data->root.data, data->old_root.data, NFS2_FHSIZE);
+		/* Turn off security negotiation */
+		extra_flags |= NFS_MOUNT_SECFLAVOUR;
+		fallthrough;
+	case 4:
+		if (data->flags & NFS_MOUNT_SECFLAVOUR)
+			goto out_no_sec;
+		fallthrough;
+	case 5:
+		memset(data->context, 0, sizeof(data->context));
+		fallthrough;
+	case 6:
+		if (data->flags & NFS_MOUNT_VER3) {
+			if (data->root.size > NFS3_FHSIZE || data->root.size == 0)
+				goto out_invalid_fh;
+			mntfh->size = data->root.size;
+			ctx->version = 3;
+		} else {
+			mntfh->size = NFS2_FHSIZE;
+			ctx->version = 2;
+		}
+
+
+		memcpy(mntfh->data, data->root.data, mntfh->size);
+		if (mntfh->size < sizeof(mntfh->data))
+			memset(mntfh->data + mntfh->size, 0,
+			       sizeof(mntfh->data) - mntfh->size);
+
+		/*
+		 * for proto == XPRT_TRANSPORT_UDP, which is what uses
+		 * to_exponential, implying shift: limit the shift value
+		 * to BITS_PER_LONG (majortimeo is unsigned long)
+		 */
+		if (!(data->flags & NFS_MOUNT_TCP)) /* this will be UDP */
+			if (data->retrans >= 64) /* shift value is too large */
+				goto out_invalid_data;
+
+		/*
+		 * Translate to nfs_fs_context, which nfs_fill_super
+		 * can deal with.
+		 */
+		ctx->flags	= data->flags & NFS_MOUNT_FLAGMASK;
+		ctx->flags	|= extra_flags;
+		ctx->rsize	= data->rsize;
+		ctx->wsize	= data->wsize;
+		ctx->timeo	= data->timeo;
+		ctx->retrans	= data->retrans;
+		ctx->acregmin	= data->acregmin;
+		ctx->acregmax	= data->acregmax;
+		ctx->acdirmin	= data->acdirmin;
+		ctx->acdirmax	= data->acdirmax;
+		ctx->need_mount	= false;
+
+		memcpy(sap, &data->addr, sizeof(data->addr));
+		ctx->nfs_server.addrlen = sizeof(data->addr);
+		ctx->nfs_server.port = ntohs(data->addr.sin_port);
+		if (sap->sa_family != AF_INET ||
+		    !nfs_verify_server_address(sap))
+			goto out_no_address;
+
+		if (!(data->flags & NFS_MOUNT_TCP))
+			ctx->nfs_server.protocol = XPRT_TRANSPORT_UDP;
+		/* N.B. caller will free nfs_server.hostname in all cases */
+		ctx->nfs_server.hostname = kstrdup(data->hostname, GFP_KERNEL);
+		if (!ctx->nfs_server.hostname)
+			goto out_nomem;
+
+		ctx->namlen		= data->namlen;
+		ctx->bsize		= data->bsize;
+
+		if (data->flags & NFS_MOUNT_SECFLAVOUR)
+			ctx->selected_flavor = data->pseudoflavor;
+		else
+			ctx->selected_flavor = RPC_AUTH_UNIX;
+
+		if (!(data->flags & NFS_MOUNT_NONLM))
+			ctx->flags &= ~(NFS_MOUNT_LOCAL_FLOCK|
+					 NFS_MOUNT_LOCAL_FCNTL);
+		else
+			ctx->flags |= (NFS_MOUNT_LOCAL_FLOCK|
+					NFS_MOUNT_LOCAL_FCNTL);
+
+		/*
+		 * The legacy version 6 binary mount data from userspace has a
+		 * field used only to transport selinux information into the
+		 * kernel.  To continue to support that functionality we
+		 * have a touch of selinux knowledge here in the NFS code. The
+		 * userspace code converted context=blah to just blah so we are
+		 * converting back to the full string selinux understands.
+		 */
+		if (data->context[0]){
+// #ifdef CONFIG_SECURITY_SELINUX
+			int ret;
+
+			data->context[NFS_MAX_CONTEXT_LEN] = '\0';
+			ret = vfs_parse_fs_string(fc, "context",
+						  data->context, strlen(data->context));
+			if (ret < 0)
+				return ret;
+#else
+			return -EINVAL;
+#endif
+		}
+
+		break;
+	default:
+		goto generic;
+	}
+
+	ctx->skip_reconfig_option_check = true;
+	return 0;
+
+generic:
+	return generic_parse_monolithic(fc, data);
+
+out_no_data:
+	if (is_remount_fc(fc)) {
+		ctx->skip_reconfig_option_check = true;
+		return 0;
+	}
+	return nfs_invalf(fc, "NFS: mount program didn't pass any mount data");
+
+out_no_v3:
+	return nfs_invalf(fc, "NFS: nfs_mount_data version does not support v3");
+
+out_no_sec:
+	return nfs_invalf(fc, "NFS: nfs_mount_data version supports only AUTH_SYS");
+
+out_nomem:
+	dfprintk(MOUNT, "NFS: not enough memory to handle mount options");
+	return -ENOMEM;
+
+out_no_address:
+	return nfs_invalf(fc, "NFS: mount program didn't pass remote address");
+
+out_invalid_fh:
+	return nfs_invalf(fc, "NFS: invalid root filehandle");
+
+out_invalid_data:
+	return nfs_invalf(fc, "NFS: invalid binary mount data");
+}

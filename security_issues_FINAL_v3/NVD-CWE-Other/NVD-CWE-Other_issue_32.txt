@@ -1,0 +1,60 @@
+The vulnerable issue: xfrm_user: return error pointer instead of NULL
+
+When dump_one_state() returns an error, e.g. because of a too small
+buffer to dump the whole xfrm state, xfrm_state_netlink() returns NULL
+instead of an error pointer. But its callers expect an error pointer
+and therefore continue to operate on a NULL skbuff.
+
+This could lead to a privilege escalation (execution of user code in
+kernel context) if the attacker has CAP_NET_ADMIN and is able to map
+address 0.
+
+Signed-off-by: Mathias Krause <minipli@googlemail.com>
+Acked-by: Steffen Klassert <steffen.klassert@secunet.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: static struct sk_buff *xfrm_state_netlink(struct sk_buff *in_skb,
+					  struct xfrm_state *x, u32 seq)
+{
+	struct xfrm_dump_info info;
+	struct sk_buff *skb;
+
+	skb = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_ATOMIC);
+	if (!skb)
+		return ERR_PTR(-ENOMEM);
+
+	info.in_skb = in_skb;
+	info.out_skb = skb;
+	info.nlmsg_seq = seq;
+	info.nlmsg_flags = 0;
+
+	if (dump_one_state(x, 0, &info)) {
+		kfree_skb(skb);
+		return NULL;
+	}
+
+	return skb;
+}
+The corrected function: static struct sk_buff *xfrm_state_netlink(struct sk_buff *in_skb,
+					  struct xfrm_state *x, u32 seq)
+{
+	struct xfrm_dump_info info;
+	struct sk_buff *skb;
+	int err;
+
+	skb = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_ATOMIC);
+	if (!skb)
+		return ERR_PTR(-ENOMEM);
+
+	info.in_skb = in_skb;
+	info.out_skb = skb;
+	info.nlmsg_seq = seq;
+	info.nlmsg_flags = 0;
+
+	err = dump_one_state(x, 0, &info);
+	if (err) {
+		kfree_skb(skb);
+		return ERR_PTR(err);
+	}
+
+	return skb;
+}

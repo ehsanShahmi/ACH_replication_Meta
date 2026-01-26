@@ -1,0 +1,28 @@
+The vulnerable issue: iommu/arm-smmu-v3: Don't unregister on shutdown
+
+Similar to SMMUv2, this driver calls iommu_device_unregister() from the
+shutdown path, which removes the IOMMU groups with no coordination
+whatsoever with their users - shutdown methods are optional in device
+drivers. This can lead to NULL pointer dereferences in those drivers'
+DMA API calls, or worse.
+
+Instead of calling the full arm_smmu_device_remove() from
+arm_smmu_device_shutdown(), let's pick only the relevant function call -
+arm_smmu_device_disable() - more or less the reverse of
+arm_smmu_device_reset() - and call just that from the shutdown path.
+
+Fixes: 57365a04c921 ("iommu: Move bus setup to IOMMU device registration")
+Suggested-by: Robin Murphy <robin.murphy@arm.com>
+Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+Link: https://lore.kernel.org/r/20221215141251.3688780-2-vladimir.oltean@nxp.com
+Signed-off-by: Will Deacon <will@kernel.org>
+The vulnerable function: static void arm_smmu_device_shutdown(struct platform_device *pdev)
+{
+	arm_smmu_device_remove(pdev);
+}
+The corrected function: static void arm_smmu_device_shutdown(struct platform_device *pdev)
+{
+	struct arm_smmu_device *smmu = platform_get_drvdata(pdev);
+
+	arm_smmu_device_disable(smmu);
+}

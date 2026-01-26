@@ -1,0 +1,13 @@
+acpi: Disable ACPI table override if securelevel is set
+
+From the kernel documentation (initrd_table_override.txt):
+
+  If the ACPI_INITRD_TABLE_OVERRIDE compile option is true, it is possible
+  to override nearly any ACPI table provided by the BIOS with an
+  instrumented, modified one.
+
+When securelevel is set, the kernel should disallow any unauthenticated
+changes to kernel space. ACPI tables contain code invoked by the kernel, so
+do not allow ACPI tables to be overridden if securelevel is set.
+
+Signed-off-by: Linn Crosetto <linn@hpe.com>

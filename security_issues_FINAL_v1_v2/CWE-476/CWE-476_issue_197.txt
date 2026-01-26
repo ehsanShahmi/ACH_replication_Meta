@@ -1,0 +1,10 @@
+drm/qxl: Add check for drm_cvt_mode
+
+Add check for the return value of drm_cvt_mode() and return the error if
+it fails in order to avoid NULL pointer dereference.
+
+Fixes: 1b043677d4be ("drm/qxl: add qxl_add_mode helper function")
+Signed-off-by: Chen Ni <nichen@iscas.ac.cn>
+Reviewed-by: Heng Qi <hengqi@linux.alibaba.com>
+Signed-off-by: Maxime Ripard <mripard@kernel.org>
+Link: https://patchwork.freedesktop.org/patch/msgid/20240621071031.1987974-1-nichen@iscas.ac.cn

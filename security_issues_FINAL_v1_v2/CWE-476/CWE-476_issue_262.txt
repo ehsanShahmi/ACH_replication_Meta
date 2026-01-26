@@ -1,0 +1,10 @@
+mmc: mmc_test: Fix NULL dereference on allocation failure
+
+If the "test->highmem = alloc_pages()" allocation fails then calling
+__free_pages(test->highmem) will result in a NULL dereference.  Also
+change the error code to -ENOMEM instead of returning success.
+
+Fixes: 2661081f5ab9 ("mmc_test: highmem tests")
+Signed-off-by: Dan Carpenter <dan.carpenter@linaro.org>
+Link: https://lore.kernel.org/r/8c90be28-67b4-4b0d-a105-034dc72a0b31@stanley.mountain
+Signed-off-by: Ulf Hansson <ulf.hansson@linaro.org>

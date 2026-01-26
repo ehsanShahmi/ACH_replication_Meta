@@ -1,0 +1,13 @@
+KVM: Validate userspace_addr of memslot when registered
+
+This way, we can avoid checking the user space address many times when
+we read the guest memory.
+
+Although we can do the same for write if we check which slots are
+writable, we do not care write now: reading the guest memory happens
+more often than writing.
+
+[avi: change VERIFY_READ to VERIFY_WRITE]
+
+Signed-off-by: Takuya Yoshikawa <yoshikawa.takuya@oss.ntt.co.jp>
+Signed-off-by: Avi Kivity <avi@redhat.com>

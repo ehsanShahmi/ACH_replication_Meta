@@ -1,0 +1,24 @@
+The vulnerable issue: get rid of s_files and files_lock
+
+The only thing we need it for is alt-sysrq-r (emergency remount r/o)
+and these days we can do just as well without going through the
+list of files.
+
+Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+The vulnerable function: void __fput_sync(struct file *file)
+{
+	if (atomic_long_dec_and_test(&file->f_count)) {
+		struct task_struct *task = current;
+		file_sb_list_del(file);
+		BUG_ON(!(task->flags & PF_KTHREAD));
+		__fput(file);
+	}
+}
+The corrected function: static inline int file_list_cpu(struct file *file)
+{
+#ifdef CONFIG_SMP
+	return file->f_sb_list_cpu;
+#else
+	return smp_processor_id();
+#endif
+}

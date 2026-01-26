@@ -1,0 +1,1 @@
+drm/virtio: Fix NULL vs IS_ERR checking in virtio_gpu_object_shmem_init  Since drm_prime_pages_to_sg() function return error pointers. The drm_gem_shmem_get_sg_table() function returns error pointers too.

@@ -1,0 +1,79 @@
+The vulnerable issue: kernel/signal.c: stop info leak via the tkill and the tgkill syscalls
+
+This fixes a kernel memory contents leak via the tkill and tgkill syscalls
+for compat processes.
+
+This is visible in the siginfo_t->_sifields._rt.si_sigval.sival_ptr field
+when handling signals delivered from tkill.
+
+The place of the infoleak:
+
+int copy_siginfo_to_user32(compat_siginfo_t __user *to, siginfo_t *from)
+{
+        ...
+        put_user_ex(ptr_to_compat(from->si_ptr), &to->si_ptr);
+        ...
+}
+
+Signed-off-by: Emese Revfy <re.emese@gmail.com>
+Reviewed-by: PaX Team <pageexec@freemail.hu>
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Cc: Al Viro <viro@zeniv.linux.org.uk>
+Cc: Oleg Nesterov <oleg@redhat.com>
+Cc: "Eric W. Biederman" <ebiederm@xmission.com>
+Cc: Serge Hallyn <serge.hallyn@canonical.com>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+The vulnerable function: static int do_tkill(pid_t tgid, pid_t pid, int sig)
+{
+	struct siginfo info;
+
+	info.si_signo = sig;
+	info.si_errno = 0;
+	info.si_code = SI_TKILL;
+	info.si_pid = task_tgid_vnr(current);
+	info.si_uid = from_kuid_munged(current_user_ns(), current_uid());
+
+	return do_send_specific(tgid, pid, sig, &info);
+}
+The corrected function: fb_mmap(struct file *file, struct vm_area_struct * vma)
+{
+	struct fb_info *info = file_fb_info(file);
+	struct fb_ops *fb;
+	unsigned long mmio_pgoff;
+	unsigned long start;
+	u32 len;
+
+	if (!info)
+		return -ENODEV;
+	fb = info->fbops;
+	if (!fb)
+		return -ENODEV;
+	mutex_lock(&info->mm_lock);
+	if (fb->fb_mmap) {
+		int res;
+		res = fb->fb_mmap(info, vma);
+		mutex_unlock(&info->mm_lock);
+		return res;
+	}
+
+	/*
+	 * Ugh. This can be either the frame buffer mapping, or
+	 * if pgoff points past it, the mmio mapping.
+	 */
+	start = info->fix.smem_start;
+	len = info->fix.smem_len;
+	mmio_pgoff = PAGE_ALIGN((start & ~PAGE_MASK) + len) >> PAGE_SHIFT;
+	if (vma->vm_pgoff >= mmio_pgoff) {
+		vma->vm_pgoff -= mmio_pgoff;
+		start = info->fix.mmio_start;
+		len = info->fix.mmio_len;
+	}
+	mutex_unlock(&info->mm_lock);
+
+	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+	fb_pgprotect(file, vma, start);
+
+	return vm_iomap_memory(vma, start, len);
+}

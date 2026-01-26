@@ -1,0 +1,10 @@
+wifi: wilc1000: validate pairwise and authentication suite offsets
+
+There is no validation of 'offset' which can trigger an out-of-bounds
+read when extracting RSN capabilities.
+
+Signed-off-by: Phil Turnbull <philipturnbull@github.com>
+Tested-by: Ajay Kathat <ajay.kathat@microchip.com>
+Acked-by: Ajay Kathat <ajay.kathat@microchip.com>
+Signed-off-by: Kalle Valo <kvalo@kernel.org>
+Link: https://lore.kernel.org/r/20221123153543.8568-2-philipturnbull@github.com

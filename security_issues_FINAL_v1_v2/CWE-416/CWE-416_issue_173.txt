@@ -1,0 +1,17 @@
+wifi: ath12k: fix htt mlo-offset event locking
+
+The ath12k active pdevs are protected by RCU but the htt mlo-offset
+event handling code calling ath12k_mac_get_ar_by_pdev_id() was not
+marked as a read-side critical section.
+
+Mark the code in question as an RCU read-side critical section to avoid
+any potential use-after-free issues.
+
+Compile tested only.
+
+Fixes: d889913205cf ("wifi: ath12k: driver for Qualcomm Wi-Fi 7 devices")
+Cc: stable@vger.kernel.org      # v6.2
+Signed-off-by: Johan Hovold <johan+linaro@kernel.org>
+Acked-by: Jeff Johnson <quic_jjohnson@quicinc.com>
+Signed-off-by: Kalle Valo <quic_kvalo@quicinc.com>
+Link: https://lore.kernel.org/r/20231019113650.9060-3-johan+linaro@kernel.org

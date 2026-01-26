@@ -1,0 +1,213 @@
+The vulnerable issue: soc: qcom: pmic_glink: Fix race during initialization
+
+As pointed out by Stephen Boyd it is possible that during initialization
+of the pmic_glink child drivers, the protection-domain notifiers fires,
+and the associated work is scheduled, before the client registration
+returns and as a result the local "client" pointer has been initialized.
+
+The outcome of this is a NULL pointer dereference as the "client"
+pointer is blindly dereferenced.
+
+Timeline provided by Stephen:
+ CPU0                               CPU1
+ ----                               ----
+ ucsi->client = NULL;
+ devm_pmic_glink_register_client()
+  client->pdr_notify(client->priv, pg->client_state)
+   pmic_glink_ucsi_pdr_notify()
+    schedule_work(&ucsi->register_work)
+    <schedule away>
+                                    pmic_glink_ucsi_register()
+                                     ucsi_register()
+                                      pmic_glink_ucsi_read_version()
+                                       pmic_glink_ucsi_read()
+                                        pmic_glink_ucsi_read()
+                                         pmic_glink_send(ucsi->client)
+                                         <client is NULL BAD>
+ ucsi->client = client // Too late!
+
+This code is identical across the altmode, battery manager and usci
+child drivers.
+
+Resolve this by splitting the allocation of the "client" object and the
+registration thereof into two operations.
+
+This only happens if the protection domain registry is populated at the
+time of registration, which by the introduction of commit '1ebcde047c54
+("soc: qcom: add pd-mapper implementation")' became much more likely.
+
+Reported-by: Amit Pundir <amit.pundir@linaro.org>
+Closes: https://lore.kernel.org/all/CAMi1Hd2_a7TjA7J9ShrAbNOd_CoZ3D87twmO5t+nZxC9sX18tA@mail.gmail.com/
+Reported-by: Johan Hovold <johan@kernel.org>
+Closes: https://lore.kernel.org/all/ZqiyLvP0gkBnuekL@hovoldconsulting.com/
+Reported-by: Stephen Boyd <swboyd@chromium.org>
+Closes: https://lore.kernel.org/all/CAE-0n52JgfCBWiFQyQWPji8cq_rCsviBpW-m72YitgNfdaEhQg@mail.gmail.com/
+Fixes: 58ef4ece1e41 ("soc: qcom: pmic_glink: Introduce base PMIC GLINK driver")
+Cc: stable@vger.kernel.org
+Reviewed-by: Heikki Krogerus <heikki.krogerus@linux.intel.com>
+Reviewed-by: Neil Armstrong <neil.armstrong@linaro.org>
+Tested-by: Amit Pundir <amit.pundir@linaro.org>
+Reviewed-by: Johan Hovold <johan+linaro@kernel.org>
+Acked-by: Sebastian Reichel <sebastian.reichel@collabora.com>
+Tested-by: Johan Hovold <johan+linaro@kernel.org>
+Signed-off-by: Bjorn Andersson <quic_bjorande@quicinc.com>
+Link: https://lore.kernel.org/r/20240820-pmic-glink-v6-11-races-v3-1-eec53c750a04@quicinc.com
+Signed-off-by: Bjorn Andersson <andersson@kernel.org>
+The vulnerable function: static int qcom_battmgr_probe(struct auxiliary_device *adev,
+			      const struct auxiliary_device_id *id)
+{
+	struct power_supply_config psy_cfg_supply = {};
+	struct power_supply_config psy_cfg = {};
+	const struct of_device_id *match;
+	struct qcom_battmgr *battmgr;
+	struct device *dev = &adev->dev;
+
+	battmgr = devm_kzalloc(dev, sizeof(*battmgr), GFP_KERNEL);
+	if (!battmgr)
+		return -ENOMEM;
+
+	battmgr->dev = dev;
+
+	psy_cfg.drv_data = battmgr;
+	psy_cfg.of_node = adev->dev.of_node;
+
+	psy_cfg_supply.drv_data = battmgr;
+	psy_cfg_supply.of_node = adev->dev.of_node;
+	psy_cfg_supply.supplied_to = qcom_battmgr_battery;
+	psy_cfg_supply.num_supplicants = 1;
+
+	INIT_WORK(&battmgr->enable_work, qcom_battmgr_enable_worker);
+	mutex_init(&battmgr->lock);
+	init_completion(&battmgr->ack);
+
+	match = of_match_device(qcom_battmgr_of_variants, dev->parent);
+	if (match)
+		battmgr->variant = (unsigned long)match->data;
+	else
+		battmgr->variant = QCOM_BATTMGR_SM8350;
+
+	if (battmgr->variant == QCOM_BATTMGR_SC8280XP) {
+		battmgr->bat_psy = devm_power_supply_register(dev, &sc8280xp_bat_psy_desc, &psy_cfg);
+		if (IS_ERR(battmgr->bat_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->bat_psy),
+					     "failed to register battery power supply\n");
+
+		battmgr->ac_psy = devm_power_supply_register(dev, &sc8280xp_ac_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->ac_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->ac_psy),
+					     "failed to register AC power supply\n");
+
+		battmgr->usb_psy = devm_power_supply_register(dev, &sc8280xp_usb_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->usb_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->usb_psy),
+					     "failed to register USB power supply\n");
+
+		battmgr->wls_psy = devm_power_supply_register(dev, &sc8280xp_wls_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->wls_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->wls_psy),
+					     "failed to register wireless charing power supply\n");
+	} else {
+		battmgr->bat_psy = devm_power_supply_register(dev, &sm8350_bat_psy_desc, &psy_cfg);
+		if (IS_ERR(battmgr->bat_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->bat_psy),
+					     "failed to register battery power supply\n");
+
+		battmgr->usb_psy = devm_power_supply_register(dev, &sm8350_usb_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->usb_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->usb_psy),
+					     "failed to register USB power supply\n");
+
+		battmgr->wls_psy = devm_power_supply_register(dev, &sm8350_wls_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->wls_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->wls_psy),
+					     "failed to register wireless charing power supply\n");
+	}
+
+	battmgr->client = devm_pmic_glink_register_client(dev,
+							  PMIC_GLINK_OWNER_BATTMGR,
+							  qcom_battmgr_callback,
+							  qcom_battmgr_pdr_notify,
+							  battmgr);
+	return PTR_ERR_OR_ZERO(battmgr->client);
+}
+The corrected function: static int qcom_battmgr_probe(struct auxiliary_device *adev,
+			      const struct auxiliary_device_id *id)
+{
+	struct power_supply_config psy_cfg_supply = {};
+	struct power_supply_config psy_cfg = {};
+	const struct of_device_id *match;
+	struct qcom_battmgr *battmgr;
+	struct device *dev = &adev->dev;
+
+	battmgr = devm_kzalloc(dev, sizeof(*battmgr), GFP_KERNEL);
+	if (!battmgr)
+		return -ENOMEM;
+
+	battmgr->dev = dev;
+
+	psy_cfg.drv_data = battmgr;
+	psy_cfg.of_node = adev->dev.of_node;
+
+	psy_cfg_supply.drv_data = battmgr;
+	psy_cfg_supply.of_node = adev->dev.of_node;
+	psy_cfg_supply.supplied_to = qcom_battmgr_battery;
+	psy_cfg_supply.num_supplicants = 1;
+
+	INIT_WORK(&battmgr->enable_work, qcom_battmgr_enable_worker);
+	mutex_init(&battmgr->lock);
+	init_completion(&battmgr->ack);
+
+	match = of_match_device(qcom_battmgr_of_variants, dev->parent);
+	if (match)
+		battmgr->variant = (unsigned long)match->data;
+	else
+		battmgr->variant = QCOM_BATTMGR_SM8350;
+
+	if (battmgr->variant == QCOM_BATTMGR_SC8280XP) {
+		battmgr->bat_psy = devm_power_supply_register(dev, &sc8280xp_bat_psy_desc, &psy_cfg);
+		if (IS_ERR(battmgr->bat_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->bat_psy),
+					     "failed to register battery power supply\n");
+
+		battmgr->ac_psy = devm_power_supply_register(dev, &sc8280xp_ac_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->ac_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->ac_psy),
+					     "failed to register AC power supply\n");
+
+		battmgr->usb_psy = devm_power_supply_register(dev, &sc8280xp_usb_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->usb_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->usb_psy),
+					     "failed to register USB power supply\n");
+
+		battmgr->wls_psy = devm_power_supply_register(dev, &sc8280xp_wls_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->wls_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->wls_psy),
+					     "failed to register wireless charing power supply\n");
+	} else {
+		battmgr->bat_psy = devm_power_supply_register(dev, &sm8350_bat_psy_desc, &psy_cfg);
+		if (IS_ERR(battmgr->bat_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->bat_psy),
+					     "failed to register battery power supply\n");
+
+		battmgr->usb_psy = devm_power_supply_register(dev, &sm8350_usb_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->usb_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->usb_psy),
+					     "failed to register USB power supply\n");
+
+		battmgr->wls_psy = devm_power_supply_register(dev, &sm8350_wls_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->wls_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->wls_psy),
+					     "failed to register wireless charing power supply\n");
+	}
+
+	battmgr->client = devm_pmic_glink_client_alloc(dev, PMIC_GLINK_OWNER_BATTMGR,
+						       qcom_battmgr_callback,
+						       qcom_battmgr_pdr_notify,
+						       battmgr);
+	if (IS_ERR(battmgr->client))
+		return PTR_ERR(battmgr->client);
+
+	pmic_glink_client_register(battmgr->client);
+
+	return 0;
+}

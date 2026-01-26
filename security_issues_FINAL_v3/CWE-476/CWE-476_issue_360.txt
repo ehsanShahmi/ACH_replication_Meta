@@ -1,0 +1,203 @@
+The vulnerable issue: drm/amdgpu: Fix smatch static checker warning
+
+adev->gfx.imu.funcs could be NULL
+
+Signed-off-by: Hawking Zhang <Hawking.Zhang@amd.com>
+Reviewed-by: Likun Gao <Likun.Gao@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+The vulnerable function: static int gfx_v11_0_hw_init(void *handle)
+{
+	int r;
+	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+
+	if (adev->firmware.load_type == AMDGPU_FW_LOAD_RLC_BACKDOOR_AUTO) {
+		if (adev->gfx.imu.funcs) {
+			/* RLC autoload sequence 1: Program rlc ram */
+			if (adev->gfx.imu.funcs->program_rlc_ram)
+				adev->gfx.imu.funcs->program_rlc_ram(adev);
+		}
+		/* rlc autoload firmware */
+		r = gfx_v11_0_rlc_backdoor_autoload_enable(adev);
+		if (r)
+			return r;
+	} else {
+		if (adev->firmware.load_type == AMDGPU_FW_LOAD_DIRECT) {
+			if (adev->gfx.imu.funcs && (amdgpu_dpm > 0)) {
+				if (adev->gfx.imu.funcs->load_microcode)
+					adev->gfx.imu.funcs->load_microcode(adev);
+				if (adev->gfx.imu.funcs->setup_imu)
+					adev->gfx.imu.funcs->setup_imu(adev);
+				if (adev->gfx.imu.funcs->start_imu)
+					adev->gfx.imu.funcs->start_imu(adev);
+			}
+
+			/* disable gpa mode in backdoor loading */
+			gfx_v11_0_disable_gpa_mode(adev);
+		}
+	}
+
+	if ((adev->firmware.load_type == AMDGPU_FW_LOAD_RLC_BACKDOOR_AUTO) ||
+	    (adev->firmware.load_type == AMDGPU_FW_LOAD_PSP)) {
+		r = gfx_v11_0_wait_for_rlc_autoload_complete(adev);
+		if (r) {
+			dev_err(adev->dev, "(%d) failed to wait rlc autoload complete\n", r);
+			return r;
+		}
+	}
+
+	adev->gfx.is_poweron = true;
+
+	if(get_gb_addr_config(adev))
+		DRM_WARN("Invalid gb_addr_config !\n");
+
+	if (adev->firmware.load_type == AMDGPU_FW_LOAD_PSP &&
+	    adev->gfx.rs64_enable)
+		gfx_v11_0_config_gfx_rs64(adev);
+
+	r = gfx_v11_0_gfxhub_enable(adev);
+	if (r)
+		return r;
+
+	if (!amdgpu_emu_mode)
+		gfx_v11_0_init_golden_registers(adev);
+
+	if ((adev->firmware.load_type == AMDGPU_FW_LOAD_DIRECT) ||
+	    (adev->firmware.load_type == AMDGPU_FW_LOAD_RLC_BACKDOOR_AUTO && amdgpu_dpm == 1)) {
+		/**
+		 * For gfx 11, rlc firmware loading relies on smu firmware is
+		 * loaded firstly, so in direct type, it has to load smc ucode
+		 * here before rlc.
+		 */
+		if (!(adev->flags & AMD_IS_APU)) {
+			r = amdgpu_pm_load_smu_firmware(adev, NULL);
+			if (r)
+				return r;
+		}
+	}
+
+	gfx_v11_0_constants_init(adev);
+
+	if (adev->firmware.load_type != AMDGPU_FW_LOAD_PSP)
+		gfx_v11_0_select_cp_fw_arch(adev);
+
+	if (adev->nbio.funcs->gc_doorbell_init)
+		adev->nbio.funcs->gc_doorbell_init(adev);
+
+	r = gfx_v11_0_rlc_resume(adev);
+	if (r)
+		return r;
+
+	/*
+	 * init golden registers and rlc resume may override some registers,
+	 * reconfig them here
+	 */
+	gfx_v11_0_tcp_harvest(adev);
+
+	r = gfx_v11_0_cp_resume(adev);
+	if (r)
+		return r;
+
+	/* get IMU version from HW if it's not set */
+	if (!adev->gfx.imu_fw_version)
+		adev->gfx.imu_fw_version = RREG32_SOC15(GC, 0, regGFX_IMU_SCRATCH_0);
+
+	return r;
+}
+The corrected function: static int gfx_v11_0_hw_init(void *handle)
+{
+	int r;
+	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+
+	if (adev->firmware.load_type == AMDGPU_FW_LOAD_RLC_BACKDOOR_AUTO) {
+		if (adev->gfx.imu.funcs) {
+			/* RLC autoload sequence 1: Program rlc ram */
+			if (adev->gfx.imu.funcs->program_rlc_ram)
+				adev->gfx.imu.funcs->program_rlc_ram(adev);
+			/* rlc autoload firmware */
+			r = gfx_v11_0_rlc_backdoor_autoload_enable(adev);
+			if (r)
+				return r;
+		}
+	} else {
+		if (adev->firmware.load_type == AMDGPU_FW_LOAD_DIRECT) {
+			if (adev->gfx.imu.funcs && (amdgpu_dpm > 0)) {
+				if (adev->gfx.imu.funcs->load_microcode)
+					adev->gfx.imu.funcs->load_microcode(adev);
+				if (adev->gfx.imu.funcs->setup_imu)
+					adev->gfx.imu.funcs->setup_imu(adev);
+				if (adev->gfx.imu.funcs->start_imu)
+					adev->gfx.imu.funcs->start_imu(adev);
+			}
+
+			/* disable gpa mode in backdoor loading */
+			gfx_v11_0_disable_gpa_mode(adev);
+		}
+	}
+
+	if ((adev->firmware.load_type == AMDGPU_FW_LOAD_RLC_BACKDOOR_AUTO) ||
+	    (adev->firmware.load_type == AMDGPU_FW_LOAD_PSP)) {
+		r = gfx_v11_0_wait_for_rlc_autoload_complete(adev);
+		if (r) {
+			dev_err(adev->dev, "(%d) failed to wait rlc autoload complete\n", r);
+			return r;
+		}
+	}
+
+	adev->gfx.is_poweron = true;
+
+	if(get_gb_addr_config(adev))
+		DRM_WARN("Invalid gb_addr_config !\n");
+
+	if (adev->firmware.load_type == AMDGPU_FW_LOAD_PSP &&
+	    adev->gfx.rs64_enable)
+		gfx_v11_0_config_gfx_rs64(adev);
+
+	r = gfx_v11_0_gfxhub_enable(adev);
+	if (r)
+		return r;
+
+	if (!amdgpu_emu_mode)
+		gfx_v11_0_init_golden_registers(adev);
+
+	if ((adev->firmware.load_type == AMDGPU_FW_LOAD_DIRECT) ||
+	    (adev->firmware.load_type == AMDGPU_FW_LOAD_RLC_BACKDOOR_AUTO && amdgpu_dpm == 1)) {
+		/**
+		 * For gfx 11, rlc firmware loading relies on smu firmware is
+		 * loaded firstly, so in direct type, it has to load smc ucode
+		 * here before rlc.
+		 */
+		if (!(adev->flags & AMD_IS_APU)) {
+			r = amdgpu_pm_load_smu_firmware(adev, NULL);
+			if (r)
+				return r;
+		}
+	}
+
+	gfx_v11_0_constants_init(adev);
+
+	if (adev->firmware.load_type != AMDGPU_FW_LOAD_PSP)
+		gfx_v11_0_select_cp_fw_arch(adev);
+
+	if (adev->nbio.funcs->gc_doorbell_init)
+		adev->nbio.funcs->gc_doorbell_init(adev);
+
+	r = gfx_v11_0_rlc_resume(adev);
+	if (r)
+		return r;
+
+	/*
+	 * init golden registers and rlc resume may override some registers,
+	 * reconfig them here
+	 */
+	gfx_v11_0_tcp_harvest(adev);
+
+	r = gfx_v11_0_cp_resume(adev);
+	if (r)
+		return r;
+
+	/* get IMU version from HW if it's not set */
+	if (!adev->gfx.imu_fw_version)
+		adev->gfx.imu_fw_version = RREG32_SOC15(GC, 0, regGFX_IMU_SCRATCH_0);
+
+	return r;
+}

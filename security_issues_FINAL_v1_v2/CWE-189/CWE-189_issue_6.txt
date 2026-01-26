@@ -1,0 +1,11 @@
+ARM: 6891/1: prevent heap corruption in OABI semtimedop
+
+When CONFIG_OABI_COMPAT is set, the wrapper for semtimedop does not
+bound the nsops argument.  A sufficiently large value will cause an
+integer overflow in allocation size, followed by copying too much data
+into the allocated buffer.  Fix this by restricting nsops to SEMOPM.
+Untested.
+
+Cc: stable@kernel.org
+Signed-off-by: Dan Rosenberg <drosenberg@vsecurity.com>
+Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>

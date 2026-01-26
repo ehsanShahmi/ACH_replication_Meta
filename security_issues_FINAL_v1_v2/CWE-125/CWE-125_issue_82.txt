@@ -1,0 +1,8 @@
+drm/amdgpu: Fix out-of-bounds read of df_v1_7_channel_number
+
+Check the fb_channel_number range to avoid the array out-of-bounds
+read error
+
+Signed-off-by: Ma Jun <Jun.Ma2@amd.com>
+Reviewed-by: Tim Huang <Tim.Huang@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>

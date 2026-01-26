@@ -1,0 +1,93 @@
+The vulnerable issue: x86/insn-eval: Fix use-after-free access to LDT entry
+
+get_desc() computes a pointer into the LDT while holding a lock that
+protects the LDT from being freed, but then drops the lock and returns the
+(now potentially dangling) pointer to its caller.
+
+Fix it by giving the caller a copy of the LDT entry instead.
+
+Fixes: 670f928ba09b ("x86/insn-eval: Add utility function to get segment descriptor")
+Cc: stable@vger.kernel.org
+Signed-off-by: Jann Horn <jannh@google.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+The vulnerable function: static struct desc_struct *get_desc(unsigned short sel)
+{
+	struct desc_ptr gdt_desc = {0, 0};
+	unsigned long desc_base;
+
+// #ifdef CONFIG_MODIFY_LDT_SYSCALL
+	if ((sel & SEGMENT_TI_MASK) == SEGMENT_LDT) {
+		struct desc_struct *desc = NULL;
+		struct ldt_struct *ldt;
+
+		/* Bits [15:3] contain the index of the desired entry. */
+		sel >>= 3;
+
+		mutex_lock(&current->active_mm->context.lock);
+		ldt = current->active_mm->context.ldt;
+		if (ldt && sel < ldt->nr_entries)
+			desc = &ldt->entries[sel];
+
+		mutex_unlock(&current->active_mm->context.lock);
+
+		return desc;
+	}
+#endif
+	native_store_gdt(&gdt_desc);
+
+	/*
+	 * Segment descriptors have a size of 8 bytes. Thus, the index is
+	 * multiplied by 8 to obtain the memory offset of the desired descriptor
+	 * from the base of the GDT. As bits [15:3] of the segment selector
+	 * contain the index, it can be regarded as multiplied by 8 already.
+	 * All that remains is to clear bits [2:0].
+	 */
+	desc_base = sel & ~(SEGMENT_RPL_MASK | SEGMENT_TI_MASK);
+
+	if (desc_base > gdt_desc.size)
+		return NULL;
+
+	return (struct desc_struct *)(gdt_desc.address + desc_base);
+}
+The corrected function: static bool get_desc(struct desc_struct *out, unsigned short sel)
+{
+	struct desc_ptr gdt_desc = {0, 0};
+	unsigned long desc_base;
+
+// #ifdef CONFIG_MODIFY_LDT_SYSCALL
+	if ((sel & SEGMENT_TI_MASK) == SEGMENT_LDT) {
+		bool success = false;
+		struct ldt_struct *ldt;
+
+		/* Bits [15:3] contain the index of the desired entry. */
+		sel >>= 3;
+
+		mutex_lock(&current->active_mm->context.lock);
+		ldt = current->active_mm->context.ldt;
+		if (ldt && sel < ldt->nr_entries) {
+			*out = ldt->entries[sel];
+			success = true;
+		}
+
+		mutex_unlock(&current->active_mm->context.lock);
+
+		return success;
+	}
+#endif
+	native_store_gdt(&gdt_desc);
+
+	/*
+	 * Segment descriptors have a size of 8 bytes. Thus, the index is
+	 * multiplied by 8 to obtain the memory offset of the desired descriptor
+	 * from the base of the GDT. As bits [15:3] of the segment selector
+	 * contain the index, it can be regarded as multiplied by 8 already.
+	 * All that remains is to clear bits [2:0].
+	 */
+	desc_base = sel & ~(SEGMENT_RPL_MASK | SEGMENT_TI_MASK);
+
+	if (desc_base > gdt_desc.size)
+		return false;
+
+	*out = *(struct desc_struct *)(gdt_desc.address + desc_base);
+	return true;
+}

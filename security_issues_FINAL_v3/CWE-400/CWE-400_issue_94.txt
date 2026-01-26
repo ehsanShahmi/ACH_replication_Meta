@@ -1,0 +1,78 @@
+The vulnerable issue: xen: let alloc_xenballooned_pages() fail if not enough memory free
+
+commit a1078e821b605813b63bf6bca414a85f804d5c66 upstream.
+
+Instead of trying to allocate pages with GFP_USER in
+add_ballooned_pages() check the available free memory via
+si_mem_available(). GFP_USER is far less limiting memory exhaustion
+than the test via si_mem_available().
+
+This will avoid dom0 running out of memory due to excessive foreign
+page mappings especially on ARM and on x86 in PVH mode, as those don't
+have a pre-ballooned area which can be used for foreign mappings.
+
+As the normal ballooning suffers from the same problem don't balloon
+down more than si_mem_available() pages in one iteration. At the same
+time limit the default maximum number of retries.
+
+This is part of XSA-300.
+
+Signed-off-by: Juergen Gross <jgross@suse.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+The vulnerable function: static void balloon_process(struct work_struct *work)
+{
+	enum bp_state state = BP_DONE;
+	long credit;
+
+
+	do {
+		mutex_lock(&balloon_mutex);
+
+		credit = current_credit();
+
+		if (credit > 0) {
+			if (balloon_is_inflated())
+				state = increase_reservation(credit);
+			else
+ 				state = reserve_additional_memory();
+ 		}
+ 
+		if (credit < 0)
+			state = decrease_reservation(-credit, GFP_BALLOON);
+ 
+ 		state = update_schedule(state);
+ 
+		mutex_unlock(&balloon_mutex);
+
+		cond_resched();
+
+	} while (credit && state == BP_DONE);
+
+	/* Schedule more work if there is some still to be done. */
+	if (state == BP_EAGAIN)
+		schedule_delayed_work(&balloon_worker, balloon_stats.schedule_delay * HZ);
+}
+The corrected function: static int add_ballooned_pages(int nr_pages)
+{
+	enum bp_state st;
+
+	if (xen_hotplug_unpopulated) {
+		st = reserve_additional_memory();
+		if (st != BP_ECANCELED) {
+			mutex_unlock(&balloon_mutex);
+			wait_event(balloon_wq,
+				   !list_empty(&ballooned_pages));
+			mutex_lock(&balloon_mutex);
+			return 0;
+ 		}
+ 	}
+ 
+	if (si_mem_available() < nr_pages)
+		return -ENOMEM;
+
+ 	st = decrease_reservation(nr_pages, GFP_USER);
+ 	if (st != BP_DONE)
+ 		return -ENOMEM;
+
+	return 0;
+}

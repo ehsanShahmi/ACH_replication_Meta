@@ -1,0 +1,172 @@
+The vulnerable issue: scsi: sg: allocate with __GFP_ZERO in sg_build_indirect()
+
+This shall help avoid copying uninitialized memory to the userspace when
+calling ioctl(fd, SG_IO) with an empty command.
+
+Reported-by: syzbot+7d26fc1eea198488deab@syzkaller.appspotmail.com
+Cc: stable@vger.kernel.org
+Signed-off-by: Alexander Potapenko <glider@google.com>
+Acked-by: Douglas Gilbert <dgilbert@interlog.com>
+Reviewed-by: Johannes Thumshirn <jthumshirn@suse.de>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+The vulnerable function: sg_build_indirect(Sg_scatter_hold * schp, Sg_fd * sfp, int buff_size)
+{
+	int ret_sz = 0, i, k, rem_sz, num, mx_sc_elems;
+	int sg_tablesize = sfp->parentdp->sg_tablesize;
+	int blk_size = buff_size, order;
+	gfp_t gfp_mask = GFP_ATOMIC | __GFP_COMP | __GFP_NOWARN;
+	struct sg_device *sdp = sfp->parentdp;
+
+	if (blk_size < 0)
+		return -EFAULT;
+	if (0 == blk_size)
+		++blk_size;	/* don't know why */
+	/* round request up to next highest SG_SECTOR_SZ byte boundary */
+	blk_size = ALIGN(blk_size, SG_SECTOR_SZ);
+	SCSI_LOG_TIMEOUT(4, sg_printk(KERN_INFO, sfp->parentdp,
+		"sg_build_indirect: buff_size=%d, blk_size=%d\n",
+		buff_size, blk_size));
+
+	/* N.B. ret_sz carried into this block ... */
+	mx_sc_elems = sg_build_sgat(schp, sfp, sg_tablesize);
+	if (mx_sc_elems < 0)
+		return mx_sc_elems;	/* most likely -ENOMEM */
+
+	num = scatter_elem_sz;
+	if (unlikely(num != scatter_elem_sz_prev)) {
+		if (num < PAGE_SIZE) {
+			scatter_elem_sz = PAGE_SIZE;
+			scatter_elem_sz_prev = PAGE_SIZE;
+		} else
+			scatter_elem_sz_prev = num;
+	}
+
+	if (sdp->device->host->unchecked_isa_dma)
+		gfp_mask |= GFP_DMA;
+
+	if (!capable(CAP_SYS_ADMIN) || !capable(CAP_SYS_RAWIO))
+		gfp_mask |= __GFP_ZERO;
+
+	order = get_order(num);
+retry:
+	ret_sz = 1 << (PAGE_SHIFT + order);
+
+	for (k = 0, rem_sz = blk_size; rem_sz > 0 && k < mx_sc_elems;
+	     k++, rem_sz -= ret_sz) {
+
+		num = (rem_sz > scatter_elem_sz_prev) ?
+			scatter_elem_sz_prev : rem_sz;
+
+		schp->pages[k] = alloc_pages(gfp_mask, order);
+		if (!schp->pages[k])
+			goto out;
+
+		if (num == scatter_elem_sz_prev) {
+			if (unlikely(ret_sz > scatter_elem_sz_prev)) {
+				scatter_elem_sz = ret_sz;
+				scatter_elem_sz_prev = ret_sz;
+			}
+		}
+
+		SCSI_LOG_TIMEOUT(5, sg_printk(KERN_INFO, sfp->parentdp,
+				 "sg_build_indirect: k=%d, num=%d, ret_sz=%d\n",
+				 k, num, ret_sz));
+	}		/* end of for loop */
+
+	schp->page_order = order;
+	schp->k_use_sg = k;
+	SCSI_LOG_TIMEOUT(5, sg_printk(KERN_INFO, sfp->parentdp,
+			 "sg_build_indirect: k_use_sg=%d, rem_sz=%d\n",
+			 k, rem_sz));
+
+	schp->bufflen = blk_size;
+	if (rem_sz > 0)	/* must have failed */
+		return -ENOMEM;
+	return 0;
+out:
+	for (i = 0; i < k; i++)
+		__free_pages(schp->pages[i], order);
+
+	if (--order >= 0)
+		goto retry;
+
+	return -ENOMEM;
+}
+The corrected function: static int handle_vmon(struct kvm_vcpu *vcpu)
+{
+	int ret;
+	gpa_t vmptr;
+	struct page *page;
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+	const u64 VMXON_NEEDED_FEATURES = FEATURE_CONTROL_LOCKED
+		| FEATURE_CONTROL_VMXON_ENABLED_OUTSIDE_SMX;
+
+	/*
+	 * The Intel VMX Instruction Reference lists a bunch of bits that are
+	 * prerequisite to running VMXON, most notably cr4.VMXE must be set to
+	 * 1 (see vmx_set_cr4() for when we allow the guest to set this).
+	 * Otherwise, we should fail with #UD.  But most faulting conditions
+	 * have already been checked by hardware, prior to the VM-exit for
+	 * VMXON.  We do test guest cr4.VMXE because processor CR4 always has
+	 * that bit set to 1 in non-root mode.
+	 */
+	if (!kvm_read_cr4_bits(vcpu, X86_CR4_VMXE)) {
+		kvm_queue_exception(vcpu, UD_VECTOR);
+		return 1;
+	}
+
+	/* CPL=0 must be checked manually. */
+	if (vmx_get_cpl(vcpu)) {
+		kvm_queue_exception(vcpu, UD_VECTOR);
+		return 1;
+	}
+
+	if (vmx->nested.vmxon) {
+		nested_vmx_failValid(vcpu, VMXERR_VMXON_IN_VMX_ROOT_OPERATION);
+		return kvm_skip_emulated_instruction(vcpu);
+	}
+
+	if ((vmx->msr_ia32_feature_control & VMXON_NEEDED_FEATURES)
+			!= VMXON_NEEDED_FEATURES) {
+		kvm_inject_gp(vcpu, 0);
+		return 1;
+	}
+
+	if (nested_vmx_get_vmptr(vcpu, &vmptr))
+		return 1;
+
+	/*
+	 * SDM 3: 24.11.5
+	 * The first 4 bytes of VMXON region contain the supported
+	 * VMCS revision identifier
+	 *
+	 * Note - IA32_VMX_BASIC[48] will never be 1 for the nested case;
+	 * which replaces physical address width with 32
+	 */
+	if (!PAGE_ALIGNED(vmptr) || (vmptr >> cpuid_maxphyaddr(vcpu))) {
+		nested_vmx_failInvalid(vcpu);
+		return kvm_skip_emulated_instruction(vcpu);
+	}
+
+	page = kvm_vcpu_gpa_to_page(vcpu, vmptr);
+	if (is_error_page(page)) {
+		nested_vmx_failInvalid(vcpu);
+		return kvm_skip_emulated_instruction(vcpu);
+	}
+	if (*(u32 *)kmap(page) != VMCS12_REVISION) {
+		kunmap(page);
+		kvm_release_page_clean(page);
+		nested_vmx_failInvalid(vcpu);
+		return kvm_skip_emulated_instruction(vcpu);
+	}
+	kunmap(page);
+	kvm_release_page_clean(page);
+
+	vmx->nested.vmxon_ptr = vmptr;
+	ret = enter_vmx_operation(vcpu);
+	if (ret)
+		return ret;
+
+	nested_vmx_succeed(vcpu);
+	return kvm_skip_emulated_instruction(vcpu);
+}

@@ -1,0 +1,11 @@
+char/tpm: Fix unitialized usage of data buffer
+
+This patch fixes information leakage to the userspace by initializing
+the data buffer to zero.
+
+Reported-by: Peter Huewe <huewe.external@infineon.com>
+Signed-off-by: Peter Huewe <huewe.external@infineon.com>
+Signed-off-by: Marcel Selhorst <m.selhorst@sirrix.com>
+[ Also removed the silly "* sizeof(u8)".  If that isn't 1, we have way
+  deeper problems than a simple multiplication can fix.   - Linus ]
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>

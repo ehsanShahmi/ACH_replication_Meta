@@ -1,0 +1,242 @@
+The vulnerable issue: cxl/mem: Fix no cxl_nvd during pmem region auto-assembling
+
+When CXL subsystem is auto-assembling a pmem region during cxl
+endpoint port probing, always hit below calltrace.
+
+ BUG: kernel NULL pointer dereference, address: 0000000000000078
+ #PF: supervisor read access in kernel mode
+ #PF: error_code(0x0000) - not-present page
+ RIP: 0010:cxl_pmem_region_probe+0x22e/0x360 [cxl_pmem]
+ Call Trace:
+  <TASK>
+  ? __die+0x24/0x70
+  ? page_fault_oops+0x82/0x160
+  ? do_user_addr_fault+0x65/0x6b0
+  ? exc_page_fault+0x7d/0x170
+  ? asm_exc_page_fault+0x26/0x30
+  ? cxl_pmem_region_probe+0x22e/0x360 [cxl_pmem]
+  ? cxl_pmem_region_probe+0x1ac/0x360 [cxl_pmem]
+  cxl_bus_probe+0x1b/0x60 [cxl_core]
+  really_probe+0x173/0x410
+  ? __pfx___device_attach_driver+0x10/0x10
+  __driver_probe_device+0x80/0x170
+  driver_probe_device+0x1e/0x90
+  __device_attach_driver+0x90/0x120
+  bus_for_each_drv+0x84/0xe0
+  __device_attach+0xbc/0x1f0
+  bus_probe_device+0x90/0xa0
+  device_add+0x51c/0x710
+  devm_cxl_add_pmem_region+0x1b5/0x380 [cxl_core]
+  cxl_bus_probe+0x1b/0x60 [cxl_core]
+
+The cxl_nvd of the memdev needs to be available during the pmem region
+probe. Currently the cxl_nvd is registered after the endpoint port probe.
+The endpoint probe, in the case of autoassembly of regions, can cause a
+pmem region probe requiring the not yet available cxl_nvd. Adjust the
+sequence so this dependency is met.
+
+This requires adding a port parameter to cxl_find_nvdimm_bridge() that
+can be used to query the ancestor root port. The endpoint port is not
+yet available, but will share a common ancestor with its parent, so
+start the query from there instead.
+
+Fixes: f17b558d6663 ("cxl/pmem: Refactor nvdimm device registration, delete the workqueue")
+Co-developed-by: Dan Williams <dan.j.williams@intel.com>
+Signed-off-by: Dan Williams <dan.j.williams@intel.com>
+Signed-off-by: Li Ming <ming4.li@intel.com>
+Tested-by: Alison Schofield <alison.schofield@intel.com>
+Reviewed-by: Jonathan Cameron <Jonathan.Cameron@huawei.com>
+Reviewed-by: Alison Schofield <alison.schofield@intel.com>
+Link: https://patch.msgid.link/20240612064423.2567625-1-ming4.li@intel.com
+Signed-off-by: Dave Jiang <dave.jiang@intel.com>
+The vulnerable function: static int cxl_mem_probe(struct device *dev)
+{
+	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
+	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlmd->cxlds);
+	struct cxl_dev_state *cxlds = cxlmd->cxlds;
+	struct device *endpoint_parent;
+	struct cxl_port *parent_port;
+	struct cxl_dport *dport;
+	struct dentry *dentry;
+	int rc;
+
+	if (!cxlds->media_ready)
+		return -EBUSY;
+
+	/*
+	 * Someone is trying to reattach this device after it lost its port
+	 * connection (an endpoint port previously registered by this memdev was
+	 * disabled). This racy check is ok because if the port is still gone,
+	 * no harm done, and if the port hierarchy comes back it will re-trigger
+	 * this probe. Port rescan and memdev detach work share the same
+	 * single-threaded workqueue.
+	 */
+	if (work_pending(&cxlmd->detach_work))
+		return -EBUSY;
+
+	dentry = cxl_debugfs_create_dir(dev_name(dev));
+	debugfs_create_devm_seqfile(dev, "dpamem", dentry, cxl_mem_dpa_show);
+
+	if (test_bit(CXL_POISON_ENABLED_INJECT, mds->poison.enabled_cmds))
+		debugfs_create_file("inject_poison", 0200, dentry, cxlmd,
+				    &cxl_poison_inject_fops);
+	if (test_bit(CXL_POISON_ENABLED_CLEAR, mds->poison.enabled_cmds))
+		debugfs_create_file("clear_poison", 0200, dentry, cxlmd,
+				    &cxl_poison_clear_fops);
+
+	rc = devm_add_action_or_reset(dev, remove_debugfs, dentry);
+	if (rc)
+		return rc;
+
+	rc = devm_cxl_enumerate_ports(cxlmd);
+	if (rc)
+		return rc;
+
+	parent_port = cxl_mem_find_port(cxlmd, &dport);
+	if (!parent_port) {
+		dev_err(dev, "CXL port topology not found\n");
+		return -ENXIO;
+	}
+
+	if (dport->rch)
+		endpoint_parent = parent_port->uport_dev;
+	else
+		endpoint_parent = &parent_port->dev;
+
+	cxl_setup_parent_dport(dev, dport);
+
+	device_lock(endpoint_parent);
+	if (!endpoint_parent->driver) {
+		dev_err(dev, "CXL port topology %s not enabled\n",
+			dev_name(endpoint_parent));
+		rc = -ENXIO;
+		goto unlock;
+	}
+
+	rc = devm_cxl_add_endpoint(endpoint_parent, cxlmd, dport);
+unlock:
+	device_unlock(endpoint_parent);
+	put_device(&parent_port->dev);
+	if (rc)
+		return rc;
+
+	if (resource_size(&cxlds->pmem_res) && IS_ENABLED(CONFIG_CXL_PMEM)) {
+		rc = devm_cxl_add_nvdimm(cxlmd);
+		if (rc == -ENODEV)
+			dev_info(dev, "PMEM disabled by platform\n");
+		else
+			return rc;
+	}
+
+	/*
+	 * The kernel may be operating out of CXL memory on this device,
+	 * there is no spec defined way to determine whether this device
+	 * preserves contents over suspend, and there is no simple way
+	 * to arrange for the suspend image to avoid CXL memory which
+	 * would setup a circular dependency between PCI resume and save
+	 * state restoration.
+	 *
+	 * TODO: support suspend when all the regions this device is
+	 * hosting are locked and covered by the system address map,
+	 * i.e. platform firmware owns restoring the HDM configuration
+	 * that it locked.
+	 */
+	cxl_mem_active_inc();
+	return devm_add_action_or_reset(dev, enable_suspend, NULL);
+}
+The corrected function: static int cxl_mem_probe(struct device *dev)
+{
+	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
+	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlmd->cxlds);
+	struct cxl_dev_state *cxlds = cxlmd->cxlds;
+	struct device *endpoint_parent;
+	struct cxl_port *parent_port;
+	struct cxl_dport *dport;
+	struct dentry *dentry;
+	int rc;
+
+	if (!cxlds->media_ready)
+		return -EBUSY;
+
+	/*
+	 * Someone is trying to reattach this device after it lost its port
+	 * connection (an endpoint port previously registered by this memdev was
+	 * disabled). This racy check is ok because if the port is still gone,
+	 * no harm done, and if the port hierarchy comes back it will re-trigger
+	 * this probe. Port rescan and memdev detach work share the same
+	 * single-threaded workqueue.
+	 */
+	if (work_pending(&cxlmd->detach_work))
+		return -EBUSY;
+
+	dentry = cxl_debugfs_create_dir(dev_name(dev));
+	debugfs_create_devm_seqfile(dev, "dpamem", dentry, cxl_mem_dpa_show);
+
+	if (test_bit(CXL_POISON_ENABLED_INJECT, mds->poison.enabled_cmds))
+		debugfs_create_file("inject_poison", 0200, dentry, cxlmd,
+				    &cxl_poison_inject_fops);
+	if (test_bit(CXL_POISON_ENABLED_CLEAR, mds->poison.enabled_cmds))
+		debugfs_create_file("clear_poison", 0200, dentry, cxlmd,
+				    &cxl_poison_clear_fops);
+
+	rc = devm_add_action_or_reset(dev, remove_debugfs, dentry);
+	if (rc)
+		return rc;
+
+	rc = devm_cxl_enumerate_ports(cxlmd);
+	if (rc)
+		return rc;
+
+	parent_port = cxl_mem_find_port(cxlmd, &dport);
+	if (!parent_port) {
+		dev_err(dev, "CXL port topology not found\n");
+		return -ENXIO;
+	}
+
+	if (resource_size(&cxlds->pmem_res) && IS_ENABLED(CONFIG_CXL_PMEM)) {
+		rc = devm_cxl_add_nvdimm(parent_port, cxlmd);
+		if (rc) {
+			if (rc == -ENODEV)
+				dev_info(dev, "PMEM disabled by platform\n");
+			return rc;
+		}
+	}
+
+	if (dport->rch)
+		endpoint_parent = parent_port->uport_dev;
+	else
+		endpoint_parent = &parent_port->dev;
+
+	cxl_setup_parent_dport(dev, dport);
+
+	device_lock(endpoint_parent);
+	if (!endpoint_parent->driver) {
+		dev_err(dev, "CXL port topology %s not enabled\n",
+			dev_name(endpoint_parent));
+		rc = -ENXIO;
+		goto unlock;
+	}
+
+	rc = devm_cxl_add_endpoint(endpoint_parent, cxlmd, dport);
+unlock:
+	device_unlock(endpoint_parent);
+	put_device(&parent_port->dev);
+	if (rc)
+		return rc;
+
+	/*
+	 * The kernel may be operating out of CXL memory on this device,
+	 * there is no spec defined way to determine whether this device
+	 * preserves contents over suspend, and there is no simple way
+	 * to arrange for the suspend image to avoid CXL memory which
+	 * would setup a circular dependency between PCI resume and save
+	 * state restoration.
+	 *
+	 * TODO: support suspend when all the regions this device is
+	 * hosting are locked and covered by the system address map,
+	 * i.e. platform firmware owns restoring the HDM configuration
+	 * that it locked.
+	 */
+	cxl_mem_active_inc();
+	return devm_add_action_or_reset(dev, enable_suspend, NULL);
+}

@@ -1,0 +1,136 @@
+The vulnerable issue: net/llc: avoid BUG_ON() in skb_orphan()
+
+It seems nobody used LLC since linux-3.12.
+
+Fortunately fuzzers like syzkaller still know how to run this code,
+otherwise it would be no fun.
+
+Setting skb->sk without skb->destructor leads to all kinds of
+bugs, we now prefer to be very strict about it.
+
+Ideally here we would use skb_set_owner() but this helper does not exist yet,
+only CAN seems to have a private helper for that.
+
+Fixes: 376c7311bdb6 ("net: add a temporary sanity check in skb_orphan()")
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Reported-by: Andrey Konovalov <andreyknvl@google.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+The vulnerable function: void llc_conn_handler(struct llc_sap *sap, struct sk_buff *skb)
+{
+	struct llc_addr saddr, daddr;
+	struct sock *sk;
+
+	llc_pdu_decode_sa(skb, saddr.mac);
+	llc_pdu_decode_ssap(skb, &saddr.lsap);
+	llc_pdu_decode_da(skb, daddr.mac);
+	llc_pdu_decode_dsap(skb, &daddr.lsap);
+
+	sk = __llc_lookup(sap, &saddr, &daddr);
+	if (!sk)
+		goto drop;
+
+	bh_lock_sock(sk);
+	/*
+	 * This has to be done here and not at the upper layer ->accept
+	 * method because of the way the PROCOM state machine works:
+	 * it needs to set several state variables (see, for instance,
+	 * llc_adm_actions_2 in net/llc/llc_c_st.c) and send a packet to
+	 * the originator of the new connection, and this state has to be
+	 * in the newly created struct sock private area. -acme
+	 */
+	if (unlikely(sk->sk_state == TCP_LISTEN)) {
+		struct sock *newsk = llc_create_incoming_sock(sk, skb->dev,
+							      &saddr, &daddr);
+		if (!newsk)
+			goto drop_unlock;
+		skb_set_owner_r(skb, newsk);
+	} else {
+		/*
+		 * Can't be skb_set_owner_r, this will be done at the
+		 * llc_conn_state_process function, later on, when we will use
+		 * skb_queue_rcv_skb to send it to upper layers, this is
+		 * another trick required to cope with how the PROCOM state
+		 * machine works. -acme
+		 */
+		skb->sk = sk;
+	}
+	if (!sock_owned_by_user(sk))
+		llc_conn_rcv(sk, skb);
+	else {
+		dprintk("%s: adding to backlog...\n", __func__);
+		llc_set_backlog_type(skb, LLC_PACKET);
+		if (sk_add_backlog(sk, skb, sk->sk_rcvbuf))
+			goto drop_unlock;
+	}
+out:
+	bh_unlock_sock(sk);
+	sock_put(sk);
+	return;
+drop:
+	kfree_skb(skb);
+	return;
+drop_unlock:
+	kfree_skb(skb);
+	goto out;
+}
+The corrected function: void llc_conn_handler(struct llc_sap *sap, struct sk_buff *skb)
+{
+	struct llc_addr saddr, daddr;
+	struct sock *sk;
+
+	llc_pdu_decode_sa(skb, saddr.mac);
+	llc_pdu_decode_ssap(skb, &saddr.lsap);
+	llc_pdu_decode_da(skb, daddr.mac);
+	llc_pdu_decode_dsap(skb, &daddr.lsap);
+
+	sk = __llc_lookup(sap, &saddr, &daddr);
+	if (!sk)
+		goto drop;
+
+	bh_lock_sock(sk);
+	/*
+	 * This has to be done here and not at the upper layer ->accept
+	 * method because of the way the PROCOM state machine works:
+	 * it needs to set several state variables (see, for instance,
+	 * llc_adm_actions_2 in net/llc/llc_c_st.c) and send a packet to
+	 * the originator of the new connection, and this state has to be
+	 * in the newly created struct sock private area. -acme
+	 */
+	if (unlikely(sk->sk_state == TCP_LISTEN)) {
+		struct sock *newsk = llc_create_incoming_sock(sk, skb->dev,
+							      &saddr, &daddr);
+		if (!newsk)
+			goto drop_unlock;
+		skb_set_owner_r(skb, newsk);
+	} else {
+		/*
+		 * Can't be skb_set_owner_r, this will be done at the
+		 * llc_conn_state_process function, later on, when we will use
+		 * skb_queue_rcv_skb to send it to upper layers, this is
+		 * another trick required to cope with how the PROCOM state
+		 * machine works. -acme
+		 */
+		skb_orphan(skb);
+		sock_hold(sk);
+		skb->sk = sk;
+		skb->destructor = sock_efree;
+	}
+	if (!sock_owned_by_user(sk))
+		llc_conn_rcv(sk, skb);
+	else {
+		dprintk("%s: adding to backlog...\n", __func__);
+		llc_set_backlog_type(skb, LLC_PACKET);
+		if (sk_add_backlog(sk, skb, sk->sk_rcvbuf))
+			goto drop_unlock;
+	}
+out:
+	bh_unlock_sock(sk);
+	sock_put(sk);
+	return;
+drop:
+	kfree_skb(skb);
+	return;
+drop_unlock:
+	kfree_skb(skb);
+	goto out;
+}

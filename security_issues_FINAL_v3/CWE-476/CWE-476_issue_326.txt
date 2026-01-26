@@ -1,0 +1,94 @@
+The vulnerable issue: drm/amd/display: Avoid race between dcn10_set_drr() and dc_state_destruct()
+
+dc_state_destruct() nulls the resource context of the DC state. The pipe
+context passed to dcn10_set_drr() is a member of this resource context.
+
+If dc_state_destruct() is called parallel to the IRQ processing (which
+calls dcn10_set_drr() at some point), we can end up using already nulled
+function callback fields of struct stream_resource.
+
+The logic in dcn10_set_drr() already tries to avoid this, by checking tg
+against NULL. But if the nulling happens exactly after the NULL check and
+before the next access, then we get a race.
+
+Avoid this by copying tg first to a local variable, and then use this
+variable for all the operations. This should work, as long as nobody
+frees the resource pool where the timing generators live.
+
+Closes: https://gitlab.freedesktop.org/drm/amd/-/issues/3142
+Fixes: 06ad7e164256 ("drm/amd/display: Destroy DC context while keeping DML and DML2")
+Signed-off-by: Tobias Jakobi <tjakobi@math.uni-bielefeld.de>
+Tested-by: Raoul van Rüschen <raoul.van.rueschen@gmail.com>
+Tested-by: Christopher Snowhill <chris@kode54.net>
+Reviewed-by: Harry Wentland <harry.wentland@amd.com>
+Tested-by: Sefa Eyeoglu <contact@scrumplex.net>
+Signed-off-by: Mario Limonciello <mario.limonciello@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+(cherry picked from commit a3cc326a43bdc48fbdf53443e1027a03e309b643)
+Cc: stable@vger.kernel.org
+The vulnerable function: void dcn10_set_drr(struct pipe_ctx **pipe_ctx,
+		int num_pipes, struct dc_crtc_timing_adjust adjust)
+{
+	int i = 0;
+	struct drr_params params = {0};
+	// DRR set trigger event mapped to OTG_TRIG_A (bit 11) for manual control flow
+	unsigned int event_triggers = 0x800;
+	// Note DRR trigger events are generated regardless of whether num frames met.
+	unsigned int num_frames = 2;
+
+	params.vertical_total_max = adjust.v_total_max;
+	params.vertical_total_min = adjust.v_total_min;
+	params.vertical_total_mid = adjust.v_total_mid;
+	params.vertical_total_mid_frame_num = adjust.v_total_mid_frame_num;
+	/* TODO: If multiple pipes are to be supported, you need
+	 * some GSL stuff. Static screen triggers may be programmed differently
+	 * as well.
+	 */
+	for (i = 0; i < num_pipes; i++) {
+		if ((pipe_ctx[i]->stream_res.tg != NULL) && pipe_ctx[i]->stream_res.tg->funcs) {
+			if (pipe_ctx[i]->stream_res.tg->funcs->set_drr)
+				pipe_ctx[i]->stream_res.tg->funcs->set_drr(
+					pipe_ctx[i]->stream_res.tg, &params);
+			if (adjust.v_total_max != 0 && adjust.v_total_min != 0)
+				if (pipe_ctx[i]->stream_res.tg->funcs->set_static_screen_control)
+					pipe_ctx[i]->stream_res.tg->funcs->set_static_screen_control(
+						pipe_ctx[i]->stream_res.tg,
+						event_triggers, num_frames);
+		}
+	}
+}
+The corrected function: void dcn10_set_drr(struct pipe_ctx **pipe_ctx,
+		int num_pipes, struct dc_crtc_timing_adjust adjust)
+{
+	int i = 0;
+	struct drr_params params = {0};
+	// DRR set trigger event mapped to OTG_TRIG_A (bit 11) for manual control flow
+	unsigned int event_triggers = 0x800;
+	// Note DRR trigger events are generated regardless of whether num frames met.
+	unsigned int num_frames = 2;
+
+	params.vertical_total_max = adjust.v_total_max;
+	params.vertical_total_min = adjust.v_total_min;
+	params.vertical_total_mid = adjust.v_total_mid;
+	params.vertical_total_mid_frame_num = adjust.v_total_mid_frame_num;
+	/* TODO: If multiple pipes are to be supported, you need
+	 * some GSL stuff. Static screen triggers may be programmed differently
+	 * as well.
+	 */
+	for (i = 0; i < num_pipes; i++) {
+		/* dc_state_destruct() might null the stream resources, so fetch tg
+		 * here first to avoid a race condition. The lifetime of the pointee
+		 * itself (the timing_generator object) is not a problem here.
+		 */
+		struct timing_generator *tg = pipe_ctx[i]->stream_res.tg;
+
+		if ((tg != NULL) && tg->funcs) {
+			if (tg->funcs->set_drr)
+				tg->funcs->set_drr(tg, &params);
+			if (adjust.v_total_max != 0 && adjust.v_total_min != 0)
+				if (tg->funcs->set_static_screen_control)
+					tg->funcs->set_static_screen_control(
+						tg, event_triggers, num_frames);
+		}
+	}
+}

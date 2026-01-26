@@ -1,0 +1,314 @@
+The vulnerable issue: netfilter: x_tables: Switch synchronization to RCU
+
+When running concurrent iptables rules replacement with data, the per CPU
+sequence count is checked after the assignment of the new information.
+The sequence count is used to synchronize with the packet path without the
+use of any explicit locking. If there are any packets in the packet path using
+the table information, the sequence count is incremented to an odd value and
+is incremented to an even after the packet process completion.
+
+The new table value assignment is followed by a write memory barrier so every
+CPU should see the latest value. If the packet path has started with the old
+table information, the sequence counter will be odd and the iptables
+replacement will wait till the sequence count is even prior to freeing the
+old table info.
+
+However, this assumes that the new table information assignment and the memory
+barrier is actually executed prior to the counter check in the replacement
+thread. If CPU decides to execute the assignment later as there is no user of
+the table information prior to the sequence check, the packet path in another
+CPU may use the old table information. The replacement thread would then free
+the table information under it leading to a use after free in the packet
+processing context-
+
+Unable to handle kernel NULL pointer dereference at virtual
+address 000000000000008e
+pc : ip6t_do_table+0x5d0/0x89c
+lr : ip6t_do_table+0x5b8/0x89c
+ip6t_do_table+0x5d0/0x89c
+ip6table_filter_hook+0x24/0x30
+nf_hook_slow+0x84/0x120
+ip6_input+0x74/0xe0
+ip6_rcv_finish+0x7c/0x128
+ipv6_rcv+0xac/0xe4
+__netif_receive_skb+0x84/0x17c
+process_backlog+0x15c/0x1b8
+napi_poll+0x88/0x284
+net_rx_action+0xbc/0x23c
+__do_softirq+0x20c/0x48c
+
+This could be fixed by forcing instruction order after the new table
+information assignment or by switching to RCU for the synchronization.
+
+Fixes: 80055dab5de0 ("netfilter: x_tables: make xt_replace_table wait until old rules are not used anymore")
+Reported-by: Sean Tranchetti <stranche@codeaurora.org>
+Reported-by: kernel test robot <lkp@intel.com>
+Suggested-by: Florian Westphal <fw@strlen.de>
+Signed-off-by: Subash Abhinov Kasiviswanathan <subashab@codeaurora.org>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+The vulnerable function: unsigned int
+ip6t_do_table(struct sk_buff *skb,
+	      const struct nf_hook_state *state,
+	      struct xt_table *table)
+{
+	unsigned int hook = state->hook;
+	static const char nulldevname[IFNAMSIZ] __attribute__((aligned(sizeof(long))));
+	/* Initializing verdict to NF_DROP keeps gcc happy. */
+	unsigned int verdict = NF_DROP;
+	const char *indev, *outdev;
+	const void *table_base;
+	struct ip6t_entry *e, **jumpstack;
+	unsigned int stackidx, cpu;
+	const struct xt_table_info *private;
+	struct xt_action_param acpar;
+	unsigned int addend;
+
+	/* Initialization */
+	stackidx = 0;
+	indev = state->in ? state->in->name : nulldevname;
+	outdev = state->out ? state->out->name : nulldevname;
+	/* We handle fragments by dealing with the first fragment as
+	 * if it was a normal packet.  All other fragments are treated
+	 * normally, except that they will NEVER match rules that ask
+	 * things we don't know, ie. tcp syn flag or ports).  If the
+	 * rule is also a fragment-specific rule, non-fragments won't
+	 * match it. */
+	acpar.hotdrop = false;
+	acpar.state   = state;
+
+	WARN_ON(!(table->valid_hooks & (1 << hook)));
+
+	local_bh_disable();
+	addend = xt_write_recseq_begin();
+	private = READ_ONCE(table->private); /* Address dependency. */
+	cpu        = smp_processor_id();
+	table_base = private->entries;
+	jumpstack  = (struct ip6t_entry **)private->jumpstack[cpu];
+
+	/* Switch to alternate jumpstack if we're being invoked via TEE.
+	 * TEE issues XT_CONTINUE verdict on original skb so we must not
+	 * clobber the jumpstack.
+	 *
+	 * For recursion via REJECT or SYNPROXY the stack will be clobbered
+	 * but it is no problem since absolute verdict is issued by these.
+	 */
+	if (static_key_false(&xt_tee_enabled))
+		jumpstack += private->stacksize * __this_cpu_read(nf_skb_duplicated);
+
+	e = get_entry(table_base, private->hook_entry[hook]);
+
+	do {
+		const struct xt_entry_target *t;
+		const struct xt_entry_match *ematch;
+		struct xt_counters *counter;
+
+		WARN_ON(!e);
+		acpar.thoff = 0;
+		if (!ip6_packet_match(skb, indev, outdev, &e->ipv6,
+		    &acpar.thoff, &acpar.fragoff, &acpar.hotdrop)) {
+ no_match:
+			e = ip6t_next_entry(e);
+			continue;
+		}
+
+		xt_ematch_foreach(ematch, e) {
+			acpar.match     = ematch->u.kernel.match;
+			acpar.matchinfo = ematch->data;
+			if (!acpar.match->match(skb, &acpar))
+				goto no_match;
+		}
+
+		counter = xt_get_this_cpu_counter(&e->counters);
+		ADD_COUNTER(*counter, skb->len, 1);
+
+		t = ip6t_get_target_c(e);
+		WARN_ON(!t->u.kernel.target);
+
+// #if IS_ENABLED(CONFIG_NETFILTER_XT_TARGET_TRACE)
+		/* The packet is traced: log it */
+		if (unlikely(skb->nf_trace))
+			trace_packet(state->net, skb, hook, state->in,
+				     state->out, table->name, private, e);
+#endif
+		/* Standard target? */
+		if (!t->u.kernel.target->target) {
+			int v;
+
+			v = ((struct xt_standard_target *)t)->verdict;
+			if (v < 0) {
+				/* Pop from stack? */
+				if (v != XT_RETURN) {
+					verdict = (unsigned int)(-v) - 1;
+					break;
+				}
+				if (stackidx == 0)
+					e = get_entry(table_base,
+					    private->underflow[hook]);
+				else
+					e = ip6t_next_entry(jumpstack[--stackidx]);
+				continue;
+			}
+			if (table_base + v != ip6t_next_entry(e) &&
+			    !(e->ipv6.flags & IP6T_F_GOTO)) {
+				if (unlikely(stackidx >= private->stacksize)) {
+					verdict = NF_DROP;
+					break;
+				}
+				jumpstack[stackidx++] = e;
+			}
+
+			e = get_entry(table_base, v);
+			continue;
+		}
+
+		acpar.target   = t->u.kernel.target;
+		acpar.targinfo = t->data;
+
+		verdict = t->u.kernel.target->target(skb, &acpar);
+		if (verdict == XT_CONTINUE)
+			e = ip6t_next_entry(e);
+		else
+			/* Verdict */
+			break;
+	} while (!acpar.hotdrop);
+
+	xt_write_recseq_end(addend);
+	local_bh_enable();
+
+	if (acpar.hotdrop)
+		return NF_DROP;
+	else return verdict;
+}
+The corrected function: unsigned int
+ip6t_do_table(struct sk_buff *skb,
+	      const struct nf_hook_state *state,
+	      struct xt_table *table)
+{
+	unsigned int hook = state->hook;
+	static const char nulldevname[IFNAMSIZ] __attribute__((aligned(sizeof(long))));
+	/* Initializing verdict to NF_DROP keeps gcc happy. */
+	unsigned int verdict = NF_DROP;
+	const char *indev, *outdev;
+	const void *table_base;
+	struct ip6t_entry *e, **jumpstack;
+	unsigned int stackidx, cpu;
+	const struct xt_table_info *private;
+	struct xt_action_param acpar;
+	unsigned int addend;
+
+	/* Initialization */
+	stackidx = 0;
+	indev = state->in ? state->in->name : nulldevname;
+	outdev = state->out ? state->out->name : nulldevname;
+	/* We handle fragments by dealing with the first fragment as
+	 * if it was a normal packet.  All other fragments are treated
+	 * normally, except that they will NEVER match rules that ask
+	 * things we don't know, ie. tcp syn flag or ports).  If the
+	 * rule is also a fragment-specific rule, non-fragments won't
+	 * match it. */
+	acpar.hotdrop = false;
+	acpar.state   = state;
+
+	WARN_ON(!(table->valid_hooks & (1 << hook)));
+
+	local_bh_disable();
+	addend = xt_write_recseq_begin();
+	private = rcu_access_pointer(table->private);
+	cpu        = smp_processor_id();
+	table_base = private->entries;
+	jumpstack  = (struct ip6t_entry **)private->jumpstack[cpu];
+
+	/* Switch to alternate jumpstack if we're being invoked via TEE.
+	 * TEE issues XT_CONTINUE verdict on original skb so we must not
+	 * clobber the jumpstack.
+	 *
+	 * For recursion via REJECT or SYNPROXY the stack will be clobbered
+	 * but it is no problem since absolute verdict is issued by these.
+	 */
+	if (static_key_false(&xt_tee_enabled))
+		jumpstack += private->stacksize * __this_cpu_read(nf_skb_duplicated);
+
+	e = get_entry(table_base, private->hook_entry[hook]);
+
+	do {
+		const struct xt_entry_target *t;
+		const struct xt_entry_match *ematch;
+		struct xt_counters *counter;
+
+		WARN_ON(!e);
+		acpar.thoff = 0;
+		if (!ip6_packet_match(skb, indev, outdev, &e->ipv6,
+		    &acpar.thoff, &acpar.fragoff, &acpar.hotdrop)) {
+ no_match:
+			e = ip6t_next_entry(e);
+			continue;
+		}
+
+		xt_ematch_foreach(ematch, e) {
+			acpar.match     = ematch->u.kernel.match;
+			acpar.matchinfo = ematch->data;
+			if (!acpar.match->match(skb, &acpar))
+				goto no_match;
+		}
+
+		counter = xt_get_this_cpu_counter(&e->counters);
+		ADD_COUNTER(*counter, skb->len, 1);
+
+		t = ip6t_get_target_c(e);
+		WARN_ON(!t->u.kernel.target);
+
+// #if IS_ENABLED(CONFIG_NETFILTER_XT_TARGET_TRACE)
+		/* The packet is traced: log it */
+		if (unlikely(skb->nf_trace))
+			trace_packet(state->net, skb, hook, state->in,
+				     state->out, table->name, private, e);
+#endif
+		/* Standard target? */
+		if (!t->u.kernel.target->target) {
+			int v;
+
+			v = ((struct xt_standard_target *)t)->verdict;
+			if (v < 0) {
+				/* Pop from stack? */
+				if (v != XT_RETURN) {
+					verdict = (unsigned int)(-v) - 1;
+					break;
+				}
+				if (stackidx == 0)
+					e = get_entry(table_base,
+					    private->underflow[hook]);
+				else
+					e = ip6t_next_entry(jumpstack[--stackidx]);
+				continue;
+			}
+			if (table_base + v != ip6t_next_entry(e) &&
+			    !(e->ipv6.flags & IP6T_F_GOTO)) {
+				if (unlikely(stackidx >= private->stacksize)) {
+					verdict = NF_DROP;
+					break;
+				}
+				jumpstack[stackidx++] = e;
+			}
+
+			e = get_entry(table_base, v);
+			continue;
+		}
+
+		acpar.target   = t->u.kernel.target;
+		acpar.targinfo = t->data;
+
+		verdict = t->u.kernel.target->target(skb, &acpar);
+		if (verdict == XT_CONTINUE)
+			e = ip6t_next_entry(e);
+		else
+			/* Verdict */
+			break;
+	} while (!acpar.hotdrop);
+
+	xt_write_recseq_end(addend);
+	local_bh_enable();
+
+	if (acpar.hotdrop)
+		return NF_DROP;
+	else return verdict;
+}

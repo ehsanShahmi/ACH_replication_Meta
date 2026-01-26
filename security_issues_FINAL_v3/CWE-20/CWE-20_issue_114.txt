@@ -1,0 +1,52 @@
+The vulnerable issue: pids: fix fork_idle() to setup ->pids correctly
+
+copy_process(pid => &init_struct_pid) doesn't do attach_pid/etc.
+
+It shouldn't, but this means that the idle threads run with the wrong
+pids copied from the caller's task_struct. In x86 case the caller is
+either kernel_init() thread or keventd.
+
+In particular, this means that after the series of cpu_up/cpu_down an
+idle thread (which never exits) can run with .pid pointing to nowhere.
+
+Change fork_idle() to initialize idle->pids[] correctly. We only set
+.pid = &init_struct_pid but do not add .node to list, INIT_TASK() does
+the same for the boot-cpu idle thread (swapper).
+
+Signed-off-by: Oleg Nesterov <oleg@redhat.com>
+Cc: Cedric Le Goater <clg@fr.ibm.com>
+Cc: Dave Hansen <haveblue@us.ibm.com>
+Cc: Eric Biederman <ebiederm@xmission.com>
+Cc: Herbert Poetzl <herbert@13thfloor.at>
+Cc: Mathias Krause <Mathias.Krause@secunet.com>
+Acked-by: Roland McGrath <roland@redhat.com>
+Acked-by: Serge Hallyn <serue@us.ibm.com>
+Cc: Sukadev Bhattiprolu <sukadev@us.ibm.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+The vulnerable function: struct task_struct * __cpuinit fork_idle(int cpu)
+{
+	struct task_struct *task;
+	struct pt_regs regs;
+
+	task = copy_process(CLONE_VM, 0, idle_regs(&regs), 0, NULL,
+			    &init_struct_pid, 0);
+	if (!IS_ERR(task))
+		init_idle(task, cpu);
+
+	return task;
+}
+The corrected function: struct task_struct * __cpuinit fork_idle(int cpu)
+{
+	struct task_struct *task;
+	struct pt_regs regs;
+
+	task = copy_process(CLONE_VM, 0, idle_regs(&regs), 0, NULL,
+			    &init_struct_pid, 0);
+	if (!IS_ERR(task)) {
+		init_idle_pids(task->pids);
+		init_idle(task, cpu);
+	}
+
+	return task;
+}

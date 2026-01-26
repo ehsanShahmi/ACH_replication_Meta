@@ -1,0 +1,19 @@
+net: ip_expire() must revalidate route
+
+Commit 4a94445c9a5c (net: Use ip_route_input_noref() in input path)
+added a bug in IP defragmentation handling, in case timeout is fired.
+
+When a frame is defragmented, we use last skb dst field when building
+final skb. Its dst is valid, since we are in rcu read section.
+
+But if a timeout occurs, we take first queued fragment to build one ICMP
+TIME EXCEEDED message. Problem is all queued skb have weak dst pointers,
+since we escaped RCU critical section after their queueing. icmp_send()
+might dereference a now freed (and possibly reused) part of memory.
+
+Calling skb_dst_drop() and ip_route_input_noref() to revalidate route is
+the only possible choice.
+
+Reported-by: Denys Fedoryshchenko <denys@visp.net.lb>
+Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>

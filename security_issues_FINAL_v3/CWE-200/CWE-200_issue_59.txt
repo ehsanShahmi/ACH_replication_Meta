@@ -1,0 +1,83 @@
+The vulnerable issue: fix infoleak in waitid(2)
+
+kernel_waitid() can return a PID, an error or 0.  rusage is filled in the first
+case and waitid(2) rusage should've been copied out exactly in that case, *not*
+whenever kernel_waitid() has not returned an error.  Compat variant shares that
+braino; none of kernel_wait4() callers do, so the below ought to fix it.
+
+Reported-and-tested-by: Alexander Potapenko <glider@google.com>
+Fixes: ce72a16fa705 ("wait4(2)/waitid(2): separate copying rusage to userland")
+Cc: stable@vger.kernel.org # v4.13
+Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+The vulnerable function: COMPAT_SYSCALL_DEFINE5(waitid,
+		int, which, compat_pid_t, pid,
+		struct compat_siginfo __user *, infop, int, options,
+		struct compat_rusage __user *, uru)
+{
+	struct rusage ru;
+	struct waitid_info info = {.status = 0};
+	long err = kernel_waitid(which, pid, &info, options, uru ? &ru : NULL);
+	int signo = 0;
+	if (err > 0) {
+		signo = SIGCHLD;
+		err = 0;
+	}
+
+	if (!err && uru) {
+		/* kernel_waitid() overwrites everything in ru */
+		if (COMPAT_USE_64BIT_TIME)
+			err = copy_to_user(uru, &ru, sizeof(ru));
+		else
+			err = put_compat_rusage(&ru, uru);
+		if (err)
+			return -EFAULT;
+	}
+
+	if (!infop)
+		return err;
+
+	user_access_begin();
+	unsafe_put_user(signo, &infop->si_signo, Efault);
+	unsafe_put_user(0, &infop->si_errno, Efault);
+	unsafe_put_user(info.cause, &infop->si_code, Efault);
+	unsafe_put_user(info.pid, &infop->si_pid, Efault);
+	unsafe_put_user(info.uid, &infop->si_uid, Efault);
+	unsafe_put_user(info.status, &infop->si_status, Efault);
+	user_access_end();
+	return err;
+Efault:
+	user_access_end();
+	return -EFAULT;
+}
+The corrected function: SYSCALL_DEFINE5(waitid, int, which, pid_t, upid, struct siginfo __user *,
+		infop, int, options, struct rusage __user *, ru)
+{
+	struct rusage r;
+	struct waitid_info info = {.status = 0};
+	long err = kernel_waitid(which, upid, &info, options, ru ? &r : NULL);
+	int signo = 0;
+	if (err > 0) {
+		signo = SIGCHLD;
+		err = 0;
+	}
+
+	if (!err) {
+		if (ru && copy_to_user(ru, &r, sizeof(struct rusage)))
+			return -EFAULT;
+	}
+	if (!infop)
+		return err;
+
+	user_access_begin();
+	unsafe_put_user(signo, &infop->si_signo, Efault);
+	unsafe_put_user(0, &infop->si_errno, Efault);
+	unsafe_put_user(info.cause, &infop->si_code, Efault);
+	unsafe_put_user(info.pid, &infop->si_pid, Efault);
+	unsafe_put_user(info.uid, &infop->si_uid, Efault);
+	unsafe_put_user(info.status, &infop->si_status, Efault);
+	user_access_end();
+	return err;
+Efault:
+	user_access_end();
+	return -EFAULT;
+}

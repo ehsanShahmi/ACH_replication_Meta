@@ -1,0 +1,9 @@
+io_uring/msg_ring: check file type before putting
+
+If we're invoked with a fixed file, follow the normal rules of not
+calling io_fput_file(). Fixed files are permanently registered to the
+ring, and do not need putting separately.
+
+Cc: stable@vger.kernel.org
+Fixes: aa184e8671f0 ("io_uring: don't attempt to IOPOLL for MSG_RING requests")
+Signed-off-by: Jens Axboe <axboe@kernel.dk>

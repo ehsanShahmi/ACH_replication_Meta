@@ -1,0 +1,15 @@
+mm: avoid wrapping vm_pgoff in mremap()
+
+The normal mmap paths all avoid creating a mapping where the pgoff
+inside the mapping could wrap around due to overflow.  However, an
+expanding mremap() can take such a non-wrapping mapping and make it
+bigger and cause a wrapping condition.
+
+Noticed by Robert Swiecki when running a system call fuzzer, where it
+caused a BUG_ON() due to terminally confusing the vma_prio_tree code.  A
+vma dumping patch by Hugh then pinpointed the crazy wrapped case.
+
+Reported-and-tested-by: Robert Swiecki <robert@swiecki.net>
+Acked-by: Hugh Dickins <hughd@google.com>
+Cc: stable@kernel.org
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>

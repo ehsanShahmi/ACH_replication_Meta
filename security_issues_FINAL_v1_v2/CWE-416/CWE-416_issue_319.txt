@@ -1,0 +1,9 @@
+fs/smb/client: Reset password pointer to NULL
+
+Forget to reset ctx->password to NULL will lead to bug like double free
+
+Cc: stable@vger.kernel.org
+Cc: Willy Tarreau <w@1wt.eu>
+Reviewed-by: Namjae Jeon <linkinjeon@kernel.org>
+Signed-off-by: Quang Le <quanglex97@gmail.com>
+Signed-off-by: Steve French <stfrench@microsoft.com>

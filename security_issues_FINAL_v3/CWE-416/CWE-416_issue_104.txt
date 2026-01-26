@@ -1,0 +1,207 @@
+The vulnerable issue: RDMA/irdma: Fix a user-after-free in add_pble_prm
+
+When irdma_hmc_sd_one fails, 'chunk' is freed while its still on the PBLE
+info list.
+
+Add the chunk entry to the PBLE info list only after successful setting of
+the SD in irdma_hmc_sd_one.
+
+Fixes: e8c4dbc2fcac ("RDMA/irdma: Add PBLE resource manager")
+Link: https://lore.kernel.org/r/20211207152135.2192-1-shiraz.saleem@intel.com
+Reported-by: Dan Carpenter <dan.carpenter@oracle.com>
+Signed-off-by: Shiraz Saleem <shiraz.saleem@intel.com>
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+The vulnerable function: static enum irdma_status_code
+add_pble_prm(struct irdma_hmc_pble_rsrc *pble_rsrc)
+{
+	struct irdma_sc_dev *dev = pble_rsrc->dev;
+	struct irdma_hmc_sd_entry *sd_entry;
+	struct irdma_hmc_info *hmc_info;
+	struct irdma_chunk *chunk;
+	struct irdma_add_page_info info;
+	struct sd_pd_idx *idx = &info.idx;
+	enum irdma_status_code ret_code = 0;
+	enum irdma_sd_entry_type sd_entry_type;
+	u64 sd_reg_val = 0;
+	struct irdma_virt_mem chunkmem;
+	u32 pages;
+
+	if (pble_rsrc->unallocated_pble < PBLE_PER_PAGE)
+		return IRDMA_ERR_NO_MEMORY;
+
+	if (pble_rsrc->next_fpm_addr & 0xfff)
+		return IRDMA_ERR_INVALID_PAGE_DESC_INDEX;
+
+	chunkmem.size = sizeof(*chunk);
+	chunkmem.va = kzalloc(chunkmem.size, GFP_KERNEL);
+	if (!chunkmem.va)
+		return IRDMA_ERR_NO_MEMORY;
+
+	chunk = chunkmem.va;
+	chunk->chunkmem = chunkmem;
+	hmc_info = dev->hmc_info;
+	chunk->dev = dev;
+	chunk->fpm_addr = pble_rsrc->next_fpm_addr;
+	get_sd_pd_idx(pble_rsrc, idx);
+	sd_entry = &hmc_info->sd_table.sd_entry[idx->sd_idx];
+	pages = (idx->rel_pd_idx) ? (IRDMA_HMC_PD_CNT_IN_SD - idx->rel_pd_idx) :
+				    IRDMA_HMC_PD_CNT_IN_SD;
+	pages = min(pages, pble_rsrc->unallocated_pble >> PBLE_512_SHIFT);
+	info.chunk = chunk;
+	info.hmc_info = hmc_info;
+	info.pages = pages;
+	info.sd_entry = sd_entry;
+	if (!sd_entry->valid)
+		sd_entry_type = irdma_get_type(dev, idx, pages);
+	else
+		sd_entry_type = sd_entry->entry_type;
+
+	ibdev_dbg(to_ibdev(dev),
+		  "PBLE: pages = %d, unallocated_pble[%d] current_fpm_addr = %llx\n",
+		  pages, pble_rsrc->unallocated_pble,
+		  pble_rsrc->next_fpm_addr);
+	ibdev_dbg(to_ibdev(dev), "PBLE: sd_entry_type = %d\n", sd_entry_type);
+	if (sd_entry_type == IRDMA_SD_TYPE_DIRECT)
+		ret_code = add_sd_direct(pble_rsrc, &info);
+
+	if (ret_code)
+		sd_entry_type = IRDMA_SD_TYPE_PAGED;
+	else
+		pble_rsrc->stats_direct_sds++;
+
+	if (sd_entry_type == IRDMA_SD_TYPE_PAGED) {
+		ret_code = add_bp_pages(pble_rsrc, &info);
+		if (ret_code)
+			goto error;
+		else
+			pble_rsrc->stats_paged_sds++;
+	}
+
+	ret_code = irdma_prm_add_pble_mem(&pble_rsrc->pinfo, chunk);
+	if (ret_code)
+		goto error;
+
+	pble_rsrc->next_fpm_addr += chunk->size;
+	ibdev_dbg(to_ibdev(dev),
+		  "PBLE: next_fpm_addr = %llx chunk_size[%llu] = 0x%llx\n",
+		  pble_rsrc->next_fpm_addr, chunk->size, chunk->size);
+	pble_rsrc->unallocated_pble -= (u32)(chunk->size >> 3);
+	list_add(&chunk->list, &pble_rsrc->pinfo.clist);
+	sd_reg_val = (sd_entry_type == IRDMA_SD_TYPE_PAGED) ?
+			     sd_entry->u.pd_table.pd_page_addr.pa :
+			     sd_entry->u.bp.addr.pa;
+
+	if (!sd_entry->valid) {
+		ret_code = irdma_hmc_sd_one(dev, hmc_info->hmc_fn_id, sd_reg_val,
+					    idx->sd_idx, sd_entry->entry_type, true);
+		if (ret_code)
+			goto error;
+	}
+
+	sd_entry->valid = true;
+	return 0;
+
+error:
+	if (chunk->bitmapbuf)
+		kfree(chunk->bitmapmem.va);
+	kfree(chunk->chunkmem.va);
+
+	return ret_code;
+}
+The corrected function: static enum irdma_status_code
+add_pble_prm(struct irdma_hmc_pble_rsrc *pble_rsrc)
+{
+	struct irdma_sc_dev *dev = pble_rsrc->dev;
+	struct irdma_hmc_sd_entry *sd_entry;
+	struct irdma_hmc_info *hmc_info;
+	struct irdma_chunk *chunk;
+	struct irdma_add_page_info info;
+	struct sd_pd_idx *idx = &info.idx;
+	enum irdma_status_code ret_code = 0;
+	enum irdma_sd_entry_type sd_entry_type;
+	u64 sd_reg_val = 0;
+	struct irdma_virt_mem chunkmem;
+	u32 pages;
+
+	if (pble_rsrc->unallocated_pble < PBLE_PER_PAGE)
+		return IRDMA_ERR_NO_MEMORY;
+
+	if (pble_rsrc->next_fpm_addr & 0xfff)
+		return IRDMA_ERR_INVALID_PAGE_DESC_INDEX;
+
+	chunkmem.size = sizeof(*chunk);
+	chunkmem.va = kzalloc(chunkmem.size, GFP_KERNEL);
+	if (!chunkmem.va)
+		return IRDMA_ERR_NO_MEMORY;
+
+	chunk = chunkmem.va;
+	chunk->chunkmem = chunkmem;
+	hmc_info = dev->hmc_info;
+	chunk->dev = dev;
+	chunk->fpm_addr = pble_rsrc->next_fpm_addr;
+	get_sd_pd_idx(pble_rsrc, idx);
+	sd_entry = &hmc_info->sd_table.sd_entry[idx->sd_idx];
+	pages = (idx->rel_pd_idx) ? (IRDMA_HMC_PD_CNT_IN_SD - idx->rel_pd_idx) :
+				    IRDMA_HMC_PD_CNT_IN_SD;
+	pages = min(pages, pble_rsrc->unallocated_pble >> PBLE_512_SHIFT);
+	info.chunk = chunk;
+	info.hmc_info = hmc_info;
+	info.pages = pages;
+	info.sd_entry = sd_entry;
+	if (!sd_entry->valid)
+		sd_entry_type = irdma_get_type(dev, idx, pages);
+	else
+		sd_entry_type = sd_entry->entry_type;
+
+	ibdev_dbg(to_ibdev(dev),
+		  "PBLE: pages = %d, unallocated_pble[%d] current_fpm_addr = %llx\n",
+		  pages, pble_rsrc->unallocated_pble,
+		  pble_rsrc->next_fpm_addr);
+	ibdev_dbg(to_ibdev(dev), "PBLE: sd_entry_type = %d\n", sd_entry_type);
+	if (sd_entry_type == IRDMA_SD_TYPE_DIRECT)
+		ret_code = add_sd_direct(pble_rsrc, &info);
+
+	if (ret_code)
+		sd_entry_type = IRDMA_SD_TYPE_PAGED;
+	else
+		pble_rsrc->stats_direct_sds++;
+
+	if (sd_entry_type == IRDMA_SD_TYPE_PAGED) {
+		ret_code = add_bp_pages(pble_rsrc, &info);
+		if (ret_code)
+			goto error;
+		else
+			pble_rsrc->stats_paged_sds++;
+	}
+
+	ret_code = irdma_prm_add_pble_mem(&pble_rsrc->pinfo, chunk);
+	if (ret_code)
+		goto error;
+
+	pble_rsrc->next_fpm_addr += chunk->size;
+	ibdev_dbg(to_ibdev(dev),
+		  "PBLE: next_fpm_addr = %llx chunk_size[%llu] = 0x%llx\n",
+		  pble_rsrc->next_fpm_addr, chunk->size, chunk->size);
+	pble_rsrc->unallocated_pble -= (u32)(chunk->size >> 3);
+	sd_reg_val = (sd_entry_type == IRDMA_SD_TYPE_PAGED) ?
+			     sd_entry->u.pd_table.pd_page_addr.pa :
+			     sd_entry->u.bp.addr.pa;
+
+	if (!sd_entry->valid) {
+		ret_code = irdma_hmc_sd_one(dev, hmc_info->hmc_fn_id, sd_reg_val,
+					    idx->sd_idx, sd_entry->entry_type, true);
+		if (ret_code)
+			goto error;
+	}
+
+	list_add(&chunk->list, &pble_rsrc->pinfo.clist);
+	sd_entry->valid = true;
+	return 0;
+
+error:
+	if (chunk->bitmapbuf)
+		kfree(chunk->bitmapmem.va);
+	kfree(chunk->chunkmem.va);
+
+	return ret_code;
+}

@@ -1,0 +1,191 @@
+The vulnerable issue: can: sja1000: fix use after free in ems_pcmcia_add_card()
+
+If the last channel is not available then "dev" is freed.  Fortunately,
+we can just use "pdev->irq" instead.
+
+Also we should check if at least one channel was set up.
+
+Fixes: fd734c6f25ae ("can/sja1000: add driver for EMS PCMCIA card")
+Link: https://lore.kernel.org/all/20211124145041.GB13656@kili
+Cc: stable@vger.kernel.org
+Signed-off-by: Dan Carpenter <dan.carpenter@oracle.com>
+Acked-by: Oliver Hartkopp <socketcan@hartkopp.net>
+Tested-by: Oliver Hartkopp <socketcan@hartkopp.net>
+Signed-off-by: Marc Kleine-Budde <mkl@pengutronix.de>
+The vulnerable function: static int ems_pcmcia_add_card(struct pcmcia_device *pdev, unsigned long base)
+{
+	struct sja1000_priv *priv;
+	struct net_device *dev;
+	struct ems_pcmcia_card *card;
+	int err, i;
+
+	/* Allocating card structures to hold addresses, ... */
+	card = kzalloc(sizeof(struct ems_pcmcia_card), GFP_KERNEL);
+	if (!card)
+		return -ENOMEM;
+
+	pdev->priv = card;
+	card->channels = 0;
+
+	card->base_addr = ioremap(base, EMS_PCMCIA_MEM_SIZE);
+	if (!card->base_addr) {
+		err = -ENOMEM;
+		goto failure_cleanup;
+	}
+
+	/* Check for unique EMS CAN signature */
+	if (readw(card->base_addr) != 0xAA55) {
+		err = -ENODEV;
+		goto failure_cleanup;
+	}
+
+	/* Request board reset */
+	writeb(EMS_CMD_RESET, card->base_addr);
+
+	/* Make sure CAN controllers are mapped into card's memory space */
+	writeb(EMS_CMD_MAP, card->base_addr);
+
+	/* Detect available channels */
+	for (i = 0; i < EMS_PCMCIA_MAX_CHAN; i++) {
+		dev = alloc_sja1000dev(0);
+		if (!dev) {
+			err = -ENOMEM;
+			goto failure_cleanup;
+		}
+
+		card->net_dev[i] = dev;
+		priv = netdev_priv(dev);
+		priv->priv = card;
+		SET_NETDEV_DEV(dev, &pdev->dev);
+		dev->dev_id = i;
+
+		priv->irq_flags = IRQF_SHARED;
+		dev->irq = pdev->irq;
+		priv->reg_base = card->base_addr + EMS_PCMCIA_CAN_BASE_OFFSET +
+			(i * EMS_PCMCIA_CAN_CTRL_SIZE);
+
+		/* Check if channel is present */
+		if (ems_pcmcia_check_chan(priv)) {
+			priv->read_reg  = ems_pcmcia_read_reg;
+			priv->write_reg = ems_pcmcia_write_reg;
+			priv->can.clock.freq = EMS_PCMCIA_CAN_CLOCK;
+			priv->ocr = EMS_PCMCIA_OCR;
+			priv->cdr = EMS_PCMCIA_CDR;
+			priv->flags |= SJA1000_CUSTOM_IRQ_HANDLER;
+
+			/* Register SJA1000 device */
+			err = register_sja1000dev(dev);
+			if (err) {
+				free_sja1000dev(dev);
+				goto failure_cleanup;
+			}
+
+			card->channels++;
+
+			printk(KERN_INFO "%s: registered %s on channel "
+			       "#%d at 0x%p, irq %d\n", DRV_NAME, dev->name,
+			       i, priv->reg_base, dev->irq);
+		} else
+			free_sja1000dev(dev);
+	}
+
+	err = request_irq(dev->irq, &ems_pcmcia_interrupt, IRQF_SHARED,
+			  DRV_NAME, card);
+	if (!err)
+		return 0;
+
+failure_cleanup:
+	ems_pcmcia_del_card(pdev);
+	return err;
+}
+The corrected function: static int ems_pcmcia_add_card(struct pcmcia_device *pdev, unsigned long base)
+{
+	struct sja1000_priv *priv;
+	struct net_device *dev;
+	struct ems_pcmcia_card *card;
+	int err, i;
+
+	/* Allocating card structures to hold addresses, ... */
+	card = kzalloc(sizeof(struct ems_pcmcia_card), GFP_KERNEL);
+	if (!card)
+		return -ENOMEM;
+
+	pdev->priv = card;
+	card->channels = 0;
+
+	card->base_addr = ioremap(base, EMS_PCMCIA_MEM_SIZE);
+	if (!card->base_addr) {
+		err = -ENOMEM;
+		goto failure_cleanup;
+	}
+
+	/* Check for unique EMS CAN signature */
+	if (readw(card->base_addr) != 0xAA55) {
+		err = -ENODEV;
+		goto failure_cleanup;
+	}
+
+	/* Request board reset */
+	writeb(EMS_CMD_RESET, card->base_addr);
+
+	/* Make sure CAN controllers are mapped into card's memory space */
+	writeb(EMS_CMD_MAP, card->base_addr);
+
+	/* Detect available channels */
+	for (i = 0; i < EMS_PCMCIA_MAX_CHAN; i++) {
+		dev = alloc_sja1000dev(0);
+		if (!dev) {
+			err = -ENOMEM;
+			goto failure_cleanup;
+		}
+
+		card->net_dev[i] = dev;
+		priv = netdev_priv(dev);
+		priv->priv = card;
+		SET_NETDEV_DEV(dev, &pdev->dev);
+		dev->dev_id = i;
+
+		priv->irq_flags = IRQF_SHARED;
+		dev->irq = pdev->irq;
+		priv->reg_base = card->base_addr + EMS_PCMCIA_CAN_BASE_OFFSET +
+			(i * EMS_PCMCIA_CAN_CTRL_SIZE);
+
+		/* Check if channel is present */
+		if (ems_pcmcia_check_chan(priv)) {
+			priv->read_reg  = ems_pcmcia_read_reg;
+			priv->write_reg = ems_pcmcia_write_reg;
+			priv->can.clock.freq = EMS_PCMCIA_CAN_CLOCK;
+			priv->ocr = EMS_PCMCIA_OCR;
+			priv->cdr = EMS_PCMCIA_CDR;
+			priv->flags |= SJA1000_CUSTOM_IRQ_HANDLER;
+
+			/* Register SJA1000 device */
+			err = register_sja1000dev(dev);
+			if (err) {
+				free_sja1000dev(dev);
+				goto failure_cleanup;
+			}
+
+			card->channels++;
+
+			printk(KERN_INFO "%s: registered %s on channel "
+			       "#%d at 0x%p, irq %d\n", DRV_NAME, dev->name,
+			       i, priv->reg_base, dev->irq);
+		} else
+			free_sja1000dev(dev);
+	}
+
+	if (!card->channels) {
+		err = -ENODEV;
+		goto failure_cleanup;
+	}
+
+	err = request_irq(pdev->irq, &ems_pcmcia_interrupt, IRQF_SHARED,
+			  DRV_NAME, card);
+	if (!err)
+		return 0;
+
+failure_cleanup:
+	ems_pcmcia_del_card(pdev);
+	return err;
+}

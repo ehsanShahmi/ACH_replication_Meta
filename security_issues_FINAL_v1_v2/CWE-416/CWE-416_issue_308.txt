@@ -1,0 +1,16 @@
+usb: dwc3: st: fix probed platform device ref count on probe error path
+
+The probe function never performs any paltform device allocation, thus
+error path "undo_platform_dev_alloc" is entirely bogus.  It drops the
+reference count from the platform device being probed.  If error path is
+triggered, this will lead to unbalanced device reference counts and
+premature release of device resources, thus possible use-after-free when
+releasing remaining devm-managed resources.
+
+Fixes: f83fca0707c6 ("usb: dwc3: add ST dwc3 glue layer to manage dwc3 HC")
+Cc: stable@vger.kernel.org
+Signed-off-by: Krzysztof Kozlowski <krzysztof.kozlowski@linaro.org>
+Acked-by: Thinh Nguyen <Thinh.Nguyen@synopsys.com>
+Reviewed-by: Patrice Chotard <patrice.chotard@foss.st.com>
+Link: https://lore.kernel.org/r/20240814093957.37940-1-krzysztof.kozlowski@linaro.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>

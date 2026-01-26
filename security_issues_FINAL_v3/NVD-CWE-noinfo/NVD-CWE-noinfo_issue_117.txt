@@ -1,0 +1,127 @@
+The vulnerable issue: Bluetooth: af_bluetooth: Fix Use-After-Free in bt_sock_recvmsg
+
+This can cause a race with bt_sock_ioctl() because
+bt_sock_recvmsg() gets the skb from sk->sk_receive_queue
+and then frees it without holding lock_sock.
+A use-after-free for a skb occurs with the following flow.
+```
+bt_sock_recvmsg() -> skb_recv_datagram() -> skb_free_datagram()
+bt_sock_ioctl() -> skb_peek()
+```
+Add lock_sock to bt_sock_recvmsg() to fix this issue.
+
+Cc: stable@vger.kernel.org
+Fixes: 1da177e4c3f4 ("Linux-2.6.12-rc2")
+Signed-off-by: Hyunwoo Kim <v4bel@theori.io>
+Signed-off-by: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+The vulnerable function: int bt_sock_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
+		    int flags)
+{
+	struct sock *sk = sock->sk;
+	struct sk_buff *skb;
+	size_t copied;
+	size_t skblen;
+	int err;
+
+	BT_DBG("sock %p sk %p len %zu", sock, sk, len);
+
+	if (flags & MSG_OOB)
+		return -EOPNOTSUPP;
+
+	skb = skb_recv_datagram(sk, flags, &err);
+	if (!skb) {
+		if (sk->sk_shutdown & RCV_SHUTDOWN)
+			return 0;
+
+		return err;
+	}
+
+	skblen = skb->len;
+	copied = skb->len;
+	if (len < copied) {
+		msg->msg_flags |= MSG_TRUNC;
+		copied = len;
+	}
+
+	skb_reset_transport_header(skb);
+	err = skb_copy_datagram_msg(skb, 0, msg, copied);
+	if (err == 0) {
+		sock_recv_cmsgs(msg, sk, skb);
+
+		if (msg->msg_name && bt_sk(sk)->skb_msg_name)
+			bt_sk(sk)->skb_msg_name(skb, msg->msg_name,
+						&msg->msg_namelen);
+
+		if (test_bit(BT_SK_PKT_STATUS, &bt_sk(sk)->flags)) {
+			u8 pkt_status = hci_skb_pkt_status(skb);
+
+			put_cmsg(msg, SOL_BLUETOOTH, BT_SCM_PKT_STATUS,
+				 sizeof(pkt_status), &pkt_status);
+		}
+	}
+
+	skb_free_datagram(sk, skb);
+
+	if (flags & MSG_TRUNC)
+		copied = skblen;
+
+	return err ? : copied;
+}
+The corrected function: int bt_sock_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
+		    int flags)
+{
+	struct sock *sk = sock->sk;
+	struct sk_buff *skb;
+	size_t copied;
+	size_t skblen;
+	int err;
+
+	BT_DBG("sock %p sk %p len %zu", sock, sk, len);
+
+	if (flags & MSG_OOB)
+		return -EOPNOTSUPP;
+
+	lock_sock(sk);
+
+	skb = skb_recv_datagram(sk, flags, &err);
+	if (!skb) {
+		if (sk->sk_shutdown & RCV_SHUTDOWN)
+			err = 0;
+
+		release_sock(sk);
+		return err;
+	}
+
+	skblen = skb->len;
+	copied = skb->len;
+	if (len < copied) {
+		msg->msg_flags |= MSG_TRUNC;
+		copied = len;
+	}
+
+	skb_reset_transport_header(skb);
+	err = skb_copy_datagram_msg(skb, 0, msg, copied);
+	if (err == 0) {
+		sock_recv_cmsgs(msg, sk, skb);
+
+		if (msg->msg_name && bt_sk(sk)->skb_msg_name)
+			bt_sk(sk)->skb_msg_name(skb, msg->msg_name,
+						&msg->msg_namelen);
+
+		if (test_bit(BT_SK_PKT_STATUS, &bt_sk(sk)->flags)) {
+			u8 pkt_status = hci_skb_pkt_status(skb);
+
+			put_cmsg(msg, SOL_BLUETOOTH, BT_SCM_PKT_STATUS,
+				 sizeof(pkt_status), &pkt_status);
+		}
+	}
+
+	skb_free_datagram(sk, skb);
+
+	release_sock(sk);
+
+	if (flags & MSG_TRUNC)
+		copied = skblen;
+
+	return err ? : copied;
+}

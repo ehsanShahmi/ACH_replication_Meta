@@ -1,0 +1,8 @@
+atm: idt77252: prevent use after free in dequeue_rx()
+
+We can't dereference "skb" after calling vcc->push() because the skb
+is released.
+
+Fixes: 1da177e4c3f4 ("Linux-2.6.12-rc2")
+Signed-off-by: Dan Carpenter <dan.carpenter@linaro.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>

@@ -1,0 +1,12 @@
+jfs: Fix shift-out-of-bounds in dbDiscardAG
+
+When searching for the next smaller log2 block, BLKSTOL2() returned 0,
+causing shift exponent -1 to be negative.
+
+This patch fixes the issue by exiting the loop directly when negative
+shift is found.
+
+Reported-by: syzbot+61be3359d2ee3467e7e4@syzkaller.appspotmail.com
+Closes: https://syzkaller.appspot.com/bug?extid=61be3359d2ee3467e7e4
+Signed-off-by: Pei Li <peili.dev@gmail.com>
+Signed-off-by: Dave Kleikamp <dave.kleikamp@oracle.com>

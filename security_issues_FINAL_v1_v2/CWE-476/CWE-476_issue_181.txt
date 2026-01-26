@@ -1,0 +1,11 @@
+drm: mali-dp: potential dereference of null pointer
+
+The return value of kzalloc() needs to be checked.
+To avoid use of null pointer '&state->base' in case of the
+failure of alloc.
+
+Fixes: 99665d072183 ("drm: mali-dp: add malidp_crtc_state struct")
+Signed-off-by: Jiasheng Jiang <jiasheng@iscas.ac.cn>
+Reviewed-by: Brian Starkey <brian.starkey@arm.com>
+Signed-off-by: Liviu Dudau <liviu.dudau@arm.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20211214100837.46912-1-jiasheng@iscas.ac.cn

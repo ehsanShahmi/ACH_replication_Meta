@@ -1,0 +1,54 @@
+The vulnerable issue: virtio_console: Assure used length from device is limited
+
+The buf->len might come from an untrusted device. This
+ensures the value would not exceed the size of the buffer
+to avoid data corruption or loss.
+
+Signed-off-by: Xie Yongji <xieyongji@bytedance.com>
+Acked-by: Jason Wang <jasowang@redhat.com>
+Link: https://lore.kernel.org/r/20210525125622.1203-1-xieyongji@bytedance.com
+Signed-off-by: Michael S. Tsirkin <mst@redhat.com>
+The vulnerable function: static struct port_buffer *get_inbuf(struct port *port)
+{
+	struct port_buffer *buf;
+	unsigned int len;
+
+	if (port->inbuf)
+		return port->inbuf;
+
+	buf = virtqueue_get_buf(port->in_vq, &len);
+	if (buf) {
+		buf->len = len;
+		buf->offset = 0;
+		port->stats.bytes_received += len;
+	}
+	return buf;
+}
+The corrected function: static void control_work_handler(struct work_struct *work)
+{
+	struct ports_device *portdev;
+	struct virtqueue *vq;
+	struct port_buffer *buf;
+	unsigned int len;
+
+	portdev = container_of(work, struct ports_device, control_work);
+	vq = portdev->c_ivq;
+
+	spin_lock(&portdev->c_ivq_lock);
+	while ((buf = virtqueue_get_buf(vq, &len))) {
+		spin_unlock(&portdev->c_ivq_lock);
+
+		buf->len = min_t(size_t, len, buf->size);
+		buf->offset = 0;
+
+		handle_control_message(vq->vdev, portdev, buf);
+
+		spin_lock(&portdev->c_ivq_lock);
+		if (add_inbuf(portdev->c_ivq, buf) < 0) {
+			dev_warn(&portdev->vdev->dev,
+				 "Error adding buffer to queue\n");
+			free_buf(buf, false);
+		}
+	}
+	spin_unlock(&portdev->c_ivq_lock);
+}

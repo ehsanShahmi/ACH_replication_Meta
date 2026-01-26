@@ -1,0 +1,10 @@
+Bluetooth: L2CAP: Fix attempting to access uninitialized memory
+
+On l2cap_parse_conf_req the variable efs is only initialized if
+remote_efs has been set.
+
+CVE: CVE-2022-42895
+CC: stable@vger.kernel.org
+Reported-by: Tamás Koczka <poprdi@google.com>
+Signed-off-by: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Reviewed-by: Tedd Ho-Jeong An <tedd.an@intel.com>

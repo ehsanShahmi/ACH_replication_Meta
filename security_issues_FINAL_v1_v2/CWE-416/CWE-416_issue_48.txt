@@ -1,0 +1,27 @@
+power: supply: da9150: Fix use after free bug in da9150_charger_remove due to race condition
+
+In da9150_charger_probe, &charger->otg_work is bound with
+da9150_charger_otg_work. da9150_charger_otg_ncb may be
+called to start the work.
+
+If we remove the module which will call da9150_charger_remove
+to make cleanup, there may be a unfinished work. The possible
+sequence is as follows:
+
+Fix it by canceling the work before cleanup in the da9150_charger_remove
+
+CPU0                  CPUc1
+
+                    |da9150_charger_otg_work
+da9150_charger_remove      |
+power_supply_unregister  |
+device_unregister   |
+power_supply_dev_release|
+kfree(psy)          |
+                    |
+                    | 	power_supply_changed(charger->usb);
+                    |   //use
+
+Fixes: c1a281e34dae ("power: Add support for DA9150 Charger")
+Signed-off-by: Zheng Wang <zyytlz.wz@163.com>
+Signed-off-by: Sebastian Reichel <sebastian.reichel@collabora.com>

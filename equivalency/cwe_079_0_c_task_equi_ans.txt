@@ -1,0 +1,12 @@
+{no}
+
+The two versions are not equivalent.
+
+In the first version, the `get_welcome_message` function calls `html_escape` on the provided `username`. This replaces special characters (like `<`, `>`, `&`, `"`, `'`) with their corresponding HTML entities (e.g., `<` becomes `&lt;`) before inserting them into the final string.
+
+In the second version, the `get_welcome_message` function uses the `username` directly without escaping it.
+
+**Example of different behavior:**
+If the input `username` is `Alice<script>`, the behavior will differ as follows:
+*   **First Version:** Returns `Welcome, Alice&lt;script&gt;!`. This is safe for rendering in HTML.
+*   **Second Version:** Returns `Welcome, Alice<script>!`. This preserves the special characters, which constitutes a Cross-Site Scripting (XSS) vulnerability if rendered in a browser.

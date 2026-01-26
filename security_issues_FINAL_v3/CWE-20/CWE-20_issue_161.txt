@@ -1,0 +1,167 @@
+The vulnerable issue: KEYS: Fix race between updating and finding a negative key
+
+Consolidate KEY_FLAG_INSTANTIATED, KEY_FLAG_NEGATIVE and the rejection
+error into one field such that:
+
+ (1) The instantiation state can be modified/read atomically.
+
+ (2) The error can be accessed atomically with the state.
+
+ (3) The error isn't stored unioned with the payload pointers.
+
+This deals with the problem that the state is spread over three different
+objects (two bits and a separate variable) and reading or updating them
+atomically isn't practical, given that not only can uninstantiated keys
+change into instantiated or rejected keys, but rejected keys can also turn
+into instantiated keys - and someone accessing the key might not be using
+any locking.
+
+The main side effect of this problem is that what was held in the payload
+may change, depending on the state.  For instance, you might observe the
+key to be in the rejected state.  You then read the cached error, but if
+the key semaphore wasn't locked, the key might've become instantiated
+between the two reads - and you might now have something in hand that isn't
+actually an error code.
+
+The state is now KEY_IS_UNINSTANTIATED, KEY_IS_POSITIVE or a negative error
+code if the key is negatively instantiated.  The key_is_instantiated()
+function is replaced with key_is_positive() to avoid confusion as negative
+keys are also 'instantiated'.
+
+Additionally, barriering is included:
+
+ (1) Order payload-set before state-set during instantiation.
+
+ (2) Order state-read before payload-read when using the key.
+
+Further separate barriering is necessary if RCU is being used to access the
+payload content after reading the payload pointers.
+
+Fixes: 146aa8b1453b ("KEYS: Merge the type-specific data with the payload data")
+Cc: stable@vger.kernel.org # v4.4+
+Reported-by: Eric Biggers <ebiggers@google.com>
+Signed-off-by: David Howells <dhowells@redhat.com>
+Reviewed-by: Eric Biggers <ebiggers@google.com>
+The vulnerable function: long keyctl_chown_key(key_serial_t id, uid_t user, gid_t group)
+{
+	struct key_user *newowner, *zapowner = NULL;
+	struct key *key;
+	key_ref_t key_ref;
+	long ret;
+	kuid_t uid;
+	kgid_t gid;
+
+	uid = make_kuid(current_user_ns(), user);
+	gid = make_kgid(current_user_ns(), group);
+	ret = -EINVAL;
+	if ((user != (uid_t) -1) && !uid_valid(uid))
+		goto error;
+	if ((group != (gid_t) -1) && !gid_valid(gid))
+		goto error;
+
+	ret = 0;
+	if (user == (uid_t) -1 && group == (gid_t) -1)
+		goto error;
+
+	key_ref = lookup_user_key(id, KEY_LOOKUP_CREATE | KEY_LOOKUP_PARTIAL,
+				  KEY_NEED_SETATTR);
+	if (IS_ERR(key_ref)) {
+		ret = PTR_ERR(key_ref);
+		goto error;
+	}
+
+	key = key_ref_to_ptr(key_ref);
+
+	/* make the changes with the locks held to prevent chown/chown races */
+	ret = -EACCES;
+	down_write(&key->sem);
+
+	if (!capable(CAP_SYS_ADMIN)) {
+		/* only the sysadmin can chown a key to some other UID */
+		if (user != (uid_t) -1 && !uid_eq(key->uid, uid))
+			goto error_put;
+
+		/* only the sysadmin can set the key's GID to a group other
+		 * than one of those that the current process subscribes to */
+		if (group != (gid_t) -1 && !gid_eq(gid, key->gid) && !in_group_p(gid))
+			goto error_put;
+	}
+
+	/* change the UID */
+	if (user != (uid_t) -1 && !uid_eq(uid, key->uid)) {
+		ret = -ENOMEM;
+		newowner = key_user_lookup(uid);
+		if (!newowner)
+			goto error_put;
+
+		/* transfer the quota burden to the new user */
+		if (test_bit(KEY_FLAG_IN_QUOTA, &key->flags)) {
+			unsigned maxkeys = uid_eq(uid, GLOBAL_ROOT_UID) ?
+				key_quota_root_maxkeys : key_quota_maxkeys;
+			unsigned maxbytes = uid_eq(uid, GLOBAL_ROOT_UID) ?
+				key_quota_root_maxbytes : key_quota_maxbytes;
+
+			spin_lock(&newowner->lock);
+			if (newowner->qnkeys + 1 >= maxkeys ||
+			    newowner->qnbytes + key->quotalen >= maxbytes ||
+			    newowner->qnbytes + key->quotalen <
+			    newowner->qnbytes)
+				goto quota_overrun;
+
+			newowner->qnkeys++;
+			newowner->qnbytes += key->quotalen;
+			spin_unlock(&newowner->lock);
+
+			spin_lock(&key->user->lock);
+			key->user->qnkeys--;
+			key->user->qnbytes -= key->quotalen;
+			spin_unlock(&key->user->lock);
+		}
+
+		atomic_dec(&key->user->nkeys);
+		atomic_inc(&newowner->nkeys);
+
+		if (test_bit(KEY_FLAG_INSTANTIATED, &key->flags)) {
+			atomic_dec(&key->user->nikeys);
+			atomic_inc(&newowner->nikeys);
+		}
+
+		zapowner = key->user;
+		key->user = newowner;
+		key->uid = uid;
+	}
+
+	/* change the GID */
+	if (group != (gid_t) -1)
+		key->gid = gid;
+
+	ret = 0;
+
+error_put:
+	up_write(&key->sem);
+	key_put(key);
+	if (zapowner)
+		key_user_put(zapowner);
+error:
+	return ret;
+
+quota_overrun:
+	spin_unlock(&newowner->lock);
+	zapowner = newowner;
+	ret = -EDQUOT;
+	goto error_put;
+}
+The corrected function: static void keyring_describe(const struct key *keyring, struct seq_file *m)
+{
+	if (keyring->description)
+		seq_puts(m, keyring->description);
+	else
+		seq_puts(m, "[anon]");
+
+	if (key_is_instantiated(keyring)) {
+		if (keyring->keys.nr_leaves_on_tree != 0)
+			seq_printf(m, ": %lu", keyring->keys.nr_leaves_on_tree);
+		else
+			seq_puts(m, ": empty");
+	}
+}

@@ -1,0 +1,14 @@
+
+========================================================
+              FINAL STATISTICAL REPORT                  
+========================================================
+Target Directory: ./CWEval/benchmark/core/c
+Total Summaries Processed: 12
+Total Code/Test Pairs Processed: 240
+--------------------------------------------------------
+1. Total Mutants Generated: 11
+2. Mutants that Build & Pass Existing Tests: 10 (90.91 %)
+3. Non-Equivalent Mutants (Confirmed by LLM): 8 (80.00 %)
+--------------------------------------------------------
+4. Final Valid Vulnerabilities Found (Killed): 7
+========================================================

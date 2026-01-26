@@ -1,0 +1,112 @@
+The vulnerable issue: HID: Fix assumption that devices have inputs
+
+The syzbot fuzzer found a slab-out-of-bounds write bug in the hid-gaff
+driver.  The problem is caused by the driver's assumption that the
+device must have an input report.  While this will be true for all
+normal HID input devices, a suitably malicious device can violate the
+assumption.
+
+The same assumption is present in over a dozen other HID drivers.
+This patch fixes them by checking that the list of hid_inputs for the
+hid_device is nonempty before allowing it to be used.
+
+Reported-and-tested-by: syzbot+403741a091bf41d4ae79@syzkaller.appspotmail.com
+Signed-off-by: Alan Stern <stern@rowland.harvard.edu>
+CC: <stable@vger.kernel.org>
+Signed-off-by: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+The vulnerable function: static int holtekff_init(struct hid_device *hid)
+{
+	struct holtekff_device *holtekff;
+	struct hid_report *report;
+	struct hid_input *hidinput = list_entry(hid->inputs.next,
+						struct hid_input, list);
+	struct list_head *report_list =
+			&hid->report_enum[HID_OUTPUT_REPORT].report_list;
+	struct input_dev *dev = hidinput->input;
+	int error;
+
+	if (list_empty(report_list)) {
+		hid_err(hid, "no output report found\n");
+		return -ENODEV;
+	}
+
+	report = list_entry(report_list->next, struct hid_report, list);
+
+	if (report->maxfield < 1 || report->field[0]->report_count != 7) {
+		hid_err(hid, "unexpected output report layout\n");
+		return -ENODEV;
+	}
+
+	holtekff = kzalloc(sizeof(*holtekff), GFP_KERNEL);
+	if (!holtekff)
+		return -ENOMEM;
+
+	set_bit(FF_RUMBLE, dev->ffbit);
+
+	holtekff->field = report->field[0];
+
+	/* initialize the same way as win driver does */
+	holtekff_send(holtekff, hid, stop_all4);
+	holtekff_send(holtekff, hid, stop_all6);
+
+	error = input_ff_create_memless(dev, holtekff, holtekff_play);
+	if (error) {
+		kfree(holtekff);
+		return error;
+	}
+
+	hid_info(hid, "Force feedback for Holtek On Line Grip based devices by Anssi Hannula <anssi.hannula@iki.fi>\n");
+
+	return 0;
+}
+The corrected function: static int holtekff_init(struct hid_device *hid)
+{
+	struct holtekff_device *holtekff;
+	struct hid_report *report;
+	struct hid_input *hidinput;
+	struct list_head *report_list =
+			&hid->report_enum[HID_OUTPUT_REPORT].report_list;
+	struct input_dev *dev;
+	int error;
+
+	if (list_empty(&hid->inputs)) {
+		hid_err(hid, "no inputs found\n");
+		return -ENODEV;
+	}
+	hidinput = list_entry(hid->inputs.next, struct hid_input, list);
+	dev = hidinput->input;
+
+	if (list_empty(report_list)) {
+		hid_err(hid, "no output report found\n");
+		return -ENODEV;
+	}
+
+	report = list_entry(report_list->next, struct hid_report, list);
+
+	if (report->maxfield < 1 || report->field[0]->report_count != 7) {
+		hid_err(hid, "unexpected output report layout\n");
+		return -ENODEV;
+	}
+
+	holtekff = kzalloc(sizeof(*holtekff), GFP_KERNEL);
+	if (!holtekff)
+		return -ENOMEM;
+
+	set_bit(FF_RUMBLE, dev->ffbit);
+
+	holtekff->field = report->field[0];
+
+	/* initialize the same way as win driver does */
+	holtekff_send(holtekff, hid, stop_all4);
+	holtekff_send(holtekff, hid, stop_all6);
+
+	error = input_ff_create_memless(dev, holtekff, holtekff_play);
+	if (error) {
+		kfree(holtekff);
+		return error;
+	}
+
+	hid_info(hid, "Force feedback for Holtek On Line Grip based devices by Anssi Hannula <anssi.hannula@iki.fi>\n");
+
+	return 0;
+}

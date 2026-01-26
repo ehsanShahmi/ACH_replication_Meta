@@ -1,0 +1,14 @@
+x86/xen: Use clear_bss() for Xen PV guests
+
+Instead of clearing the bss area in assembly code, use the clear_bss()
+function.
+
+This requires to pass the start_info address as parameter to
+xen_start_kernel() in order to avoid the xen_start_info being zeroed
+again.
+
+Signed-off-by: Juergen Gross <jgross@suse.com>
+Signed-off-by: Borislav Petkov <bp@suse.de>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Boris Ostrovsky <boris.ostrovsky@oracle.com>
+Link: https://lore.kernel.org/r/20220630071441.28576-2-jgross@suse.com

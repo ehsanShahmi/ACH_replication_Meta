@@ -1,0 +1,65 @@
+The vulnerable issue: f2fs: fix a dead loop in f2fs_fiemap()
+
+A dead loop can be triggered in f2fs_fiemap() using the test case
+as below:
+
+	...
+	fd = open();
+	fallocate(fd, 0, 0, 4294967296);
+	ioctl(fd, FS_IOC_FIEMAP, fiemap_buf);
+	...
+
+It's caused by an overflow in __get_data_block():
+	...
+	bh->b_size = map.m_len << inode->i_blkbits;
+	...
+map.m_len is an unsigned int, and bh->b_size is a size_t which is 64 bits
+on 64 bits archtecture, type conversion from an unsigned int to a size_t
+will result in an overflow.
+
+In the above-mentioned case, bh->b_size will be zero, and f2fs_fiemap()
+will call get_data_block() at block 0 again an again.
+
+Fix this by adding a force conversion before left shift.
+
+Signed-off-by: Wei Fang <fangwei1@huawei.com>
+Acked-by: Chao Yu <yuchao0@huawei.com>
+Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+The vulnerable function: static int __get_data_block(struct inode *inode, sector_t iblock,
+			struct buffer_head *bh, int create, int flag,
+			pgoff_t *next_pgofs)
+{
+	struct f2fs_map_blocks map;
+	int err;
+
+	map.m_lblk = iblock;
+	map.m_len = bh->b_size >> inode->i_blkbits;
+	map.m_next_pgofs = next_pgofs;
+
+	err = f2fs_map_blocks(inode, &map, create, flag);
+	if (!err) {
+		map_bh(bh, inode->i_sb, map.m_pblk);
+		bh->b_state = (bh->b_state & ~F2FS_MAP_FLAGS) | map.m_flags;
+		bh->b_size = map.m_len << inode->i_blkbits;
+	}
+	return err;
+}
+The corrected function: static int __get_data_block(struct inode *inode, sector_t iblock,
+			struct buffer_head *bh, int create, int flag,
+			pgoff_t *next_pgofs)
+{
+	struct f2fs_map_blocks map;
+	int err;
+
+	map.m_lblk = iblock;
+	map.m_len = bh->b_size >> inode->i_blkbits;
+	map.m_next_pgofs = next_pgofs;
+
+	err = f2fs_map_blocks(inode, &map, create, flag);
+	if (!err) {
+		map_bh(bh, inode->i_sb, map.m_pblk);
+		bh->b_state = (bh->b_state & ~F2FS_MAP_FLAGS) | map.m_flags;
+		bh->b_size = (u64)map.m_len << inode->i_blkbits;
+	}
+	return err;
+}
