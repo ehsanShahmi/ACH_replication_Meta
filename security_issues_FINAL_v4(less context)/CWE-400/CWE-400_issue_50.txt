@@ -1,0 +1,126 @@
+The vulnerable issue:
+perf: Remove the nmi parameter from the swevent and overflow interface
+
+The nmi parameter indicated if we could do wakeups from the current
+context, if not, we would set some state and self-IPI and let the
+resulting interrupt do the wakeup.
+
+For the various event classes:
+
+  - hardware: nmi=0; PMI is in fact an NMI or we run irq_work_run from
+    the PMI-tail (ARM etc.)
+  - tracepoint: nmi=0; since tracepoint could be from NMI context.
+  - software: nmi=[0,1]; some, like the schedule thing cannot
+    perform wakeups, and hence need 0.
+
+As one can see, there is very little nmi=1 usage, and the down-side of
+not using it is that on some platforms some software events can have a
+jiffy delay in wakeup (when arch_irq_work_raise isn't implemented).
+
+The up-side however is that we can remove the nmi parameter and save a
+bunch of conditionals in fast paths.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: Michael Cree <mcree@orcon.net.nz>
+Cc: Will Deacon <will.deacon@arm.com>
+Cc: Deng-Cheng Zhu <dengcheng.zhu@gmail.com>
+Cc: Anton Blanchard <anton@samba.org>
+Cc: Eric B Munson <emunson@mgebm.net>
+Cc: Heiko Carstens <heiko.carstens@de.ibm.com>
+Cc: Paul Mundt <lethal@linux-sh.org>
+Cc: David S. Miller <davem@davemloft.net>
+Cc: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Jason Wessel <jason.wessel@windriver.com>
+Cc: Don Zickus <dzickus@redhat.com>
+Link: http://lkml.kernel.org/n/tip-agjev8eu666tvknpb3iaj0fg@git.kernel.org
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+
+
+The vulnerable function:
+static void __intel_pmu_pebs_event(struct perf_event *event,
+				   struct pt_regs *iregs, void *__pebs)
+{
+	/*
+	 * We cast to pebs_record_core since that is a subset of
+	 * both formats and we don't use the other fields in this
+	 * routine.
+	 */
+	struct pebs_record_core *pebs = __pebs;
+	struct perf_sample_data data;
+	struct pt_regs regs;
+
+	if (!intel_pmu_save_and_restart(event))
+		return;
+
+	perf_sample_data_init(&data, 0);
+	data.period = event->hw.last_period;
+
+	/*
+	 * We use the interrupt regs as a base because the PEBS record
+	 * does not contain a full regs set, specifically it seems to
+	 * lack segment descriptors, which get used by things like
+	 * user_mode().
+	 *
+	 * In the simple case fix up only the IP and BP,SP regs, for
+	 * PERF_SAMPLE_IP and PERF_SAMPLE_CALLCHAIN to function properly.
+	 * A possible PERF_SAMPLE_REGS will have to transfer all regs.
+	 */
+	regs = *iregs;
+	regs.ip = pebs->ip;
+	regs.bp = pebs->bp;
+	regs.sp = pebs->sp;
+
+	if (event->attr.precise_ip > 1 && intel_pmu_pebs_fixup_ip(&regs))
+		regs.flags |= PERF_EFLAGS_EXACT;
+	else
+		regs.flags &= ~PERF_EFLAGS_EXACT;
+
+	if (perf_event_overflow(event, 1, &data, &regs))
+		x86_pmu_stop(event, 0);
+}
+
+
+
+The corrected function:
+static void __intel_pmu_pebs_event(struct perf_event *event,
+				   struct pt_regs *iregs, void *__pebs)
+{
+	/*
+	 * We cast to pebs_record_core since that is a subset of
+	 * both formats and we don't use the other fields in this
+	 * routine.
+	 */
+	struct pebs_record_core *pebs = __pebs;
+	struct perf_sample_data data;
+	struct pt_regs regs;
+
+	if (!intel_pmu_save_and_restart(event))
+		return;
+
+	perf_sample_data_init(&data, 0);
+	data.period = event->hw.last_period;
+
+	/*
+	 * We use the interrupt regs as a base because the PEBS record
+	 * does not contain a full regs set, specifically it seems to
+	 * lack segment descriptors, which get used by things like
+	 * user_mode().
+	 *
+	 * In the simple case fix up only the IP and BP,SP regs, for
+	 * PERF_SAMPLE_IP and PERF_SAMPLE_CALLCHAIN to function properly.
+	 * A possible PERF_SAMPLE_REGS will have to transfer all regs.
+	 */
+	regs = *iregs;
+	regs.ip = pebs->ip;
+	regs.bp = pebs->bp;
+	regs.sp = pebs->sp;
+
+	if (event->attr.precise_ip > 1 && intel_pmu_pebs_fixup_ip(&regs))
+		regs.flags |= PERF_EFLAGS_EXACT;
+	else
+		regs.flags &= ~PERF_EFLAGS_EXACT;
+
+	if (perf_event_overflow(event, &data, &regs))
+		x86_pmu_stop(event, 0);
+}

@@ -1,0 +1,123 @@
+This issue file has CWE-362. Your task is to create this CWE-362 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+Initialize msg/shm IPC objects before doing ipc_addid()
+
+As reported by Dmitry Vyukov, we really shouldn't do ipc_addid() before
+having initialized the IPC object state.  Yes, we initialize the IPC
+object in a locked state, but with all the lockless RCU lookup work,
+that IPC object lock no longer means that the state cannot be seen.
+
+We already did this for the IPC semaphore code (see commit e8577d1f0329:
+"ipc/sem.c: fully initialize sem_array before making it visible") but we
+clearly forgot about msg and shm.
+
+Reported-by: Dmitry Vyukov <dvyukov@google.com>
+Cc: Manfred Spraul <manfred@colorfullife.com>
+Cc: Davidlohr Bueso <dbueso@suse.de>
+Cc: stable@vger.kernel.org
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+int ipc_addid(struct ipc_ids *ids, struct kern_ipc_perm *new, int size)
+{
+	kuid_t euid;
+	kgid_t egid;
+	int id;
+	int next_id = ids->next_id;
+
+	if (size > IPCMNI)
+		size = IPCMNI;
+
+	if (ids->in_use >= size)
+		return -ENOSPC;
+
+	idr_preload(GFP_KERNEL);
+
+	spin_lock_init(&new->lock);
+	new->deleted = false;
+	rcu_read_lock();
+	spin_lock(&new->lock);
+
+	id = idr_alloc(&ids->ipcs_idr, new,
+		       (next_id < 0) ? 0 : ipcid_to_idx(next_id), 0,
+		       GFP_NOWAIT);
+	idr_preload_end();
+	if (id < 0) {
+		spin_unlock(&new->lock);
+		rcu_read_unlock();
+		return id;
+	}
+
+	ids->in_use++;
+
+	current_euid_egid(&euid, &egid);
+	new->cuid = new->uid = euid;
+	new->gid = new->cgid = egid;
+
+	if (next_id < 0) {
+		new->seq = ids->seq++;
+		if (ids->seq > IPCID_SEQ_MAX)
+			ids->seq = 0;
+	} else {
+		new->seq = ipcid_to_seqx(next_id);
+		ids->next_id = -1;
+	}
+
+	new->id = ipc_buildid(id, new->seq);
+	return id;
+}
+
+
+
+The corrected function:
+int ipc_addid(struct ipc_ids *ids, struct kern_ipc_perm *new, int size)
+{
+	kuid_t euid;
+	kgid_t egid;
+	int id;
+	int next_id = ids->next_id;
+
+	if (size > IPCMNI)
+		size = IPCMNI;
+
+	if (ids->in_use >= size)
+		return -ENOSPC;
+
+	idr_preload(GFP_KERNEL);
+
+	spin_lock_init(&new->lock);
+	new->deleted = false;
+	rcu_read_lock();
+	spin_lock(&new->lock);
+
+	current_euid_egid(&euid, &egid);
+	new->cuid = new->uid = euid;
+	new->gid = new->cgid = egid;
+
+	id = idr_alloc(&ids->ipcs_idr, new,
+		       (next_id < 0) ? 0 : ipcid_to_idx(next_id), 0,
+		       GFP_NOWAIT);
+	idr_preload_end();
+	if (id < 0) {
+		spin_unlock(&new->lock);
+		rcu_read_unlock();
+		return id;
+	}
+
+	ids->in_use++;
+
+	if (next_id < 0) {
+		new->seq = ids->seq++;
+		if (ids->seq > IPCID_SEQ_MAX)
+			ids->seq = 0;
+	} else {
+		new->seq = ipcid_to_seqx(next_id);
+		ids->next_id = -1;
+	}
+
+	new->id = ipc_buildid(id, new->seq);
+	return id;
+}

@@ -1,0 +1,138 @@
+The vulnerable issue:
+mm/rmap: Fix anon_vma->degree ambiguity leading to double-reuse
+
+anon_vma->degree tracks the combined number of child anon_vmas and VMAs
+that use the anon_vma as their ->anon_vma.
+
+anon_vma_clone() then assumes that for any anon_vma attached to
+src->anon_vma_chain other than src->anon_vma, it is impossible for it to
+be a leaf node of the VMA tree, meaning that for such VMAs ->degree is
+elevated by 1 because of a child anon_vma, meaning that if ->degree
+equals 1 there are no VMAs that use the anon_vma as their ->anon_vma.
+
+This assumption is wrong because the ->degree optimization leads to leaf
+nodes being abandoned on anon_vma_clone() - an existing anon_vma is
+reused and no new parent-child relationship is created.  So it is
+possible to reuse an anon_vma for one VMA while it is still tied to
+another VMA.
+
+This is an issue because is_mergeable_anon_vma() and its callers assume
+that if two VMAs have the same ->anon_vma, the list of anon_vmas
+attached to the VMAs is guaranteed to be the same.  When this assumption
+is violated, vma_merge() can merge pages into a VMA that is not attached
+to the corresponding anon_vma, leading to dangling page->mapping
+pointers that will be dereferenced during rmap walks.
+
+Fix it by separately tracking the number of child anon_vmas and the
+number of VMAs using the anon_vma as their ->anon_vma.
+
+Fixes: 7a3ef208e662 ("mm: prevent endless growth of anon_vma hierarchy")
+Cc: stable@kernel.org
+Acked-by: Michal Hocko <mhocko@suse.com>
+Acked-by: Vlastimil Babka <vbabka@suse.cz>
+Signed-off-by: Jann Horn <jannh@google.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+int anon_vma_clone(struct vm_area_struct *dst, struct vm_area_struct *src)
+{
+	struct anon_vma_chain *avc, *pavc;
+	struct anon_vma *root = NULL;
+
+	list_for_each_entry_reverse(pavc, &src->anon_vma_chain, same_vma) {
+		struct anon_vma *anon_vma;
+
+		avc = anon_vma_chain_alloc(GFP_NOWAIT | __GFP_NOWARN);
+		if (unlikely(!avc)) {
+			unlock_anon_vma_root(root);
+			root = NULL;
+			avc = anon_vma_chain_alloc(GFP_KERNEL);
+			if (!avc)
+				goto enomem_failure;
+		}
+		anon_vma = pavc->anon_vma;
+		root = lock_anon_vma_root(root, anon_vma);
+		anon_vma_chain_link(dst, avc, anon_vma);
+
+		/*
+		 * Reuse existing anon_vma if its degree lower than two,
+		 * that means it has no vma and only one anon_vma child.
+		 *
+		 * Do not choose parent anon_vma, otherwise first child
+		 * will always reuse it. Root anon_vma is never reused:
+		 * it has self-parent reference and at least one child.
+		 */
+		if (!dst->anon_vma && src->anon_vma &&
+		    anon_vma != src->anon_vma && anon_vma->degree < 2)
+			dst->anon_vma = anon_vma;
+	}
+	if (dst->anon_vma)
+		dst->anon_vma->degree++;
+	unlock_anon_vma_root(root);
+	return 0;
+
+ enomem_failure:
+	/*
+	 * dst->anon_vma is dropped here otherwise its degree can be incorrectly
+	 * decremented in unlink_anon_vmas().
+	 * We can safely do this because callers of anon_vma_clone() don't care
+	 * about dst->anon_vma if anon_vma_clone() failed.
+	 */
+	dst->anon_vma = NULL;
+	unlink_anon_vmas(dst);
+	return -ENOMEM;
+}
+
+
+
+The corrected function:
+int anon_vma_clone(struct vm_area_struct *dst, struct vm_area_struct *src)
+{
+	struct anon_vma_chain *avc, *pavc;
+	struct anon_vma *root = NULL;
+
+	list_for_each_entry_reverse(pavc, &src->anon_vma_chain, same_vma) {
+		struct anon_vma *anon_vma;
+
+		avc = anon_vma_chain_alloc(GFP_NOWAIT | __GFP_NOWARN);
+		if (unlikely(!avc)) {
+			unlock_anon_vma_root(root);
+			root = NULL;
+			avc = anon_vma_chain_alloc(GFP_KERNEL);
+			if (!avc)
+				goto enomem_failure;
+		}
+		anon_vma = pavc->anon_vma;
+		root = lock_anon_vma_root(root, anon_vma);
+		anon_vma_chain_link(dst, avc, anon_vma);
+
+		/*
+		 * Reuse existing anon_vma if it has no vma and only one
+		 * anon_vma child.
+		 *
+		 * Root anon_vma is never reused:
+		 * it has self-parent reference and at least one child.
+		 */
+		if (!dst->anon_vma && src->anon_vma &&
+		    anon_vma->num_children < 2 &&
+		    anon_vma->num_active_vmas == 0)
+			dst->anon_vma = anon_vma;
+	}
+	if (dst->anon_vma)
+		dst->anon_vma->num_active_vmas++;
+	unlock_anon_vma_root(root);
+	return 0;
+
+ enomem_failure:
+	/*
+	 * dst->anon_vma is dropped here otherwise its degree can be incorrectly
+	 * decremented in unlink_anon_vmas().
+	 * We can safely do this because callers of anon_vma_clone() don't care
+	 * about dst->anon_vma if anon_vma_clone() failed.
+	 */
+	dst->anon_vma = NULL;
+	unlink_anon_vmas(dst);
+	return -ENOMEM;
+}

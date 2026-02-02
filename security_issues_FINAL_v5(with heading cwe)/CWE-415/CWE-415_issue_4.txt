@@ -1,0 +1,161 @@
+This issue file has CWE-415. Your task is to create this CWE-415 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+uio: Fix use-after-free in uio_open
+
+core-1				core-2
+-------------------------------------------------------
+uio_unregister_device		uio_open
+				idev = idr_find()
+device_unregister(&idev->dev)
+put_device(&idev->dev)
+uio_device_release
+				get_device(&idev->dev)
+kfree(idev)
+uio_free_minor(minor)
+				uio_release
+				put_device(&idev->dev)
+				kfree(idev)
+-------------------------------------------------------
+
+In the core-1 uio_unregister_device(), the device_unregister will kfree
+idev when the idev->dev kobject ref is 1. But after core-1
+device_unregister, put_device and before doing kfree, the core-2 may
+get_device. Then:
+1. After core-1 kfree idev, the core-2 will do use-after-free for idev.
+2. When core-2 do uio_release and put_device, the idev will be double
+   freed.
+
+To address this issue, we can get idev atomic & inc idev reference with
+minor_lock.
+
+Fixes: 57c5f4df0a5a ("uio: fix crash after the device is unregistered")
+Cc: stable <stable@kernel.org>
+Signed-off-by: Guanghui Feng <guanghuifeng@linux.alibaba.com>
+Reviewed-by: Baolin Wang <baolin.wang@linux.alibaba.com>
+Link: https://lore.kernel.org/r/1703152663-59949-1-git-send-email-guanghuifeng@linux.alibaba.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+
+
+The vulnerable function:
+static int uio_open(struct inode *inode, struct file *filep)
+{
+	struct uio_device *idev;
+	struct uio_listener *listener;
+	int ret = 0;
+
+	mutex_lock(&minor_lock);
+	idev = idr_find(&uio_idr, iminor(inode));
+	mutex_unlock(&minor_lock);
+	if (!idev) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	get_device(&idev->dev);
+
+	if (!try_module_get(idev->owner)) {
+		ret = -ENODEV;
+		goto err_module_get;
+	}
+
+	listener = kmalloc(sizeof(*listener), GFP_KERNEL);
+	if (!listener) {
+		ret = -ENOMEM;
+		goto err_alloc_listener;
+	}
+
+	listener->dev = idev;
+	listener->event_count = atomic_read(&idev->event);
+	filep->private_data = listener;
+
+	mutex_lock(&idev->info_lock);
+	if (!idev->info) {
+		mutex_unlock(&idev->info_lock);
+		ret = -EINVAL;
+		goto err_infoopen;
+	}
+
+	if (idev->info->open)
+		ret = idev->info->open(idev->info, inode);
+	mutex_unlock(&idev->info_lock);
+	if (ret)
+		goto err_infoopen;
+
+	return 0;
+
+err_infoopen:
+	kfree(listener);
+
+err_alloc_listener:
+	module_put(idev->owner);
+
+err_module_get:
+	put_device(&idev->dev);
+
+out:
+	return ret;
+}
+
+
+
+The corrected function:
+static int uio_open(struct inode *inode, struct file *filep)
+{
+	struct uio_device *idev;
+	struct uio_listener *listener;
+	int ret = 0;
+
+	mutex_lock(&minor_lock);
+	idev = idr_find(&uio_idr, iminor(inode));
+	if (!idev) {
+		ret = -ENODEV;
+		mutex_unlock(&minor_lock);
+		goto out;
+	}
+	get_device(&idev->dev);
+	mutex_unlock(&minor_lock);
+
+	if (!try_module_get(idev->owner)) {
+		ret = -ENODEV;
+		goto err_module_get;
+	}
+
+	listener = kmalloc(sizeof(*listener), GFP_KERNEL);
+	if (!listener) {
+		ret = -ENOMEM;
+		goto err_alloc_listener;
+	}
+
+	listener->dev = idev;
+	listener->event_count = atomic_read(&idev->event);
+	filep->private_data = listener;
+
+	mutex_lock(&idev->info_lock);
+	if (!idev->info) {
+		mutex_unlock(&idev->info_lock);
+		ret = -EINVAL;
+		goto err_infoopen;
+	}
+
+	if (idev->info->open)
+		ret = idev->info->open(idev->info, inode);
+	mutex_unlock(&idev->info_lock);
+	if (ret)
+		goto err_infoopen;
+
+	return 0;
+
+err_infoopen:
+	kfree(listener);
+
+err_alloc_listener:
+	module_put(idev->owner);
+
+err_module_get:
+	put_device(&idev->dev);
+
+out:
+	return ret;
+}

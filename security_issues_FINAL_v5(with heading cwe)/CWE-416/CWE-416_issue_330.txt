@@ -1,0 +1,114 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+net: arc_emac: Fix use after free in arc_mdio_probe()
+
+If bus->state is equal to MDIOBUS_ALLOCATED, mdiobus_free(bus) will free
+the "bus". But bus->name is still used in the next line, which will lead
+to a use after free.
+
+We can fix it by putting the name in a local variable and make the
+bus->name point to the rodata section "name",then use the name in the
+error message without referring to bus to avoid the uaf.
+
+Fixes: 95b5fc03c189 ("net: arc_emac: Make use of the helper function dev_err_probe()")
+Signed-off-by: Jianglei Nie <niejianglei2021@163.com>
+Link: https://lore.kernel.org/r/20220309121824.36529-1-niejianglei2021@163.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+
+
+The vulnerable function:
+int arc_mdio_probe(struct arc_emac_priv *priv)
+{
+	struct arc_emac_mdio_bus_data *data = &priv->bus_data;
+	struct device_node *np = priv->dev->of_node;
+	struct mii_bus *bus;
+	int error;
+
+	bus = mdiobus_alloc();
+	if (!bus)
+		return -ENOMEM;
+
+	priv->bus = bus;
+	bus->priv = priv;
+	bus->parent = priv->dev;
+	bus->name = "Synopsys MII Bus";
+	bus->read = &arc_mdio_read;
+	bus->write = &arc_mdio_write;
+	bus->reset = &arc_mdio_reset;
+
+	/* optional reset-related properties */
+	data->reset_gpio = devm_gpiod_get_optional(priv->dev, "phy-reset",
+						   GPIOD_OUT_LOW);
+	if (IS_ERR(data->reset_gpio)) {
+		mdiobus_free(bus);
+		return dev_err_probe(priv->dev, PTR_ERR(data->reset_gpio),
+				     "Failed to request gpio\n");
+	}
+
+	of_property_read_u32(np, "phy-reset-duration", &data->msec);
+	/* A sane reset duration should not be longer than 1s */
+	if (data->msec > 1000)
+		data->msec = 1;
+
+	snprintf(bus->id, MII_BUS_ID_SIZE, "%s", bus->name);
+
+	error = of_mdiobus_register(bus, priv->dev->of_node);
+	if (error) {
+		mdiobus_free(bus);
+		return dev_err_probe(priv->dev, error,
+				     "cannot register MDIO bus %s\n", bus->name);
+	}
+
+	return 0;
+}
+
+
+
+The corrected function:
+int arc_mdio_probe(struct arc_emac_priv *priv)
+{
+	struct arc_emac_mdio_bus_data *data = &priv->bus_data;
+	struct device_node *np = priv->dev->of_node;
+	const char *name = "Synopsys MII Bus";
+	struct mii_bus *bus;
+	int error;
+
+	bus = mdiobus_alloc();
+	if (!bus)
+		return -ENOMEM;
+
+	priv->bus = bus;
+	bus->priv = priv;
+	bus->parent = priv->dev;
+	bus->name = name;
+	bus->read = &arc_mdio_read;
+	bus->write = &arc_mdio_write;
+	bus->reset = &arc_mdio_reset;
+
+	/* optional reset-related properties */
+	data->reset_gpio = devm_gpiod_get_optional(priv->dev, "phy-reset",
+						   GPIOD_OUT_LOW);
+	if (IS_ERR(data->reset_gpio)) {
+		mdiobus_free(bus);
+		return dev_err_probe(priv->dev, PTR_ERR(data->reset_gpio),
+				     "Failed to request gpio\n");
+	}
+
+	of_property_read_u32(np, "phy-reset-duration", &data->msec);
+	/* A sane reset duration should not be longer than 1s */
+	if (data->msec > 1000)
+		data->msec = 1;
+
+	snprintf(bus->id, MII_BUS_ID_SIZE, "%s", bus->name);
+
+	error = of_mdiobus_register(bus, priv->dev->of_node);
+	if (error) {
+		mdiobus_free(bus);
+		return dev_err_probe(priv->dev, error,
+				     "cannot register MDIO bus %s\n", name);
+	}
+
+	return 0;
+}

@@ -1,0 +1,125 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+misc: sgi-gru: fix use-after-free error in gru_set_context_option, gru_fault and gru_handle_user_call_os
+
+In some bad situation, the gts may be freed gru_check_chiplet_assignment.
+The call chain can be gru_unload_context->gru_free_gru_context->gts_drop
+and kfree finally. However, the caller didn't know if the gts is freed
+or not and use it afterwards. This will trigger a Use after Free bug.
+
+Fix it by introducing a return value to see if it's in error path or not.
+Free the gts in caller if gru_check_chiplet_assignment check failed.
+
+Fixes: 55484c45dbec ("gru: allow users to specify gru chiplet 2")
+Signed-off-by: Zheng Wang <zyytlz.wz@163.com>
+Acked-by: Dimitri Sivanich <sivanich@hpe.com>
+Link: https://lore.kernel.org/r/20221110035033.19498-1-zyytlz.wz@163.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+
+
+The vulnerable function:
+vm_fault_t gru_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	struct gru_thread_state *gts;
+	unsigned long paddr, vaddr;
+	unsigned long expires;
+
+	vaddr = vmf->address;
+	gru_dbg(grudev, "vma %p, vaddr 0x%lx (0x%lx)\n",
+		vma, vaddr, GSEG_BASE(vaddr));
+	STAT(nopfn);
+
+	/* The following check ensures vaddr is a valid address in the VMA */
+	gts = gru_find_thread_state(vma, TSID(vaddr, vma));
+	if (!gts)
+		return VM_FAULT_SIGBUS;
+
+again:
+	mutex_lock(&gts->ts_ctxlock);
+	preempt_disable();
+
+	gru_check_context_placement(gts);
+
+	if (!gts->ts_gru) {
+		STAT(load_user_context);
+		if (!gru_assign_gru_context(gts)) {
+			preempt_enable();
+			mutex_unlock(&gts->ts_ctxlock);
+			set_current_state(TASK_INTERRUPTIBLE);
+			schedule_timeout(GRU_ASSIGN_DELAY);  /* true hack ZZZ */
+			expires = gts->ts_steal_jiffies + GRU_STEAL_DELAY;
+			if (time_before(expires, jiffies))
+				gru_steal_context(gts);
+			goto again;
+		}
+		gru_load_context(gts);
+		paddr = gseg_physical_address(gts->ts_gru, gts->ts_ctxnum);
+		remap_pfn_range(vma, vaddr & ~(GRU_GSEG_PAGESIZE - 1),
+				paddr >> PAGE_SHIFT, GRU_GSEG_PAGESIZE,
+				vma->vm_page_prot);
+	}
+
+	preempt_enable();
+	mutex_unlock(&gts->ts_ctxlock);
+
+	return VM_FAULT_NOPAGE;
+}
+
+
+
+The corrected function:
+vm_fault_t gru_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	struct gru_thread_state *gts;
+	unsigned long paddr, vaddr;
+	unsigned long expires;
+
+	vaddr = vmf->address;
+	gru_dbg(grudev, "vma %p, vaddr 0x%lx (0x%lx)\n",
+		vma, vaddr, GSEG_BASE(vaddr));
+	STAT(nopfn);
+
+	/* The following check ensures vaddr is a valid address in the VMA */
+	gts = gru_find_thread_state(vma, TSID(vaddr, vma));
+	if (!gts)
+		return VM_FAULT_SIGBUS;
+
+again:
+	mutex_lock(&gts->ts_ctxlock);
+	preempt_disable();
+
+	if (gru_check_context_placement(gts)) {
+		preempt_enable();
+		mutex_unlock(&gts->ts_ctxlock);
+		gru_unload_context(gts, 1);
+		return VM_FAULT_NOPAGE;
+	}
+
+	if (!gts->ts_gru) {
+		STAT(load_user_context);
+		if (!gru_assign_gru_context(gts)) {
+			preempt_enable();
+			mutex_unlock(&gts->ts_ctxlock);
+			set_current_state(TASK_INTERRUPTIBLE);
+			schedule_timeout(GRU_ASSIGN_DELAY);  /* true hack ZZZ */
+			expires = gts->ts_steal_jiffies + GRU_STEAL_DELAY;
+			if (time_before(expires, jiffies))
+				gru_steal_context(gts);
+			goto again;
+		}
+		gru_load_context(gts);
+		paddr = gseg_physical_address(gts->ts_gru, gts->ts_ctxnum);
+		remap_pfn_range(vma, vaddr & ~(GRU_GSEG_PAGESIZE - 1),
+				paddr >> PAGE_SHIFT, GRU_GSEG_PAGESIZE,
+				vma->vm_page_prot);
+	}
+
+	preempt_enable();
+	mutex_unlock(&gts->ts_ctxlock);
+
+	return VM_FAULT_NOPAGE;
+}

@@ -1,0 +1,270 @@
+The vulnerable issue:
+drm/xe: reset mmio mappings with devm
+
+Set our various mmio mappings to NULL. This should make it easier to
+catch something rogue trying to mess with mmio after device removal. For
+example, we might unmap everything and then start hitting some mmio
+address which has already been unmamped by us and then remapped by
+something else, causing all kinds of carnage.
+
+Signed-off-by: Matthew Auld <matthew.auld@intel.com>
+Cc: Andrzej Hajda <andrzej.hajda@intel.com>
+Cc: Rodrigo Vivi <rodrigo.vivi@intel.com>
+Reviewed-by: Andrzej Hajda <andrzej.hajda@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20240522102143.128069-33-matthew.auld@intel.com
+
+
+
+The vulnerable function:
+int xe_device_probe(struct xe_device *xe)
+{
+	struct xe_tile *tile;
+	struct xe_gt *gt;
+	int err;
+	u8 id;
+
+	xe_pat_init_early(xe);
+
+	err = xe_sriov_init(xe);
+	if (err)
+		return err;
+
+	xe->info.mem_region_mask = 1;
+	err = xe_display_init_nommio(xe);
+	if (err)
+		return err;
+
+	err = xe_set_dma_info(xe);
+	if (err)
+		return err;
+
+	xe_mmio_probe_tiles(xe);
+
+	xe_ttm_sys_mgr_init(xe);
+
+	for_each_gt(gt, xe, id) {
+		err = xe_gt_init_early(gt);
+		if (err)
+			return err;
+	}
+
+	for_each_tile(tile, xe, id) {
+		err = xe_ggtt_init_early(tile->mem.ggtt);
+		if (err)
+			return err;
+		if (IS_SRIOV_VF(xe)) {
+			err = xe_memirq_init(&tile->sriov.vf.memirq);
+			if (err)
+				return err;
+		}
+	}
+
+	for_each_gt(gt, xe, id) {
+		err = xe_gt_init_hwconfig(gt);
+		if (err)
+			return err;
+	}
+
+	err = xe_devcoredump_init(xe);
+	if (err)
+		return err;
+	err = devm_add_action_or_reset(xe->drm.dev, xe_driver_flr_fini, xe);
+	if (err)
+		return err;
+
+	err = xe_display_init_noirq(xe);
+	if (err)
+		return err;
+
+	err = xe_irq_install(xe);
+	if (err)
+		goto err;
+
+	err = xe_device_set_has_flat_ccs(xe);
+	if (err)
+		goto err_irq_shutdown;
+
+	err = xe_mmio_probe_vram(xe);
+	if (err)
+		goto err_irq_shutdown;
+
+	for_each_tile(tile, xe, id) {
+		err = xe_tile_init_noalloc(tile);
+		if (err)
+			goto err_irq_shutdown;
+	}
+
+	/* Allocate and map stolen after potential VRAM resize */
+	xe_ttm_stolen_mgr_init(xe);
+
+	/*
+	 * Now that GT is initialized (TTM in particular),
+	 * we can try to init display, and inherit the initial fb.
+	 * This is the reason the first allocation needs to be done
+	 * inside display.
+	 */
+	err = xe_display_init_noaccel(xe);
+	if (err)
+		goto err_irq_shutdown;
+
+	for_each_gt(gt, xe, id) {
+		err = xe_gt_init(gt);
+		if (err)
+			goto err_irq_shutdown;
+	}
+
+	xe_heci_gsc_init(xe);
+
+	err = xe_display_init(xe);
+	if (err)
+		goto err_irq_shutdown;
+
+	err = drm_dev_register(&xe->drm, 0);
+	if (err)
+		goto err_fini_display;
+
+	xe_display_register(xe);
+
+	xe_debugfs_register(xe);
+
+	xe_hwmon_register(xe);
+
+	return devm_add_action_or_reset(xe->drm.dev, xe_device_sanitize, xe);
+
+err_fini_display:
+	xe_display_driver_remove(xe);
+err_irq_shutdown:
+	xe_irq_shutdown(xe);
+err:
+	xe_display_fini(xe);
+	return err;
+}
+
+
+
+The corrected function:
+int xe_device_probe(struct xe_device *xe)
+{
+	struct xe_tile *tile;
+	struct xe_gt *gt;
+	int err;
+	u8 id;
+
+	xe_pat_init_early(xe);
+
+	err = xe_sriov_init(xe);
+	if (err)
+		return err;
+
+	xe->info.mem_region_mask = 1;
+	err = xe_display_init_nommio(xe);
+	if (err)
+		return err;
+
+	err = xe_set_dma_info(xe);
+	if (err)
+		return err;
+
+	err = xe_mmio_probe_tiles(xe);
+	if (err)
+		return err;
+
+	xe_ttm_sys_mgr_init(xe);
+
+	for_each_gt(gt, xe, id) {
+		err = xe_gt_init_early(gt);
+		if (err)
+			return err;
+	}
+
+	for_each_tile(tile, xe, id) {
+		err = xe_ggtt_init_early(tile->mem.ggtt);
+		if (err)
+			return err;
+		if (IS_SRIOV_VF(xe)) {
+			err = xe_memirq_init(&tile->sriov.vf.memirq);
+			if (err)
+				return err;
+		}
+	}
+
+	for_each_gt(gt, xe, id) {
+		err = xe_gt_init_hwconfig(gt);
+		if (err)
+			return err;
+	}
+
+	err = xe_devcoredump_init(xe);
+	if (err)
+		return err;
+	err = devm_add_action_or_reset(xe->drm.dev, xe_driver_flr_fini, xe);
+	if (err)
+		return err;
+
+	err = xe_display_init_noirq(xe);
+	if (err)
+		return err;
+
+	err = xe_irq_install(xe);
+	if (err)
+		goto err;
+
+	err = xe_device_set_has_flat_ccs(xe);
+	if (err)
+		goto err_irq_shutdown;
+
+	err = xe_mmio_probe_vram(xe);
+	if (err)
+		goto err_irq_shutdown;
+
+	for_each_tile(tile, xe, id) {
+		err = xe_tile_init_noalloc(tile);
+		if (err)
+			goto err_irq_shutdown;
+	}
+
+	/* Allocate and map stolen after potential VRAM resize */
+	xe_ttm_stolen_mgr_init(xe);
+
+	/*
+	 * Now that GT is initialized (TTM in particular),
+	 * we can try to init display, and inherit the initial fb.
+	 * This is the reason the first allocation needs to be done
+	 * inside display.
+	 */
+	err = xe_display_init_noaccel(xe);
+	if (err)
+		goto err_irq_shutdown;
+
+	for_each_gt(gt, xe, id) {
+		err = xe_gt_init(gt);
+		if (err)
+			goto err_irq_shutdown;
+	}
+
+	xe_heci_gsc_init(xe);
+
+	err = xe_display_init(xe);
+	if (err)
+		goto err_irq_shutdown;
+
+	err = drm_dev_register(&xe->drm, 0);
+	if (err)
+		goto err_fini_display;
+
+	xe_display_register(xe);
+
+	xe_debugfs_register(xe);
+
+	xe_hwmon_register(xe);
+
+	return devm_add_action_or_reset(xe->drm.dev, xe_device_sanitize, xe);
+
+err_fini_display:
+	xe_display_driver_remove(xe);
+err_irq_shutdown:
+	xe_irq_shutdown(xe);
+err:
+	xe_display_fini(xe);
+	return err;
+}

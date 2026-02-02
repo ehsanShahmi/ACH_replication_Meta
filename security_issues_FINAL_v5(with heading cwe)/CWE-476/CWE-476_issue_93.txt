@@ -1,0 +1,217 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+scsi: scsi_debug: Don't call kcalloc() if size arg is zero
+
+If the size arg to kcalloc() is zero, it returns ZERO_SIZE_PTR.  Because of
+that, for a following NULL pointer check to work on the returned pointer,
+kcalloc() must not be called with the size arg equal to zero. Return early
+without error before the kcalloc() call if size arg is zero.
+
+BUG: KASAN: null-ptr-deref in memcpy include/linux/fortify-string.h:191 [inline]
+BUG: KASAN: null-ptr-deref in sg_copy_buffer+0x138/0x240 lib/scatterlist.c:974
+Write of size 4 at addr 0000000000000010 by task syz-executor.1/22789
+
+CPU: 1 PID: 22789 Comm: syz-executor.1 Not tainted 5.15.0-syzk #1
+Hardware name: Red Hat KVM, BIOS 1.13.0-2
+Call Trace:
+ __dump_stack lib/dump_stack.c:88 [inline]
+ dump_stack_lvl+0x89/0xb5 lib/dump_stack.c:106
+ __kasan_report mm/kasan/report.c:446 [inline]
+ kasan_report.cold.14+0x112/0x117 mm/kasan/report.c:459
+ check_region_inline mm/kasan/generic.c:183 [inline]
+ kasan_check_range+0x1a3/0x210 mm/kasan/generic.c:189
+ memcpy+0x3b/0x60 mm/kasan/shadow.c:66
+ memcpy include/linux/fortify-string.h:191 [inline]
+ sg_copy_buffer+0x138/0x240 lib/scatterlist.c:974
+ do_dout_fetch drivers/scsi/scsi_debug.c:2954 [inline]
+ do_dout_fetch drivers/scsi/scsi_debug.c:2946 [inline]
+ resp_verify+0x49e/0x930 drivers/scsi/scsi_debug.c:4276
+ schedule_resp+0x4d8/0x1a70 drivers/scsi/scsi_debug.c:5478
+ scsi_debug_queuecommand+0x8c9/0x1ec0 drivers/scsi/scsi_debug.c:7533
+ scsi_dispatch_cmd drivers/scsi/scsi_lib.c:1520 [inline]
+ scsi_queue_rq+0x16b0/0x2d40 drivers/scsi/scsi_lib.c:1699
+ blk_mq_dispatch_rq_list+0xb9b/0x2700 block/blk-mq.c:1639
+ __blk_mq_sched_dispatch_requests+0x28f/0x590 block/blk-mq-sched.c:325
+ blk_mq_sched_dispatch_requests+0x105/0x190 block/blk-mq-sched.c:358
+ __blk_mq_run_hw_queue+0xe5/0x150 block/blk-mq.c:1761
+ __blk_mq_delay_run_hw_queue+0x4f8/0x5c0 block/blk-mq.c:1838
+ blk_mq_run_hw_queue+0x18d/0x350 block/blk-mq.c:1891
+ blk_mq_sched_insert_request+0x3db/0x4e0 block/blk-mq-sched.c:474
+ blk_execute_rq_nowait+0x16b/0x1c0 block/blk-exec.c:62
+ blk_execute_rq+0xdb/0x360 block/blk-exec.c:102
+ sg_scsi_ioctl drivers/scsi/scsi_ioctl.c:621 [inline]
+ scsi_ioctl+0x8bb/0x15c0 drivers/scsi/scsi_ioctl.c:930
+ sg_ioctl_common+0x172d/0x2710 drivers/scsi/sg.c:1112
+ sg_ioctl+0xa2/0x180 drivers/scsi/sg.c:1165
+ vfs_ioctl fs/ioctl.c:51 [inline]
+ __do_sys_ioctl fs/ioctl.c:874 [inline]
+ __se_sys_ioctl fs/ioctl.c:860 [inline]
+ __x64_sys_ioctl+0x19d/0x220 fs/ioctl.c:860
+ do_syscall_x64 arch/x86/entry/common.c:50 [inline]
+ do_syscall_64+0x3a/0x80 arch/x86/entry/common.c:80
+ entry_SYSCALL_64_after_hwframe+0x44/0xae
+
+Link: https://lore.kernel.org/r/1636056397-13151-1-git-send-email-george.kennedy@oracle.com
+Reported-by: syzkaller <syzkaller@googlegroups.com>
+Acked-by: Douglas Gilbert <dgilbert@interlog.com>
+Signed-off-by: George Kennedy <george.kennedy@oracle.com>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+
+
+The vulnerable function:
+static int resp_verify(struct scsi_cmnd *scp, struct sdebug_dev_info *devip)
+{
+	bool is_bytchk3 = false;
+	u8 bytchk;
+	int ret, j;
+	u32 vnum, a_num, off;
+	const u32 lb_size = sdebug_sector_size;
+	u64 lba;
+	u8 *arr;
+	u8 *cmd = scp->cmnd;
+	struct sdeb_store_info *sip = devip2sip(devip, true);
+	rwlock_t *macc_lckp = &sip->macc_lck;
+
+	bytchk = (cmd[1] >> 1) & 0x3;
+	if (bytchk == 0) {
+		return 0;	/* always claim internal verify okay */
+	} else if (bytchk == 2) {
+		mk_sense_invalid_fld(scp, SDEB_IN_CDB, 2, 2);
+		return check_condition_result;
+	} else if (bytchk == 3) {
+		is_bytchk3 = true;	/* 1 block sent, compared repeatedly */
+	}
+	switch (cmd[0]) {
+	case VERIFY_16:
+		lba = get_unaligned_be64(cmd + 2);
+		vnum = get_unaligned_be32(cmd + 10);
+		break;
+	case VERIFY:		/* is VERIFY(10) */
+		lba = get_unaligned_be32(cmd + 2);
+		vnum = get_unaligned_be16(cmd + 7);
+		break;
+	default:
+		mk_sense_invalid_opcode(scp);
+		return check_condition_result;
+	}
+	a_num = is_bytchk3 ? 1 : vnum;
+	/* Treat following check like one for read (i.e. no write) access */
+	ret = check_device_access_params(scp, lba, a_num, false);
+	if (ret)
+		return ret;
+
+	arr = kcalloc(lb_size, vnum, GFP_ATOMIC);
+	if (!arr) {
+		mk_sense_buffer(scp, ILLEGAL_REQUEST, INSUFF_RES_ASC,
+				INSUFF_RES_ASCQ);
+		return check_condition_result;
+	}
+	/* Not changing store, so only need read access */
+	read_lock(macc_lckp);
+
+	ret = do_dout_fetch(scp, a_num, arr);
+	if (ret == -1) {
+		ret = DID_ERROR << 16;
+		goto cleanup;
+	} else if (sdebug_verbose && (ret < (a_num * lb_size))) {
+		sdev_printk(KERN_INFO, scp->device,
+			    "%s: %s: cdb indicated=%u, IO sent=%d bytes\n",
+			    my_name, __func__, a_num * lb_size, ret);
+	}
+	if (is_bytchk3) {
+		for (j = 1, off = lb_size; j < vnum; ++j, off += lb_size)
+			memcpy(arr + off, arr, lb_size);
+	}
+	ret = 0;
+	if (!comp_write_worker(sip, lba, vnum, arr, true)) {
+		mk_sense_buffer(scp, MISCOMPARE, MISCOMPARE_VERIFY_ASC, 0);
+		ret = check_condition_result;
+		goto cleanup;
+	}
+cleanup:
+	read_unlock(macc_lckp);
+	kfree(arr);
+	return ret;
+}
+
+
+
+The corrected function:
+static int resp_verify(struct scsi_cmnd *scp, struct sdebug_dev_info *devip)
+{
+	bool is_bytchk3 = false;
+	u8 bytchk;
+	int ret, j;
+	u32 vnum, a_num, off;
+	const u32 lb_size = sdebug_sector_size;
+	u64 lba;
+	u8 *arr;
+	u8 *cmd = scp->cmnd;
+	struct sdeb_store_info *sip = devip2sip(devip, true);
+	rwlock_t *macc_lckp = &sip->macc_lck;
+
+	bytchk = (cmd[1] >> 1) & 0x3;
+	if (bytchk == 0) {
+		return 0;	/* always claim internal verify okay */
+	} else if (bytchk == 2) {
+		mk_sense_invalid_fld(scp, SDEB_IN_CDB, 2, 2);
+		return check_condition_result;
+	} else if (bytchk == 3) {
+		is_bytchk3 = true;	/* 1 block sent, compared repeatedly */
+	}
+	switch (cmd[0]) {
+	case VERIFY_16:
+		lba = get_unaligned_be64(cmd + 2);
+		vnum = get_unaligned_be32(cmd + 10);
+		break;
+	case VERIFY:		/* is VERIFY(10) */
+		lba = get_unaligned_be32(cmd + 2);
+		vnum = get_unaligned_be16(cmd + 7);
+		break;
+	default:
+		mk_sense_invalid_opcode(scp);
+		return check_condition_result;
+	}
+	if (vnum == 0)
+		return 0;	/* not an error */
+	a_num = is_bytchk3 ? 1 : vnum;
+	/* Treat following check like one for read (i.e. no write) access */
+	ret = check_device_access_params(scp, lba, a_num, false);
+	if (ret)
+		return ret;
+
+	arr = kcalloc(lb_size, vnum, GFP_ATOMIC);
+	if (!arr) {
+		mk_sense_buffer(scp, ILLEGAL_REQUEST, INSUFF_RES_ASC,
+				INSUFF_RES_ASCQ);
+		return check_condition_result;
+	}
+	/* Not changing store, so only need read access */
+	read_lock(macc_lckp);
+
+	ret = do_dout_fetch(scp, a_num, arr);
+	if (ret == -1) {
+		ret = DID_ERROR << 16;
+		goto cleanup;
+	} else if (sdebug_verbose && (ret < (a_num * lb_size))) {
+		sdev_printk(KERN_INFO, scp->device,
+			    "%s: %s: cdb indicated=%u, IO sent=%d bytes\n",
+			    my_name, __func__, a_num * lb_size, ret);
+	}
+	if (is_bytchk3) {
+		for (j = 1, off = lb_size; j < vnum; ++j, off += lb_size)
+			memcpy(arr + off, arr, lb_size);
+	}
+	ret = 0;
+	if (!comp_write_worker(sip, lba, vnum, arr, true)) {
+		mk_sense_buffer(scp, MISCOMPARE, MISCOMPARE_VERIFY_ASC, 0);
+		ret = check_condition_result;
+		goto cleanup;
+	}
+cleanup:
+	read_unlock(macc_lckp);
+	kfree(arr);
+	return ret;
+}

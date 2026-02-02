@@ -1,0 +1,32 @@
+The vulnerable issue:
+tunnels: fix netns vs proto registration ordering
+
+Same stuff as in ip_gre patch: receive hook can be called before netns
+setup is done, oopsing in net_generic().
+
+Signed-off-by: Alexey Dobriyan <adobriyan@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static void __exit xfrm6_tunnel_fini(void)
+{
+	unregister_pernet_subsys(&xfrm6_tunnel_net_ops);
+	xfrm6_tunnel_spi_fini();
+	xfrm6_tunnel_deregister(&xfrm46_tunnel_handler, AF_INET);
+	xfrm6_tunnel_deregister(&xfrm6_tunnel_handler, AF_INET6);
+	xfrm_unregister_type(&xfrm6_tunnel_type, AF_INET6);
+}
+
+
+
+The corrected function:
+static void __exit xfrm6_tunnel_fini(void)
+{
+	xfrm6_tunnel_deregister(&xfrm46_tunnel_handler, AF_INET);
+	xfrm6_tunnel_deregister(&xfrm6_tunnel_handler, AF_INET6);
+	xfrm_unregister_type(&xfrm6_tunnel_type, AF_INET6);
+	unregister_pernet_subsys(&xfrm6_tunnel_net_ops);
+	kmem_cache_destroy(xfrm6_tunnel_spi_kmem);
+}

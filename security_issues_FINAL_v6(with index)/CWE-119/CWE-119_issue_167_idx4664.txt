@@ -1,0 +1,97 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+libceph: do not hard code max auth ticket len
+
+We hard code cephx auth ticket buffer size to 256 bytes.  This isn't
+enough for any moderate setups and, in case tickets themselves are not
+encrypted, leads to buffer overflows (ceph_x_decrypt() errors out, but
+ceph_decode_copy() doesn't - it's just a memcpy() wrapper).  Since the
+buffer is allocated dynamically anyway, allocated it a bit later, at
+the point where we know how much is going to be needed.
+
+Fixes: http://tracker.ceph.com/issues/8979
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Ilya Dryomov <ilya.dryomov@inktank.com>
+Reviewed-by: Sage Weil <sage@redhat.com>
+
+
+
+The vulnerable function:
+static int ceph_x_proc_ticket_reply(struct ceph_auth_client *ac,
+				    struct ceph_crypto_key *secret,
+				    void *buf, void *end)
+{
+	void *p = buf;
+	char *dbuf;
+	char *ticket_buf;
+	u8 reply_struct_v;
+	u32 num;
+	int ret;
+
+	dbuf = kmalloc(TEMP_TICKET_BUF_LEN, GFP_NOFS);
+	if (!dbuf)
+		return -ENOMEM;
+
+	ret = -ENOMEM;
+	ticket_buf = kmalloc(TEMP_TICKET_BUF_LEN, GFP_NOFS);
+	if (!ticket_buf)
+		goto out_dbuf;
+
+	ceph_decode_8_safe(&p, end, reply_struct_v, bad);
+	if (reply_struct_v != 1)
+		return -EINVAL;
+
+	ceph_decode_32_safe(&p, end, num, bad);
+	dout("%d tickets\n", num);
+
+	while (num--) {
+		ret = process_one_ticket(ac, secret, &p, end,
+					 dbuf, ticket_buf);
+		if (ret)
+			goto out;
+	}
+
+	ret = 0;
+out:
+	kfree(ticket_buf);
+out_dbuf:
+	kfree(dbuf);
+	return ret;
+
+bad:
+	ret = -EINVAL;
+	goto out;
+}
+
+
+
+The corrected function:
+static int ceph_x_proc_ticket_reply(struct ceph_auth_client *ac,
+				    struct ceph_crypto_key *secret,
+				    void *buf, void *end)
+{
+	void *p = buf;
+	u8 reply_struct_v;
+	u32 num;
+	int ret;
+
+	ceph_decode_8_safe(&p, end, reply_struct_v, bad);
+	if (reply_struct_v != 1)
+		return -EINVAL;
+
+	ceph_decode_32_safe(&p, end, num, bad);
+	dout("%d tickets\n", num);
+
+	while (num--) {
+		ret = process_one_ticket(ac, secret, &p, end);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+
+bad:
+	return -EINVAL;
+}

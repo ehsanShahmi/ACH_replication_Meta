@@ -1,0 +1,33 @@
+This issue file has CWE-190. Your task is to create this CWE-190 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+seq_file: disallow extremely large seq buffer allocations
+
+There is no reasonable need for a buffer larger than this, and it avoids
+int overflow pitfalls.
+
+Fixes: 058504edd026 ("fs/seq_file: fallback to vmalloc allocation")
+Suggested-by: Al Viro <viro@zeniv.linux.org.uk>
+Reported-by: Qualys Security Advisory <qsa@qualys.com>
+Signed-off-by: Eric Sandeen <sandeen@redhat.com>
+Cc: stable@kernel.org
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+static void *seq_buf_alloc(unsigned long size)
+{
+	return kvmalloc(size, GFP_KERNEL_ACCOUNT);
+}
+
+
+
+The corrected function:
+static void *seq_buf_alloc(unsigned long size)
+{
+	if (unlikely(size > MAX_RW_COUNT))
+		return NULL;
+
+	return kvmalloc(size, GFP_KERNEL_ACCOUNT);
+}

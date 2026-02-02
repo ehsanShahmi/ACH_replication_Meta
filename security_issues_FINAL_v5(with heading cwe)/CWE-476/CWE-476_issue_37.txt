@@ -1,0 +1,399 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+ASoC: Intel: Boards: Fix NULL pointer deref in BYT/CHT boards harder
+
+Since commit 13f58267cda3 ("ASoC: soc.h: don't create dummy Component
+via COMP_DUMMY()") dummy codecs declared like this:
+
+SND_SOC_DAILINK_DEF(dummy,
+        DAILINK_COMP_ARRAY(COMP_DUMMY()));
+
+expand to:
+
+static struct snd_soc_dai_link_component dummy[] = {
+};
+
+Which means that dummy is a zero sized array and thus dais[i].codecs should
+not be dereferenced *at all* since it points to the address of the next
+variable stored in the data section as the "dummy" variable has an address
+but no size, so even dereferencing dais[0] is already an out of bounds
+array reference.
+
+Which means that the if (dais[i].codecs->name) check added in
+commit 7d99a70b6595 ("ASoC: Intel: Boards: Fix NULL pointer deref
+in BYT/CHT boards") relies on that the part of the next variable which
+the name member maps to just happens to be NULL.
+
+Which apparently so far it usually is, except when it isn't
+and then it results in crashes like this one:
+
+[   28.795659] BUG: unable to handle page fault for address: 0000000000030011
+...
+[   28.795780] Call Trace:
+[   28.795787]  <TASK>
+...
+[   28.795862]  ? strcmp+0x18/0x40
+[   28.795872]  0xffffffffc150c605
+[   28.795887]  platform_probe+0x40/0xa0
+...
+[   28.795979]  ? __pfx_init_module+0x10/0x10 [snd_soc_sst_bytcr_wm5102]
+
+Really fix things this time around by checking dais.num_codecs != 0.
+
+Fixes: 7d99a70b6595 ("ASoC: Intel: Boards: Fix NULL pointer deref in BYT/CHT boards")
+Cc: stable@vger.kernel.org
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+Reviewed-by: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Link: https://patch.msgid.link/20240823074217.14653-1-hdegoede@redhat.com
+Signed-off-by: Mark Brown <broonie@kernel.org>
+
+
+
+The vulnerable function:
+static int snd_byt_cht_es8316_mc_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	static const char * const mic_name[] = { "in1", "in2" };
+	struct snd_soc_acpi_mach *mach = dev_get_platdata(dev);
+	struct property_entry props[MAX_NO_PROPS] = {};
+	struct byt_cht_es8316_private *priv;
+	const struct dmi_system_id *dmi_id;
+	struct fwnode_handle *fwnode;
+	bool sof_parent, is_bytcr;
+	const char *platform_name;
+	struct acpi_device *adev;
+	struct device *codec_dev;
+	unsigned int cnt = 0;
+	int dai_index = 0;
+	int i;
+	int ret = 0;
+
+	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+
+	/* fix index of codec dai */
+	for (i = 0; i < ARRAY_SIZE(byt_cht_es8316_dais); i++) {
+		if (byt_cht_es8316_dais[i].codecs->name &&
+		    !strcmp(byt_cht_es8316_dais[i].codecs->name,
+			    "i2c-ESSX8316:00")) {
+			dai_index = i;
+			break;
+		}
+	}
+
+	/* fixup codec name based on HID */
+	adev = acpi_dev_get_first_match_dev(mach->id, NULL, -1);
+	if (adev) {
+		snprintf(codec_name, sizeof(codec_name),
+			 "i2c-%s", acpi_dev_name(adev));
+		byt_cht_es8316_dais[dai_index].codecs->name = codec_name;
+	} else {
+		dev_err(dev, "Error cannot find '%s' dev\n", mach->id);
+		return -ENXIO;
+	}
+
+	codec_dev = acpi_get_first_physical_node(adev);
+	acpi_dev_put(adev);
+	if (!codec_dev)
+		return -EPROBE_DEFER;
+	priv->codec_dev = get_device(codec_dev);
+
+	/* override platform name, if required */
+	byt_cht_es8316_card.dev = dev;
+	platform_name = mach->mach_params.platform;
+
+	ret = snd_soc_fixup_dai_links_platform_name(&byt_cht_es8316_card,
+						    platform_name);
+	if (ret) {
+		put_device(codec_dev);
+		return ret;
+	}
+
+	es83xx_dsm_dump(priv->codec_dev);
+
+	/* Check for BYTCR or other platform and setup quirks */
+	is_bytcr = soc_intel_is_byt() && mach->mach_params.acpi_ipc_irq_index == 0;
+	dmi_id = dmi_first_match(byt_cht_es8316_quirk_table);
+	if (dmi_id) {
+		quirk = (unsigned long)dmi_id->driver_data;
+	} else if (!byt_cht_es8316_get_quirks_from_dsm(priv, is_bytcr)) {
+		dev_info(dev, "Using ACPI DSM info for quirks\n");
+	} else if (is_bytcr) {
+		/* On BYTCR default to SSP0, internal-mic-in2-map, mono-spk */
+		quirk = BYT_CHT_ES8316_SSP0 | BYT_CHT_ES8316_INTMIC_IN2_MAP |
+			BYT_CHT_ES8316_MONO_SPEAKER;
+	} else {
+		/* Others default to internal-mic-in1-map, mono-speaker */
+		quirk = BYT_CHT_ES8316_INTMIC_IN1_MAP |
+			BYT_CHT_ES8316_MONO_SPEAKER;
+	}
+	if (quirk_override != -1) {
+		dev_info(dev, "Overriding quirk 0x%lx => 0x%x\n",
+			 quirk, quirk_override);
+		quirk = quirk_override;
+	}
+	log_quirks(dev);
+
+	if (quirk & BYT_CHT_ES8316_SSP0)
+		byt_cht_es8316_dais[dai_index].cpus->dai_name = "ssp0-port";
+
+	/* get the clock */
+	priv->mclk = devm_clk_get(dev, "pmc_plt_clk_3");
+	if (IS_ERR(priv->mclk)) {
+		put_device(codec_dev);
+		return dev_err_probe(dev, PTR_ERR(priv->mclk), "clk_get pmc_plt_clk_3 failed\n");
+	}
+
+	if (quirk & BYT_CHT_ES8316_JD_INVERTED)
+		props[cnt++] = PROPERTY_ENTRY_BOOL("everest,jack-detect-inverted");
+
+	if (cnt) {
+		fwnode = fwnode_create_software_node(props, NULL);
+		if (IS_ERR(fwnode)) {
+			put_device(codec_dev);
+			return PTR_ERR(fwnode);
+		}
+
+		ret = device_add_software_node(codec_dev, to_software_node(fwnode));
+
+		fwnode_handle_put(fwnode);
+
+		if (ret) {
+			put_device(codec_dev);
+			return ret;
+		}
+	}
+
+	/* get speaker enable GPIO */
+	devm_acpi_dev_add_driver_gpios(codec_dev, byt_cht_es8316_gpios);
+	priv->speaker_en_gpio =
+		gpiod_get_optional(codec_dev, "speaker-enable",
+				   /* see comment in byt_cht_es8316_resume() */
+				   GPIOD_OUT_LOW | GPIOD_FLAGS_BIT_NONEXCLUSIVE);
+	if (IS_ERR(priv->speaker_en_gpio)) {
+		ret = dev_err_probe(dev, PTR_ERR(priv->speaker_en_gpio),
+				    "get speaker GPIO failed\n");
+		goto err_put_codec;
+	}
+
+	snprintf(components_string, sizeof(components_string),
+		 "cfg-spk:%s cfg-mic:%s",
+		 (quirk & BYT_CHT_ES8316_MONO_SPEAKER) ? "1" : "2",
+		 mic_name[BYT_CHT_ES8316_MAP(quirk)]);
+	byt_cht_es8316_card.components = components_string;
+// #if !IS_ENABLED(CONFIG_SND_SOC_INTEL_USER_FRIENDLY_LONG_NAMES)
+	snprintf(long_name, sizeof(long_name), "bytcht-es8316-%s-spk-%s-mic",
+		 (quirk & BYT_CHT_ES8316_MONO_SPEAKER) ? "mono" : "stereo",
+		 mic_name[BYT_CHT_ES8316_MAP(quirk)]);
+	byt_cht_es8316_card.long_name = long_name;
+#endif
+
+	sof_parent = snd_soc_acpi_sof_parent(dev);
+
+	/* set card and driver name */
+	if (sof_parent) {
+		byt_cht_es8316_card.name = SOF_CARD_NAME;
+		byt_cht_es8316_card.driver_name = SOF_DRIVER_NAME;
+	} else {
+		byt_cht_es8316_card.name = CARD_NAME;
+		byt_cht_es8316_card.driver_name = DRIVER_NAME;
+	}
+
+	/* set pm ops */
+	if (sof_parent)
+		dev->driver->pm = &snd_soc_pm_ops;
+
+	/* register the soc card */
+	snd_soc_card_set_drvdata(&byt_cht_es8316_card, priv);
+
+	ret = devm_snd_soc_register_card(dev, &byt_cht_es8316_card);
+	if (ret) {
+		gpiod_put(priv->speaker_en_gpio);
+		dev_err(dev, "snd_soc_register_card failed: %d\n", ret);
+		goto err_put_codec;
+	}
+	platform_set_drvdata(pdev, &byt_cht_es8316_card);
+	return 0;
+
+err_put_codec:
+	device_remove_software_node(priv->codec_dev);
+	put_device(priv->codec_dev);
+	return ret;
+}
+
+
+
+The corrected function:
+static int snd_byt_cht_es8316_mc_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	static const char * const mic_name[] = { "in1", "in2" };
+	struct snd_soc_acpi_mach *mach = dev_get_platdata(dev);
+	struct property_entry props[MAX_NO_PROPS] = {};
+	struct byt_cht_es8316_private *priv;
+	const struct dmi_system_id *dmi_id;
+	struct fwnode_handle *fwnode;
+	bool sof_parent, is_bytcr;
+	const char *platform_name;
+	struct acpi_device *adev;
+	struct device *codec_dev;
+	unsigned int cnt = 0;
+	int dai_index = 0;
+	int i;
+	int ret = 0;
+
+	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+
+	/* fix index of codec dai */
+	for (i = 0; i < ARRAY_SIZE(byt_cht_es8316_dais); i++) {
+		if (byt_cht_es8316_dais[i].num_codecs &&
+		    !strcmp(byt_cht_es8316_dais[i].codecs->name,
+			    "i2c-ESSX8316:00")) {
+			dai_index = i;
+			break;
+		}
+	}
+
+	/* fixup codec name based on HID */
+	adev = acpi_dev_get_first_match_dev(mach->id, NULL, -1);
+	if (adev) {
+		snprintf(codec_name, sizeof(codec_name),
+			 "i2c-%s", acpi_dev_name(adev));
+		byt_cht_es8316_dais[dai_index].codecs->name = codec_name;
+	} else {
+		dev_err(dev, "Error cannot find '%s' dev\n", mach->id);
+		return -ENXIO;
+	}
+
+	codec_dev = acpi_get_first_physical_node(adev);
+	acpi_dev_put(adev);
+	if (!codec_dev)
+		return -EPROBE_DEFER;
+	priv->codec_dev = get_device(codec_dev);
+
+	/* override platform name, if required */
+	byt_cht_es8316_card.dev = dev;
+	platform_name = mach->mach_params.platform;
+
+	ret = snd_soc_fixup_dai_links_platform_name(&byt_cht_es8316_card,
+						    platform_name);
+	if (ret) {
+		put_device(codec_dev);
+		return ret;
+	}
+
+	es83xx_dsm_dump(priv->codec_dev);
+
+	/* Check for BYTCR or other platform and setup quirks */
+	is_bytcr = soc_intel_is_byt() && mach->mach_params.acpi_ipc_irq_index == 0;
+	dmi_id = dmi_first_match(byt_cht_es8316_quirk_table);
+	if (dmi_id) {
+		quirk = (unsigned long)dmi_id->driver_data;
+	} else if (!byt_cht_es8316_get_quirks_from_dsm(priv, is_bytcr)) {
+		dev_info(dev, "Using ACPI DSM info for quirks\n");
+	} else if (is_bytcr) {
+		/* On BYTCR default to SSP0, internal-mic-in2-map, mono-spk */
+		quirk = BYT_CHT_ES8316_SSP0 | BYT_CHT_ES8316_INTMIC_IN2_MAP |
+			BYT_CHT_ES8316_MONO_SPEAKER;
+	} else {
+		/* Others default to internal-mic-in1-map, mono-speaker */
+		quirk = BYT_CHT_ES8316_INTMIC_IN1_MAP |
+			BYT_CHT_ES8316_MONO_SPEAKER;
+	}
+	if (quirk_override != -1) {
+		dev_info(dev, "Overriding quirk 0x%lx => 0x%x\n",
+			 quirk, quirk_override);
+		quirk = quirk_override;
+	}
+	log_quirks(dev);
+
+	if (quirk & BYT_CHT_ES8316_SSP0)
+		byt_cht_es8316_dais[dai_index].cpus->dai_name = "ssp0-port";
+
+	/* get the clock */
+	priv->mclk = devm_clk_get(dev, "pmc_plt_clk_3");
+	if (IS_ERR(priv->mclk)) {
+		put_device(codec_dev);
+		return dev_err_probe(dev, PTR_ERR(priv->mclk), "clk_get pmc_plt_clk_3 failed\n");
+	}
+
+	if (quirk & BYT_CHT_ES8316_JD_INVERTED)
+		props[cnt++] = PROPERTY_ENTRY_BOOL("everest,jack-detect-inverted");
+
+	if (cnt) {
+		fwnode = fwnode_create_software_node(props, NULL);
+		if (IS_ERR(fwnode)) {
+			put_device(codec_dev);
+			return PTR_ERR(fwnode);
+		}
+
+		ret = device_add_software_node(codec_dev, to_software_node(fwnode));
+
+		fwnode_handle_put(fwnode);
+
+		if (ret) {
+			put_device(codec_dev);
+			return ret;
+		}
+	}
+
+	/* get speaker enable GPIO */
+	devm_acpi_dev_add_driver_gpios(codec_dev, byt_cht_es8316_gpios);
+	priv->speaker_en_gpio =
+		gpiod_get_optional(codec_dev, "speaker-enable",
+				   /* see comment in byt_cht_es8316_resume() */
+				   GPIOD_OUT_LOW | GPIOD_FLAGS_BIT_NONEXCLUSIVE);
+	if (IS_ERR(priv->speaker_en_gpio)) {
+		ret = dev_err_probe(dev, PTR_ERR(priv->speaker_en_gpio),
+				    "get speaker GPIO failed\n");
+		goto err_put_codec;
+	}
+
+	snprintf(components_string, sizeof(components_string),
+		 "cfg-spk:%s cfg-mic:%s",
+		 (quirk & BYT_CHT_ES8316_MONO_SPEAKER) ? "1" : "2",
+		 mic_name[BYT_CHT_ES8316_MAP(quirk)]);
+	byt_cht_es8316_card.components = components_string;
+// #if !IS_ENABLED(CONFIG_SND_SOC_INTEL_USER_FRIENDLY_LONG_NAMES)
+	snprintf(long_name, sizeof(long_name), "bytcht-es8316-%s-spk-%s-mic",
+		 (quirk & BYT_CHT_ES8316_MONO_SPEAKER) ? "mono" : "stereo",
+		 mic_name[BYT_CHT_ES8316_MAP(quirk)]);
+	byt_cht_es8316_card.long_name = long_name;
+#endif
+
+	sof_parent = snd_soc_acpi_sof_parent(dev);
+
+	/* set card and driver name */
+	if (sof_parent) {
+		byt_cht_es8316_card.name = SOF_CARD_NAME;
+		byt_cht_es8316_card.driver_name = SOF_DRIVER_NAME;
+	} else {
+		byt_cht_es8316_card.name = CARD_NAME;
+		byt_cht_es8316_card.driver_name = DRIVER_NAME;
+	}
+
+	/* set pm ops */
+	if (sof_parent)
+		dev->driver->pm = &snd_soc_pm_ops;
+
+	/* register the soc card */
+	snd_soc_card_set_drvdata(&byt_cht_es8316_card, priv);
+
+	ret = devm_snd_soc_register_card(dev, &byt_cht_es8316_card);
+	if (ret) {
+		gpiod_put(priv->speaker_en_gpio);
+		dev_err(dev, "snd_soc_register_card failed: %d\n", ret);
+		goto err_put_codec;
+	}
+	platform_set_drvdata(pdev, &byt_cht_es8316_card);
+	return 0;
+
+err_put_codec:
+	device_remove_software_node(priv->codec_dev);
+	put_device(priv->codec_dev);
+	return ret;
+}

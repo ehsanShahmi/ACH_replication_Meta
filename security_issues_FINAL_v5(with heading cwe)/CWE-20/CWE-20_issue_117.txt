@@ -1,0 +1,82 @@
+This issue file has CWE-20. Your task is to create this CWE-20 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+xen/netback: shutdown the ring if it contains garbage.
+
+A buggy or malicious frontend should not be able to confuse netback.
+If we spot anything which is not as it should be then shutdown the
+device and don't try to continue with the ring in a potentially
+hostile state. Well behaved and non-hostile frontends will not be
+penalised.
+
+As well as making the existing checks for such errors fatal also add a
+new check that ensures that there isn't an insane number of requests
+on the ring (i.e. more than would fit in the ring). If the ring
+contains garbage then previously is was possible to loop over this
+insane number, getting an error each time and therefore not generating
+any more pending requests and therefore not exiting the loop in
+xen_netbk_tx_build_gops for an externded period.
+
+Also turn various netdev_dbg calls which no precipitate a fatal error
+into netdev_err, they are rate limited because the device is shutdown
+afterwards.
+
+This fixes at least one known DoS/softlockup of the backend domain.
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+Reviewed-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+Acked-by: Jan Beulich <JBeulich@suse.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+void xenvif_disconnect(struct xenvif *vif)
+{
+	struct net_device *dev = vif->dev;
+	if (netif_carrier_ok(dev)) {
+		rtnl_lock();
+		netif_carrier_off(dev); /* discard queued packets */
+		if (netif_running(dev))
+			xenvif_down(vif);
+		rtnl_unlock();
+		xenvif_put(vif);
+	}
+
+	atomic_dec(&vif->refcnt);
+	wait_event(vif->waiting_to_free, atomic_read(&vif->refcnt) == 0);
+
+	del_timer_sync(&vif->credit_timeout);
+
+	if (vif->irq)
+		unbind_from_irqhandler(vif->irq, vif);
+
+	unregister_netdev(vif->dev);
+
+	xen_netbk_unmap_frontend_rings(vif);
+
+	free_netdev(vif->dev);
+}
+
+
+
+The corrected function:
+void xenvif_disconnect(struct xenvif *vif)
+{
+	if (netif_carrier_ok(vif->dev))
+		xenvif_carrier_off(vif);
+
+	atomic_dec(&vif->refcnt);
+	wait_event(vif->waiting_to_free, atomic_read(&vif->refcnt) == 0);
+
+	del_timer_sync(&vif->credit_timeout);
+
+	if (vif->irq)
+		unbind_from_irqhandler(vif->irq, vif);
+
+	unregister_netdev(vif->dev);
+
+	xen_netbk_unmap_frontend_rings(vif);
+
+	free_netdev(vif->dev);
+}

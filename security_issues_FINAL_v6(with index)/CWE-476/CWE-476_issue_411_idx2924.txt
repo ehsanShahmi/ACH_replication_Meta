@@ -1,0 +1,131 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+RDMA/cxgb4: Added NULL check for lookup_atid
+
+The lookup_atid() function can return NULL if the ATID is
+invalid or does not exist in the identifier table, which
+could lead to dereferencing a null pointer without a
+check in the `act_establish()` and `act_open_rpl()` functions.
+Add a NULL check to prevent null pointer dereferencing.
+
+Found by Linux Verification Center (linuxtesting.org) with SVACE.
+
+Fixes: cfdda9d76436 ("RDMA/cxgb4: Add driver for Chelsio T4 RNIC")
+Signed-off-by: Mikhail Lobanov <m.lobanov@rosalinux.ru>
+Link: https://patch.msgid.link/20240912145844.77516-1-m.lobanov@rosalinux.ru
+Signed-off-by: Leon Romanovsky <leon@kernel.org>
+
+
+
+The vulnerable function:
+static int act_establish(struct c4iw_dev *dev, struct sk_buff *skb)
+{
+	struct c4iw_ep *ep;
+	struct cpl_act_establish *req = cplhdr(skb);
+	unsigned short tcp_opt = ntohs(req->tcp_opt);
+	unsigned int tid = GET_TID(req);
+	unsigned int atid = TID_TID_G(ntohl(req->tos_atid));
+	struct tid_info *t = dev->rdev.lldi.tids;
+	int ret;
+
+	ep = lookup_atid(t, atid);
+
+	pr_debug("ep %p tid %u snd_isn %u rcv_isn %u\n", ep, tid,
+		 be32_to_cpu(req->snd_isn), be32_to_cpu(req->rcv_isn));
+
+	mutex_lock(&ep->com.mutex);
+	dst_confirm(ep->dst);
+
+	/* setup the hwtid for this connection */
+	ep->hwtid = tid;
+	cxgb4_insert_tid(t, ep, tid, ep->com.local_addr.ss_family);
+	insert_ep_tid(ep);
+
+	ep->snd_seq = be32_to_cpu(req->snd_isn);
+	ep->rcv_seq = be32_to_cpu(req->rcv_isn);
+	ep->snd_wscale = TCPOPT_SND_WSCALE_G(tcp_opt);
+
+	set_emss(ep, tcp_opt);
+
+	/* dealloc the atid */
+	xa_erase_irq(&ep->com.dev->atids, atid);
+	cxgb4_free_atid(t, atid);
+	set_bit(ACT_ESTAB, &ep->com.history);
+
+	/* start MPA negotiation */
+	ret = send_flowc(ep);
+	if (ret)
+		goto err;
+	if (ep->retry_with_mpa_v1)
+		ret = send_mpa_req(ep, skb, 1);
+	else
+		ret = send_mpa_req(ep, skb, mpa_rev);
+	if (ret)
+		goto err;
+	mutex_unlock(&ep->com.mutex);
+	return 0;
+err:
+	mutex_unlock(&ep->com.mutex);
+	connect_reply_upcall(ep, -ENOMEM);
+	c4iw_ep_disconnect(ep, 0, GFP_KERNEL);
+	return 0;
+}
+
+
+
+The corrected function:
+static int act_establish(struct c4iw_dev *dev, struct sk_buff *skb)
+{
+	struct c4iw_ep *ep;
+	struct cpl_act_establish *req = cplhdr(skb);
+	unsigned short tcp_opt = ntohs(req->tcp_opt);
+	unsigned int tid = GET_TID(req);
+	unsigned int atid = TID_TID_G(ntohl(req->tos_atid));
+	struct tid_info *t = dev->rdev.lldi.tids;
+	int ret;
+
+	ep = lookup_atid(t, atid);
+	if (!ep)
+		return -EINVAL;
+
+	pr_debug("ep %p tid %u snd_isn %u rcv_isn %u\n", ep, tid,
+		 be32_to_cpu(req->snd_isn), be32_to_cpu(req->rcv_isn));
+
+	mutex_lock(&ep->com.mutex);
+	dst_confirm(ep->dst);
+
+	/* setup the hwtid for this connection */
+	ep->hwtid = tid;
+	cxgb4_insert_tid(t, ep, tid, ep->com.local_addr.ss_family);
+	insert_ep_tid(ep);
+
+	ep->snd_seq = be32_to_cpu(req->snd_isn);
+	ep->rcv_seq = be32_to_cpu(req->rcv_isn);
+	ep->snd_wscale = TCPOPT_SND_WSCALE_G(tcp_opt);
+
+	set_emss(ep, tcp_opt);
+
+	/* dealloc the atid */
+	xa_erase_irq(&ep->com.dev->atids, atid);
+	cxgb4_free_atid(t, atid);
+	set_bit(ACT_ESTAB, &ep->com.history);
+
+	/* start MPA negotiation */
+	ret = send_flowc(ep);
+	if (ret)
+		goto err;
+	if (ep->retry_with_mpa_v1)
+		ret = send_mpa_req(ep, skb, 1);
+	else
+		ret = send_mpa_req(ep, skb, mpa_rev);
+	if (ret)
+		goto err;
+	mutex_unlock(&ep->com.mutex);
+	return 0;
+err:
+	mutex_unlock(&ep->com.mutex);
+	connect_reply_upcall(ep, -ENOMEM);
+	c4iw_ep_disconnect(ep, 0, GFP_KERNEL);
+	return 0;
+}

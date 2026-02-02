@@ -1,0 +1,54 @@
+This issue file has CWE-264. Your task is to create this CWE-264 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+fs,userns: Change inode_capable to capable_wrt_inode_uidgid
+
+The kernel has no concept of capabilities with respect to inodes; inodes
+exist independently of namespaces.  For example, inode_capable(inode,
+CAP_LINUX_IMMUTABLE) would be nonsense.
+
+This patch changes inode_capable to check for uid and gid mappings and
+renames it to capable_wrt_inode_uidgid, which should make it more
+obvious what it does.
+
+Fixes CVE-2014-4014.
+
+Cc: Theodore Ts'o <tytso@mit.edu>
+Cc: Serge Hallyn <serge.hallyn@ubuntu.com>
+Cc: "Eric W. Biederman" <ebiederm@xmission.com>
+Cc: Dave Chinner <david@fromorbit.com>
+Cc: stable@vger.kernel.org
+Signed-off-by: Andy Lutomirski <luto@amacapital.net>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+static inline int check_sticky(struct inode *dir, struct inode *inode)
+{
+	kuid_t fsuid = current_fsuid();
+
+	if (!(dir->i_mode & S_ISVTX))
+		return 0;
+	if (uid_eq(inode->i_uid, fsuid))
+		return 0;
+	if (uid_eq(dir->i_uid, fsuid))
+		return 0;
+	return !inode_capable(inode, CAP_FOWNER);
+}
+
+
+
+The corrected function:
+static inline int check_sticky(struct inode *dir, struct inode *inode)
+{
+	kuid_t fsuid = current_fsuid();
+
+	if (!(dir->i_mode & S_ISVTX))
+		return 0;
+	if (uid_eq(inode->i_uid, fsuid))
+		return 0;
+	if (uid_eq(dir->i_uid, fsuid))
+		return 0;
+	return !capable_wrt_inode_uidgid(inode, CAP_FOWNER);
+}

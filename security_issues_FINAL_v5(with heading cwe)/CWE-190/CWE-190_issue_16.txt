@@ -1,0 +1,205 @@
+This issue file has CWE-190. Your task is to create this CWE-190 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+tcp: limit payload size of sacked skbs
+
+Jonathan Looney reported that TCP can trigger the following crash
+in tcp_shifted_skb() :
+
+	BUG_ON(tcp_skb_pcount(skb) < pcount);
+
+This can happen if the remote peer has advertized the smallest
+MSS that linux TCP accepts : 48
+
+An skb can hold 17 fragments, and each fragment can hold 32KB
+on x86, or 64KB on PowerPC.
+
+This means that the 16bit witdh of TCP_SKB_CB(skb)->tcp_gso_segs
+can overflow.
+
+Note that tcp_sendmsg() builds skbs with less than 64KB
+of payload, so this problem needs SACK to be enabled.
+SACK blocks allow TCP to coalesce multiple skbs in the retransmit
+queue, thus filling the 17 fragments to maximal capacity.
+
+CVE-2019-11477 -- u16 overflow of TCP_SKB_CB(skb)->tcp_gso_segs
+
+Fixes: 832d11c5cd07 ("tcp: Try to restore large SKBs while SACK processing")
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Reported-by: Jonathan Looney <jtl@netflix.com>
+Acked-by: Neal Cardwell <ncardwell@google.com>
+Reviewed-by: Tyler Hicks <tyhicks@canonical.com>
+Cc: Yuchung Cheng <ycheng@google.com>
+Cc: Bruce Curtis <brucec@netflix.com>
+Cc: Jonathan Lemon <jonathan.lemon@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static bool tcp_shifted_skb(struct sock *sk, struct sk_buff *prev,
+			    struct sk_buff *skb,
+			    struct tcp_sacktag_state *state,
+			    unsigned int pcount, int shifted, int mss,
+			    bool dup_sack)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	u32 start_seq = TCP_SKB_CB(skb)->seq;	/* start of newly-SACKed */
+	u32 end_seq = start_seq + shifted;	/* end of newly-SACKed */
+
+	BUG_ON(!pcount);
+
+	/* Adjust counters and hints for the newly sacked sequence
+	 * range but discard the return value since prev is already
+	 * marked. We must tag the range first because the seq
+	 * advancement below implicitly advances
+	 * tcp_highest_sack_seq() when skb is highest_sack.
+	 */
+	tcp_sacktag_one(sk, state, TCP_SKB_CB(skb)->sacked,
+			start_seq, end_seq, dup_sack, pcount,
+			tcp_skb_timestamp_us(skb));
+	tcp_rate_skb_delivered(sk, skb, state->rate);
+
+	if (skb == tp->lost_skb_hint)
+		tp->lost_cnt_hint += pcount;
+
+	TCP_SKB_CB(prev)->end_seq += shifted;
+	TCP_SKB_CB(skb)->seq += shifted;
+
+	tcp_skb_pcount_add(prev, pcount);
+	BUG_ON(tcp_skb_pcount(skb) < pcount);
+	tcp_skb_pcount_add(skb, -pcount);
+
+	/* When we're adding to gso_segs == 1, gso_size will be zero,
+	 * in theory this shouldn't be necessary but as long as DSACK
+	 * code can come after this skb later on it's better to keep
+	 * setting gso_size to something.
+	 */
+	if (!TCP_SKB_CB(prev)->tcp_gso_size)
+		TCP_SKB_CB(prev)->tcp_gso_size = mss;
+
+	/* CHECKME: To clear or not to clear? Mimics normal skb currently */
+	if (tcp_skb_pcount(skb) <= 1)
+		TCP_SKB_CB(skb)->tcp_gso_size = 0;
+
+	/* Difference in this won't matter, both ACKed by the same cumul. ACK */
+	TCP_SKB_CB(prev)->sacked |= (TCP_SKB_CB(skb)->sacked & TCPCB_EVER_RETRANS);
+
+	if (skb->len > 0) {
+		BUG_ON(!tcp_skb_pcount(skb));
+		NET_INC_STATS(sock_net(sk), LINUX_MIB_SACKSHIFTED);
+		return false;
+	}
+
+	/* Whole SKB was eaten :-) */
+
+	if (skb == tp->retransmit_skb_hint)
+		tp->retransmit_skb_hint = prev;
+	if (skb == tp->lost_skb_hint) {
+		tp->lost_skb_hint = prev;
+		tp->lost_cnt_hint -= tcp_skb_pcount(prev);
+	}
+
+	TCP_SKB_CB(prev)->tcp_flags |= TCP_SKB_CB(skb)->tcp_flags;
+	TCP_SKB_CB(prev)->eor = TCP_SKB_CB(skb)->eor;
+	if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+		TCP_SKB_CB(prev)->end_seq++;
+
+	if (skb == tcp_highest_sack(sk))
+		tcp_advance_highest_sack(sk, skb);
+
+	tcp_skb_collapse_tstamp(prev, skb);
+	if (unlikely(TCP_SKB_CB(prev)->tx.delivered_mstamp))
+		TCP_SKB_CB(prev)->tx.delivered_mstamp = 0;
+
+	tcp_rtx_queue_unlink_and_free(skb, sk);
+
+	NET_INC_STATS(sock_net(sk), LINUX_MIB_SACKMERGED);
+
+	return true;
+}
+
+
+
+The corrected function:
+static bool tcp_shifted_skb(struct sock *sk, struct sk_buff *prev,
+			    struct sk_buff *skb,
+			    struct tcp_sacktag_state *state,
+			    unsigned int pcount, int shifted, int mss,
+			    bool dup_sack)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	u32 start_seq = TCP_SKB_CB(skb)->seq;	/* start of newly-SACKed */
+	u32 end_seq = start_seq + shifted;	/* end of newly-SACKed */
+
+	BUG_ON(!pcount);
+
+	/* Adjust counters and hints for the newly sacked sequence
+	 * range but discard the return value since prev is already
+	 * marked. We must tag the range first because the seq
+	 * advancement below implicitly advances
+	 * tcp_highest_sack_seq() when skb is highest_sack.
+	 */
+	tcp_sacktag_one(sk, state, TCP_SKB_CB(skb)->sacked,
+			start_seq, end_seq, dup_sack, pcount,
+			tcp_skb_timestamp_us(skb));
+	tcp_rate_skb_delivered(sk, skb, state->rate);
+
+	if (skb == tp->lost_skb_hint)
+		tp->lost_cnt_hint += pcount;
+
+	TCP_SKB_CB(prev)->end_seq += shifted;
+	TCP_SKB_CB(skb)->seq += shifted;
+
+	tcp_skb_pcount_add(prev, pcount);
+	WARN_ON_ONCE(tcp_skb_pcount(skb) < pcount);
+	tcp_skb_pcount_add(skb, -pcount);
+
+	/* When we're adding to gso_segs == 1, gso_size will be zero,
+	 * in theory this shouldn't be necessary but as long as DSACK
+	 * code can come after this skb later on it's better to keep
+	 * setting gso_size to something.
+	 */
+	if (!TCP_SKB_CB(prev)->tcp_gso_size)
+		TCP_SKB_CB(prev)->tcp_gso_size = mss;
+
+	/* CHECKME: To clear or not to clear? Mimics normal skb currently */
+	if (tcp_skb_pcount(skb) <= 1)
+		TCP_SKB_CB(skb)->tcp_gso_size = 0;
+
+	/* Difference in this won't matter, both ACKed by the same cumul. ACK */
+	TCP_SKB_CB(prev)->sacked |= (TCP_SKB_CB(skb)->sacked & TCPCB_EVER_RETRANS);
+
+	if (skb->len > 0) {
+		BUG_ON(!tcp_skb_pcount(skb));
+		NET_INC_STATS(sock_net(sk), LINUX_MIB_SACKSHIFTED);
+		return false;
+	}
+
+	/* Whole SKB was eaten :-) */
+
+	if (skb == tp->retransmit_skb_hint)
+		tp->retransmit_skb_hint = prev;
+	if (skb == tp->lost_skb_hint) {
+		tp->lost_skb_hint = prev;
+		tp->lost_cnt_hint -= tcp_skb_pcount(prev);
+	}
+
+	TCP_SKB_CB(prev)->tcp_flags |= TCP_SKB_CB(skb)->tcp_flags;
+	TCP_SKB_CB(prev)->eor = TCP_SKB_CB(skb)->eor;
+	if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+		TCP_SKB_CB(prev)->end_seq++;
+
+	if (skb == tcp_highest_sack(sk))
+		tcp_advance_highest_sack(sk, skb);
+
+	tcp_skb_collapse_tstamp(prev, skb);
+	if (unlikely(TCP_SKB_CB(prev)->tx.delivered_mstamp))
+		TCP_SKB_CB(prev)->tx.delivered_mstamp = 0;
+
+	tcp_rtx_queue_unlink_and_free(skb, sk);
+
+	NET_INC_STATS(sock_net(sk), LINUX_MIB_SACKMERGED);
+
+	return true;
+}

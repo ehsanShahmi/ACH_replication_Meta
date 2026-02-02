@@ -1,0 +1,249 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+net: vmxnet3: fix possible use-after-free bugs in vmxnet3_rq_alloc_rx_buf()
+
+In vmxnet3_rq_alloc_rx_buf(), when dma_map_single() fails, rbi->skb is
+freed immediately. Similarly, in another branch, when dma_map_page() fails,
+rbi->page is also freed. In the two cases, vmxnet3_rq_alloc_rx_buf()
+returns an error to its callers vmxnet3_rq_init() -> vmxnet3_rq_init_all()
+-> vmxnet3_activate_dev(). Then vmxnet3_activate_dev() calls
+vmxnet3_rq_cleanup_all() in error handling code, and rbi->skb or rbi->page
+are freed again in vmxnet3_rq_cleanup_all(), causing use-after-free bugs.
+
+To fix these possible bugs, rbi->skb and rbi->page should be cleared after
+they are freed.
+
+The error log in our fault-injection testing is shown as follows:
+
+[   14.319016] BUG: KASAN: use-after-free in consume_skb+0x2f/0x150
+...
+[   14.321586] Call Trace:
+...
+[   14.325357]  consume_skb+0x2f/0x150
+[   14.325671]  vmxnet3_rq_cleanup_all+0x33a/0x4e0 [vmxnet3]
+[   14.326150]  vmxnet3_activate_dev+0xb9d/0x2ca0 [vmxnet3]
+[   14.326616]  vmxnet3_open+0x387/0x470 [vmxnet3]
+...
+[   14.361675] Allocated by task 351:
+...
+[   14.362688]  __netdev_alloc_skb+0x1b3/0x6f0
+[   14.362960]  vmxnet3_rq_alloc_rx_buf+0x1b0/0x8d0 [vmxnet3]
+[   14.363317]  vmxnet3_activate_dev+0x3e3/0x2ca0 [vmxnet3]
+[   14.363661]  vmxnet3_open+0x387/0x470 [vmxnet3]
+...
+[   14.367309]
+[   14.367412] Freed by task 351:
+...
+[   14.368932]  __dev_kfree_skb_any+0xd2/0xe0
+[   14.369193]  vmxnet3_rq_alloc_rx_buf+0x71e/0x8d0 [vmxnet3]
+[   14.369544]  vmxnet3_activate_dev+0x3e3/0x2ca0 [vmxnet3]
+[   14.369883]  vmxnet3_open+0x387/0x470 [vmxnet3]
+[   14.370174]  __dev_open+0x28a/0x420
+[   14.370399]  __dev_change_flags+0x192/0x590
+[   14.370667]  dev_change_flags+0x7a/0x180
+[   14.370919]  do_setlink+0xb28/0x3570
+[   14.371150]  rtnl_newlink+0x1160/0x1740
+[   14.371399]  rtnetlink_rcv_msg+0x5bf/0xa50
+[   14.371661]  netlink_rcv_skb+0x1cd/0x3e0
+[   14.371913]  netlink_unicast+0x5dc/0x840
+[   14.372169]  netlink_sendmsg+0x856/0xc40
+[   14.372420]  ____sys_sendmsg+0x8a7/0x8d0
+[   14.372673]  __sys_sendmsg+0x1c2/0x270
+[   14.372914]  do_syscall_64+0x41/0x90
+[   14.373145]  entry_SYSCALL_64_after_hwframe+0x44/0xae
+...
+
+Fixes: 5738a09d58d5a ("vmxnet3: fix checks for dma mapping errors")
+Reported-by: TOTE Robot <oslab@tsinghua.edu.cn>
+Signed-off-by: Zixuan Fu <r33s3n6@gmail.com>
+Link: https://lore.kernel.org/r/20220514050656.2636588-1-r33s3n6@gmail.com
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+
+
+
+The vulnerable function:
+static int
+vmxnet3_rq_alloc_rx_buf(struct vmxnet3_rx_queue *rq, u32 ring_idx,
+			int num_to_alloc, struct vmxnet3_adapter *adapter)
+{
+	int num_allocated = 0;
+	struct vmxnet3_rx_buf_info *rbi_base = rq->buf_info[ring_idx];
+	struct vmxnet3_cmd_ring *ring = &rq->rx_ring[ring_idx];
+	u32 val;
+
+	while (num_allocated <= num_to_alloc) {
+		struct vmxnet3_rx_buf_info *rbi;
+		union Vmxnet3_GenericDesc *gd;
+
+		rbi = rbi_base + ring->next2fill;
+		gd = ring->base + ring->next2fill;
+
+		if (rbi->buf_type == VMXNET3_RX_BUF_SKB) {
+			if (rbi->skb == NULL) {
+				rbi->skb = __netdev_alloc_skb_ip_align(adapter->netdev,
+								       rbi->len,
+								       GFP_KERNEL);
+				if (unlikely(rbi->skb == NULL)) {
+					rq->stats.rx_buf_alloc_failure++;
+					break;
+				}
+
+				rbi->dma_addr = dma_map_single(
+						&adapter->pdev->dev,
+						rbi->skb->data, rbi->len,
+						DMA_FROM_DEVICE);
+				if (dma_mapping_error(&adapter->pdev->dev,
+						      rbi->dma_addr)) {
+					dev_kfree_skb_any(rbi->skb);
+					rq->stats.rx_buf_alloc_failure++;
+					break;
+				}
+			} else {
+				/* rx buffer skipped by the device */
+			}
+			val = VMXNET3_RXD_BTYPE_HEAD << VMXNET3_RXD_BTYPE_SHIFT;
+		} else {
+			BUG_ON(rbi->buf_type != VMXNET3_RX_BUF_PAGE ||
+			       rbi->len  != PAGE_SIZE);
+
+			if (rbi->page == NULL) {
+				rbi->page = alloc_page(GFP_ATOMIC);
+				if (unlikely(rbi->page == NULL)) {
+					rq->stats.rx_buf_alloc_failure++;
+					break;
+				}
+				rbi->dma_addr = dma_map_page(
+						&adapter->pdev->dev,
+						rbi->page, 0, PAGE_SIZE,
+						DMA_FROM_DEVICE);
+				if (dma_mapping_error(&adapter->pdev->dev,
+						      rbi->dma_addr)) {
+					put_page(rbi->page);
+					rq->stats.rx_buf_alloc_failure++;
+					break;
+				}
+			} else {
+				/* rx buffers skipped by the device */
+			}
+			val = VMXNET3_RXD_BTYPE_BODY << VMXNET3_RXD_BTYPE_SHIFT;
+		}
+
+		gd->rxd.addr = cpu_to_le64(rbi->dma_addr);
+		gd->dword[2] = cpu_to_le32((!ring->gen << VMXNET3_RXD_GEN_SHIFT)
+					   | val | rbi->len);
+
+		/* Fill the last buffer but dont mark it ready, or else the
+		 * device will think that the queue is full */
+		if (num_allocated == num_to_alloc)
+			break;
+
+		gd->dword[2] |= cpu_to_le32(ring->gen << VMXNET3_RXD_GEN_SHIFT);
+		num_allocated++;
+		vmxnet3_cmd_ring_adv_next2fill(ring);
+	}
+
+	netdev_dbg(adapter->netdev,
+		"alloc_rx_buf: %d allocated, next2fill %u, next2comp %u\n",
+		num_allocated, ring->next2fill, ring->next2comp);
+
+	/* so that the device can distinguish a full ring and an empty ring */
+	BUG_ON(num_allocated != 0 && ring->next2fill == ring->next2comp);
+
+	return num_allocated;
+}
+
+
+
+The corrected function:
+static int
+vmxnet3_rq_alloc_rx_buf(struct vmxnet3_rx_queue *rq, u32 ring_idx,
+			int num_to_alloc, struct vmxnet3_adapter *adapter)
+{
+	int num_allocated = 0;
+	struct vmxnet3_rx_buf_info *rbi_base = rq->buf_info[ring_idx];
+	struct vmxnet3_cmd_ring *ring = &rq->rx_ring[ring_idx];
+	u32 val;
+
+	while (num_allocated <= num_to_alloc) {
+		struct vmxnet3_rx_buf_info *rbi;
+		union Vmxnet3_GenericDesc *gd;
+
+		rbi = rbi_base + ring->next2fill;
+		gd = ring->base + ring->next2fill;
+
+		if (rbi->buf_type == VMXNET3_RX_BUF_SKB) {
+			if (rbi->skb == NULL) {
+				rbi->skb = __netdev_alloc_skb_ip_align(adapter->netdev,
+								       rbi->len,
+								       GFP_KERNEL);
+				if (unlikely(rbi->skb == NULL)) {
+					rq->stats.rx_buf_alloc_failure++;
+					break;
+				}
+
+				rbi->dma_addr = dma_map_single(
+						&adapter->pdev->dev,
+						rbi->skb->data, rbi->len,
+						DMA_FROM_DEVICE);
+				if (dma_mapping_error(&adapter->pdev->dev,
+						      rbi->dma_addr)) {
+					dev_kfree_skb_any(rbi->skb);
+					rbi->skb = NULL;
+					rq->stats.rx_buf_alloc_failure++;
+					break;
+				}
+			} else {
+				/* rx buffer skipped by the device */
+			}
+			val = VMXNET3_RXD_BTYPE_HEAD << VMXNET3_RXD_BTYPE_SHIFT;
+		} else {
+			BUG_ON(rbi->buf_type != VMXNET3_RX_BUF_PAGE ||
+			       rbi->len  != PAGE_SIZE);
+
+			if (rbi->page == NULL) {
+				rbi->page = alloc_page(GFP_ATOMIC);
+				if (unlikely(rbi->page == NULL)) {
+					rq->stats.rx_buf_alloc_failure++;
+					break;
+				}
+				rbi->dma_addr = dma_map_page(
+						&adapter->pdev->dev,
+						rbi->page, 0, PAGE_SIZE,
+						DMA_FROM_DEVICE);
+				if (dma_mapping_error(&adapter->pdev->dev,
+						      rbi->dma_addr)) {
+					put_page(rbi->page);
+					rbi->page = NULL;
+					rq->stats.rx_buf_alloc_failure++;
+					break;
+				}
+			} else {
+				/* rx buffers skipped by the device */
+			}
+			val = VMXNET3_RXD_BTYPE_BODY << VMXNET3_RXD_BTYPE_SHIFT;
+		}
+
+		gd->rxd.addr = cpu_to_le64(rbi->dma_addr);
+		gd->dword[2] = cpu_to_le32((!ring->gen << VMXNET3_RXD_GEN_SHIFT)
+					   | val | rbi->len);
+
+		/* Fill the last buffer but dont mark it ready, or else the
+		 * device will think that the queue is full */
+		if (num_allocated == num_to_alloc)
+			break;
+
+		gd->dword[2] |= cpu_to_le32(ring->gen << VMXNET3_RXD_GEN_SHIFT);
+		num_allocated++;
+		vmxnet3_cmd_ring_adv_next2fill(ring);
+	}
+
+	netdev_dbg(adapter->netdev,
+		"alloc_rx_buf: %d allocated, next2fill %u, next2comp %u\n",
+		num_allocated, ring->next2fill, ring->next2comp);
+
+	/* so that the device can distinguish a full ring and an empty ring */
+	BUG_ON(num_allocated != 0 && ring->next2fill == ring->next2comp);
+
+	return num_allocated;
+}

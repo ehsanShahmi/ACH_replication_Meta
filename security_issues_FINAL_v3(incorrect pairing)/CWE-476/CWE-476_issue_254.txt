@@ -1,0 +1,73 @@
+The vulnerable issue:
+gfs2: Fix kernel NULL pointer dereference in gfs2_rgrp_dump
+
+Syzkaller has reported a NULL pointer dereference when accessing
+rgd->rd_rgl in gfs2_rgrp_dump().  This can happen when creating
+rgd->rd_gl fails in read_rindex_entry().  Add a NULL pointer check in
+gfs2_rgrp_dump() to prevent that.
+
+Reported-and-tested-by: syzbot+da0fc229cc1ff4bb2e6d@syzkaller.appspotmail.com
+Link: https://syzkaller.appspot.com/bug?extid=da0fc229cc1ff4bb2e6d
+Fixes: 72244b6bc752 ("gfs2: improve debug information when lvb mismatches are found")
+Signed-off-by: Osama Muhammad <osmtendev@gmail.com>
+Signed-off-by: Andreas Gruenbacher <agruenba@redhat.com>
+
+
+
+The vulnerable function:
+void gfs2_rgrp_dump(struct seq_file *seq, struct gfs2_rgrpd *rgd,
+		    const char *fs_id_buf)
+{
+	struct gfs2_blkreserv *trs;
+	const struct rb_node *n;
+
+	spin_lock(&rgd->rd_rsspin);
+	gfs2_print_dbg(seq, "%s R: n:%llu f:%02x b:%u/%u i:%u q:%u r:%u e:%u\n",
+		       fs_id_buf,
+		       (unsigned long long)rgd->rd_addr, rgd->rd_flags,
+		       rgd->rd_free, rgd->rd_free_clone, rgd->rd_dinodes,
+		       rgd->rd_requested, rgd->rd_reserved, rgd->rd_extfail_pt);
+	if (rgd->rd_sbd->sd_args.ar_rgrplvb) {
+		struct gfs2_rgrp_lvb *rgl = rgd->rd_rgl;
+
+		gfs2_print_dbg(seq, "%s  L: f:%02x b:%u i:%u\n", fs_id_buf,
+			       be32_to_cpu(rgl->rl_flags),
+			       be32_to_cpu(rgl->rl_free),
+			       be32_to_cpu(rgl->rl_dinodes));
+	}
+	for (n = rb_first(&rgd->rd_rstree); n; n = rb_next(&trs->rs_node)) {
+		trs = rb_entry(n, struct gfs2_blkreserv, rs_node);
+		dump_rs(seq, trs, fs_id_buf);
+	}
+	spin_unlock(&rgd->rd_rsspin);
+}
+
+
+
+The corrected function:
+void gfs2_rgrp_dump(struct seq_file *seq, struct gfs2_rgrpd *rgd,
+		    const char *fs_id_buf)
+{
+	struct gfs2_blkreserv *trs;
+	const struct rb_node *n;
+
+	spin_lock(&rgd->rd_rsspin);
+	gfs2_print_dbg(seq, "%s R: n:%llu f:%02x b:%u/%u i:%u q:%u r:%u e:%u\n",
+		       fs_id_buf,
+		       (unsigned long long)rgd->rd_addr, rgd->rd_flags,
+		       rgd->rd_free, rgd->rd_free_clone, rgd->rd_dinodes,
+		       rgd->rd_requested, rgd->rd_reserved, rgd->rd_extfail_pt);
+	if (rgd->rd_sbd->sd_args.ar_rgrplvb && rgd->rd_rgl) {
+		struct gfs2_rgrp_lvb *rgl = rgd->rd_rgl;
+
+		gfs2_print_dbg(seq, "%s  L: f:%02x b:%u i:%u\n", fs_id_buf,
+			       be32_to_cpu(rgl->rl_flags),
+			       be32_to_cpu(rgl->rl_free),
+			       be32_to_cpu(rgl->rl_dinodes));
+	}
+	for (n = rb_first(&rgd->rd_rstree); n; n = rb_next(&trs->rs_node)) {
+		trs = rb_entry(n, struct gfs2_blkreserv, rs_node);
+		dump_rs(seq, trs, fs_id_buf);
+	}
+	spin_unlock(&rgd->rd_rsspin);
+}

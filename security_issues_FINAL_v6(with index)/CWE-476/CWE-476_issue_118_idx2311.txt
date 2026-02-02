@@ -1,0 +1,89 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+media: v4l: async: Fix duplicated list deletion
+
+The list deletion call dropped here is already called from the
+helper function in the line before. Having a second list_del()
+call results in either a warning (with CONFIG_DEBUG_LIST=y):
+
+list_del corruption, c46c8198->next is LIST_POISON1 (00000100)
+
+If CONFIG_DEBUG_LIST is disabled the operation results in a
+kernel error due to NULL pointer dereference.
+
+Fixes: 28a1295795d8 ("media: v4l: async: Allow multiple connections between entities")
+Signed-off-by: Sebastian Reichel <sre@kernel.org>
+Signed-off-by: Sakari Ailus <sakari.ailus@linux.intel.com>
+Signed-off-by: Hans Verkuil <hverkuil-cisco@xs4all.nl>
+
+
+
+The vulnerable function:
+void v4l2_async_unregister_subdev(struct v4l2_subdev *sd)
+{
+	struct v4l2_async_connection *asc, *asc_tmp;
+
+	if (!sd->async_list.next)
+		return;
+
+	v4l2_subdev_put_privacy_led(sd);
+
+	mutex_lock(&list_lock);
+
+	__v4l2_async_nf_unregister(sd->subdev_notifier);
+	__v4l2_async_nf_cleanup(sd->subdev_notifier);
+	kfree(sd->subdev_notifier);
+	sd->subdev_notifier = NULL;
+
+	if (sd->asc_list.next) {
+		list_for_each_entry_safe(asc, asc_tmp, &sd->asc_list,
+					 asc_subdev_entry) {
+			list_move(&asc->asc_entry,
+				  &asc->notifier->waiting_list);
+
+			v4l2_async_unbind_subdev_one(asc->notifier, asc);
+			list_del(&asc->asc_subdev_entry);
+		}
+	}
+
+	list_del(&sd->async_list);
+	sd->async_list.next = NULL;
+
+	mutex_unlock(&list_lock);
+}
+
+
+
+The corrected function:
+void v4l2_async_unregister_subdev(struct v4l2_subdev *sd)
+{
+	struct v4l2_async_connection *asc, *asc_tmp;
+
+	if (!sd->async_list.next)
+		return;
+
+	v4l2_subdev_put_privacy_led(sd);
+
+	mutex_lock(&list_lock);
+
+	__v4l2_async_nf_unregister(sd->subdev_notifier);
+	__v4l2_async_nf_cleanup(sd->subdev_notifier);
+	kfree(sd->subdev_notifier);
+	sd->subdev_notifier = NULL;
+
+	if (sd->asc_list.next) {
+		list_for_each_entry_safe(asc, asc_tmp, &sd->asc_list,
+					 asc_subdev_entry) {
+			list_move(&asc->asc_entry,
+				  &asc->notifier->waiting_list);
+
+			v4l2_async_unbind_subdev_one(asc->notifier, asc);
+		}
+	}
+
+	list_del(&sd->async_list);
+	sd->async_list.next = NULL;
+
+	mutex_unlock(&list_lock);
+}

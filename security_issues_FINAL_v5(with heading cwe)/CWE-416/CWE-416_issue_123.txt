@@ -1,0 +1,81 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+net/ulp: prevent ULP without clone op from entering the LISTEN status
+
+When an ULP-enabled socket enters the LISTEN status, the listener ULP data
+pointer is copied inside the child/accepted sockets by sk_clone_lock().
+
+The relevant ULP can take care of de-duplicating the context pointer via
+the clone() operation, but only MPTCP and SMC implement such op.
+
+Other ULPs may end-up with a double-free at socket disposal time.
+
+We can't simply clear the ULP data at clone time, as TLS replaces the
+socket ops with custom ones assuming a valid TLS ULP context is
+available.
+
+Instead completely prevent clone-less ULP sockets from entering the
+LISTEN status.
+
+Fixes: 734942cc4ea6 ("tcp: ULP infrastructure")
+Reported-by: slipper <slipper.alive@gmail.com>
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+Link: https://lore.kernel.org/r/4b80c3d1dbe3d0ab072f80450c202d9bc88b4b03.1672740602.git.pabeni@redhat.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+
+
+The vulnerable function:
+static int __tcp_set_ulp(struct sock *sk, const struct tcp_ulp_ops *ulp_ops)
+{
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	int err;
+
+	err = -EEXIST;
+	if (icsk->icsk_ulp_ops)
+		goto out_err;
+
+	if (sk->sk_socket)
+		clear_bit(SOCK_SUPPORT_ZC, &sk->sk_socket->flags);
+
+	err = ulp_ops->init(sk);
+	if (err)
+		goto out_err;
+
+	icsk->icsk_ulp_ops = ulp_ops;
+	return 0;
+out_err:
+	module_put(ulp_ops->owner);
+	return err;
+}
+
+
+
+The corrected function:
+static int __tcp_set_ulp(struct sock *sk, const struct tcp_ulp_ops *ulp_ops)
+{
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	int err;
+
+	err = -EEXIST;
+	if (icsk->icsk_ulp_ops)
+		goto out_err;
+
+	if (sk->sk_socket)
+		clear_bit(SOCK_SUPPORT_ZC, &sk->sk_socket->flags);
+
+	err = -EINVAL;
+	if (!ulp_ops->clone && sk->sk_state == TCP_LISTEN)
+		goto out_err;
+
+	err = ulp_ops->init(sk);
+	if (err)
+		goto out_err;
+
+	icsk->icsk_ulp_ops = ulp_ops;
+	return 0;
+out_err:
+	module_put(ulp_ops->owner);
+	return err;
+}

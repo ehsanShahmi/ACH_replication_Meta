@@ -1,0 +1,118 @@
+The vulnerable issue:
+xfrm: xfrm_policy: fix a possible double xfrm_pols_put() in xfrm_bundle_lookup()
+
+xfrm_policy_lookup() will call xfrm_pol_hold_rcu() to get a refcount of
+pols[0]. This refcount can be dropped in xfrm_expand_policies() when
+xfrm_expand_policies() return error. pols[0]'s refcount is balanced in
+here. But xfrm_bundle_lookup() will also call xfrm_pols_put() with
+num_pols == 1 to drop this refcount when xfrm_expand_policies() return
+error.
+
+This patch also fix an illegal address access. pols[0] will save a error
+point when xfrm_policy_lookup fails. This lead to xfrm_pols_put to resolve
+an illegal address in xfrm_bundle_lookup's error path.
+
+Fix these by setting num_pols = 0 in xfrm_expand_policies()'s error path.
+
+Fixes: 80c802f3073e ("xfrm: cache bundles instead of policies for outgoing flows")
+Signed-off-by: Hangyu Hua <hbh25y@gmail.com>
+Signed-off-by: Steffen Klassert <steffen.klassert@secunet.com>
+
+
+
+The vulnerable function:
+static int xfrm_expand_policies(const struct flowi *fl, u16 family,
+				struct xfrm_policy **pols,
+				int *num_pols, int *num_xfrms)
+{
+	int i;
+
+	if (*num_pols == 0 || !pols[0]) {
+		*num_pols = 0;
+		*num_xfrms = 0;
+		return 0;
+	}
+	if (IS_ERR(pols[0]))
+		return PTR_ERR(pols[0]);
+
+	*num_xfrms = pols[0]->xfrm_nr;
+
+#ifdef CONFIG_XFRM_SUB_POLICY
+	if (pols[0]->action == XFRM_POLICY_ALLOW &&
+	    pols[0]->type != XFRM_POLICY_TYPE_MAIN) {
+		pols[1] = xfrm_policy_lookup_bytype(xp_net(pols[0]),
+						    XFRM_POLICY_TYPE_MAIN,
+						    fl, family,
+						    XFRM_POLICY_OUT,
+						    pols[0]->if_id);
+		if (pols[1]) {
+			if (IS_ERR(pols[1])) {
+				xfrm_pols_put(pols, *num_pols);
+				return PTR_ERR(pols[1]);
+			}
+			(*num_pols)++;
+			(*num_xfrms) += pols[1]->xfrm_nr;
+		}
+	}
+#endif
+	for (i = 0; i < *num_pols; i++) {
+		if (pols[i]->action != XFRM_POLICY_ALLOW) {
+			*num_xfrms = -1;
+			break;
+		}
+	}
+
+	return 0;
+
+}
+
+
+
+The corrected function:
+static int xfrm_expand_policies(const struct flowi *fl, u16 family,
+				struct xfrm_policy **pols,
+				int *num_pols, int *num_xfrms)
+{
+	int i;
+
+	if (*num_pols == 0 || !pols[0]) {
+		*num_pols = 0;
+		*num_xfrms = 0;
+		return 0;
+	}
+	if (IS_ERR(pols[0])) {
+		*num_pols = 0;
+		return PTR_ERR(pols[0]);
+	}
+
+	*num_xfrms = pols[0]->xfrm_nr;
+
+#ifdef CONFIG_XFRM_SUB_POLICY
+	if (pols[0]->action == XFRM_POLICY_ALLOW &&
+	    pols[0]->type != XFRM_POLICY_TYPE_MAIN) {
+		pols[1] = xfrm_policy_lookup_bytype(xp_net(pols[0]),
+						    XFRM_POLICY_TYPE_MAIN,
+						    fl, family,
+						    XFRM_POLICY_OUT,
+						    pols[0]->if_id);
+		if (pols[1]) {
+			if (IS_ERR(pols[1])) {
+				xfrm_pols_put(pols, *num_pols);
+				*num_pols = 0;
+				return PTR_ERR(pols[1]);
+			}
+			(*num_pols)++;
+			(*num_xfrms) += pols[1]->xfrm_nr;
+		}
+	}
+#endif
+	for (i = 0; i < *num_pols; i++) {
+		if (pols[i]->action != XFRM_POLICY_ALLOW) {
+			*num_xfrms = -1;
+			break;
+		}
+	}
+
+	return 0;
+
+}

@@ -1,0 +1,164 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+fscrypt: remove broken support for detecting keyring key revocation
+
+Filesystem encryption ostensibly supported revoking a keyring key that
+had been used to "unlock" encrypted files, causing those files to become
+"locked" again.  This was, however, buggy for several reasons, the most
+severe of which was that when key revocation happened to be detected for
+an inode, its fscrypt_info was immediately freed, even while other
+threads could be using it for encryption or decryption concurrently.
+This could be exploited to crash the kernel or worse.
+
+This patch fixes the use-after-free by removing the code which detects
+the keyring key having been revoked, invalidated, or expired.  Instead,
+an encrypted inode that is "unlocked" now simply remains unlocked until
+it is evicted from memory.  Note that this is no worse than the case for
+block device-level encryption, e.g. dm-crypt, and it still remains
+possible for a privileged user to evict unused pages, inodes, and
+dentries by running 'sync; echo 3 > /proc/sys/vm/drop_caches', or by
+simply unmounting the filesystem.  In fact, one of those actions was
+already needed anyway for key revocation to work even somewhat sanely.
+This change is not expected to break any applications.
+
+In the future I'd like to implement a real API for fscrypt key
+revocation that interacts sanely with ongoing filesystem operations ---
+waiting for existing operations to complete and blocking new operations,
+and invalidating and sanitizing key material and plaintext from the VFS
+caches.  But this is a hard problem, and for now this bug must be fixed.
+
+This bug affected almost all versions of ext4, f2fs, and ubifs
+encryption, and it was potentially reachable in any kernel configured
+with encryption support (CONFIG_EXT4_ENCRYPTION=y,
+CONFIG_EXT4_FS_ENCRYPTION=y, CONFIG_F2FS_FS_ENCRYPTION=y, or
+CONFIG_UBIFS_FS_ENCRYPTION=y).  Note that older kernels did not use the
+shared fs/crypto/ code, but due to the potential security implications
+of this bug, it may still be worthwhile to backport this fix to them.
+
+Fixes: b7236e21d55f ("ext4 crypto: reorganize how we store keys in the inode")
+Cc: stable@vger.kernel.org # v4.2+
+Signed-off-by: Eric Biggers <ebiggers@google.com>
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+Acked-by: Michael Halcrow <mhalcrow@google.com>
+
+
+
+The vulnerable function:
+int fscrypt_get_encryption_info(struct inode *inode)
+{
+	struct fscrypt_info *ci = inode->i_crypt_info;
+
+	if (!ci ||
+		(ci->ci_keyring_key &&
+		 (ci->ci_keyring_key->flags & ((1 << KEY_FLAG_INVALIDATED) |
+					       (1 << KEY_FLAG_REVOKED) |
+					       (1 << KEY_FLAG_DEAD)))))
+		return fscrypt_get_crypt_info(inode);
+	return 0;
+}
+
+
+
+The corrected function:
+int fscrypt_get_encryption_info(struct inode *inode)
+{
+	struct fscrypt_info *crypt_info;
+	struct fscrypt_context ctx;
+	struct crypto_skcipher *ctfm;
+	const char *cipher_str;
+	int keysize;
+	u8 *raw_key = NULL;
+	int res;
+
+	if (inode->i_crypt_info)
+		return 0;
+
+	res = fscrypt_initialize(inode->i_sb->s_cop->flags);
+	if (res)
+		return res;
+
+	if (!inode->i_sb->s_cop->get_context)
+		return -EOPNOTSUPP;
+
+	res = inode->i_sb->s_cop->get_context(inode, &ctx, sizeof(ctx));
+	if (res < 0) {
+		if (!fscrypt_dummy_context_enabled(inode) ||
+		    inode->i_sb->s_cop->is_encrypted(inode))
+			return res;
+		/* Fake up a context for an unencrypted directory */
+		memset(&ctx, 0, sizeof(ctx));
+		ctx.format = FS_ENCRYPTION_CONTEXT_FORMAT_V1;
+		ctx.contents_encryption_mode = FS_ENCRYPTION_MODE_AES_256_XTS;
+		ctx.filenames_encryption_mode = FS_ENCRYPTION_MODE_AES_256_CTS;
+		memset(ctx.master_key_descriptor, 0x42, FS_KEY_DESCRIPTOR_SIZE);
+	} else if (res != sizeof(ctx)) {
+		return -EINVAL;
+	}
+
+	if (ctx.format != FS_ENCRYPTION_CONTEXT_FORMAT_V1)
+		return -EINVAL;
+
+	if (ctx.flags & ~FS_POLICY_FLAGS_VALID)
+		return -EINVAL;
+
+	crypt_info = kmem_cache_alloc(fscrypt_info_cachep, GFP_NOFS);
+	if (!crypt_info)
+		return -ENOMEM;
+
+	crypt_info->ci_flags = ctx.flags;
+	crypt_info->ci_data_mode = ctx.contents_encryption_mode;
+	crypt_info->ci_filename_mode = ctx.filenames_encryption_mode;
+	crypt_info->ci_ctfm = NULL;
+	memcpy(crypt_info->ci_master_key, ctx.master_key_descriptor,
+				sizeof(crypt_info->ci_master_key));
+
+	res = determine_cipher_type(crypt_info, inode, &cipher_str, &keysize);
+	if (res)
+		goto out;
+
+	/*
+	 * This cannot be a stack buffer because it is passed to the scatterlist
+	 * crypto API as part of key derivation.
+	 */
+	res = -ENOMEM;
+	raw_key = kmalloc(FS_MAX_KEY_SIZE, GFP_NOFS);
+	if (!raw_key)
+		goto out;
+
+	res = validate_user_key(crypt_info, &ctx, raw_key, FS_KEY_DESC_PREFIX);
+	if (res && inode->i_sb->s_cop->key_prefix) {
+		int res2 = validate_user_key(crypt_info, &ctx, raw_key,
+					     inode->i_sb->s_cop->key_prefix);
+		if (res2) {
+			if (res2 == -ENOKEY)
+				res = -ENOKEY;
+			goto out;
+		}
+	} else if (res) {
+		goto out;
+	}
+	ctfm = crypto_alloc_skcipher(cipher_str, 0, 0);
+	if (!ctfm || IS_ERR(ctfm)) {
+		res = ctfm ? PTR_ERR(ctfm) : -ENOMEM;
+		printk(KERN_DEBUG
+		       "%s: error %d (inode %u) allocating crypto tfm\n",
+		       __func__, res, (unsigned) inode->i_ino);
+		goto out;
+	}
+	crypt_info->ci_ctfm = ctfm;
+	crypto_skcipher_clear_flags(ctfm, ~0);
+	crypto_skcipher_set_flags(ctfm, CRYPTO_TFM_REQ_WEAK_KEY);
+	res = crypto_skcipher_setkey(ctfm, raw_key, keysize);
+	if (res)
+		goto out;
+
+	if (cmpxchg(&inode->i_crypt_info, NULL, crypt_info) == NULL)
+		crypt_info = NULL;
+out:
+	if (res == -ENOKEY)
+		res = 0;
+	put_crypt_info(crypt_info);
+	kzfree(raw_key);
+	return res;
+}

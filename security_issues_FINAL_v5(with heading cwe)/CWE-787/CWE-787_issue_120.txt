@@ -1,0 +1,51 @@
+This issue file has CWE-787. Your task is to create this CWE-787 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+HID: Fix assumption that devices have inputs
+
+The syzbot fuzzer found a slab-out-of-bounds write bug in the hid-gaff
+driver.  The problem is caused by the driver's assumption that the
+device must have an input report.  While this will be true for all
+normal HID input devices, a suitably malicious device can violate the
+assumption.
+
+The same assumption is present in over a dozen other HID drivers.
+This patch fixes them by checking that the list of hid_inputs for the
+hid_device is nonempty before allowing it to be used.
+
+Reported-and-tested-by: syzbot+403741a091bf41d4ae79@syzkaller.appspotmail.com
+Signed-off-by: Alan Stern <stern@rowland.harvard.edu>
+CC: <stable@vger.kernel.org>
+Signed-off-by: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+
+
+
+The vulnerable function:
+static int sony_init_ff(struct sony_sc *sc)
+{
+	struct hid_input *hidinput = list_entry(sc->hdev->inputs.next,
+						struct hid_input, list);
+	struct input_dev *input_dev = hidinput->input;
+
+	input_set_capability(input_dev, EV_FF, FF_RUMBLE);
+	return input_ff_create_memless(input_dev, NULL, sony_play_effect);
+}
+
+
+
+The corrected function:
+static int sony_init_ff(struct sony_sc *sc)
+{
+	struct hid_input *hidinput;
+	struct input_dev *input_dev;
+
+	if (list_empty(&sc->hdev->inputs)) {
+		hid_err(sc->hdev, "no inputs found\n");
+		return -ENODEV;
+	}
+	hidinput = list_entry(sc->hdev->inputs.next, struct hid_input, list);
+	input_dev = hidinput->input;
+
+	input_set_capability(input_dev, EV_FF, FF_RUMBLE);
+	return input_ff_create_memless(input_dev, NULL, sony_play_effect);
+}

@@ -73,12 +73,13 @@ def mutator(issue_filepath: str, current_filename_path: str, test_case_filename_
         "INSTRUCTION: Here is a file under test and a file with some unit tests for the file under test."
         "{" + string_current_filename + "}."
         "{" + string_test_case_filename + "}."
-        " Write a new version of this file under test in which each function is replaced by a new version "
+        " Write a new version of this file under test in which the function is replaced by a new version "
         "that contains a typical bug that introduces a SECURITY violation similar to context. "
         "Delimit the mutated part using the comment-pair '// MUTANT <START>' and '// MUTANT <END>'. "
         "______________________________________________________________________________________"
         "IMPORTANT instructions: "
         "THE MUTANT MUST PASS ALL THE EXISTING TEST CASES. YOU HAVE TO INTRODUCE A NEW CWE TYPE, ACCORDING TO THE GIVEN CONTEXT."
+        "YOUR MAIN TASK WILL BE TO INTRODUCE THE NEW CWE TYPE ACCORDING TO THE FILE UNDER TEST. DO NOT JUST MIMIC THE SITUATION GIVEN IN THE CONTEXT."
         "DO NOT CHANGE THE ORIGINAL SECURITY ISSUE IN ANY WAY, SO THAT EXISTING ALL TEST CASES PASS YOUR MUTANT."
         "______________________________________________________________________________________"
         "Extra instructions: "
@@ -89,7 +90,7 @@ def mutator(issue_filepath: str, current_filename_path: str, test_case_filename_
     PROMPT1 = "CONTEXT: " + issue_content + " " + INSTRUCT_1
 
     # --- Generate new mutant content ---
-    response = client.models.generate_content(model="gemma-3-27b-it", contents=PROMPT1)
+    response = client.models.generate_content(model="gemini-2.5-flash", contents=PROMPT1)
     file_content_mutant = response.text
 
     # --- Build mutant filename ---

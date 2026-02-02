@@ -1,0 +1,47 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+netfilter: nf_tables: remove catchall element in GC sync path
+
+The expired catchall element is not deactivated and removed from GC sync
+path. This path holds mutex so just call nft_setelem_data_deactivate()
+and nft_setelem_catchall_remove() before queueing the GC work.
+
+Fixes: 4a9e12ea7e70 ("netfilter: nft_set_pipapo: call nft_trans_gc_queue_sync() in catchall GC")
+Reported-by: lonial con <kongln9170@gmail.com>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+
+
+
+The vulnerable function:
+static void nft_setelem_catchall_remove(const struct net *net,
+					const struct nft_set *set,
+					struct nft_elem_priv *elem_priv)
+{
+	struct nft_set_elem_catchall *catchall, *next;
+
+	list_for_each_entry_safe(catchall, next, &set->catchall_list, list) {
+		if (catchall->elem == elem_priv) {
+			list_del_rcu(&catchall->list);
+			kfree_rcu(catchall, rcu);
+			break;
+		}
+	}
+}
+
+
+
+The corrected function:
+static void nft_setelem_catchall_remove(const struct net *net,
+					const struct nft_set *set,
+					struct nft_elem_priv *elem_priv)
+{
+	struct nft_set_elem_catchall *catchall, *next;
+
+	list_for_each_entry_safe(catchall, next, &set->catchall_list, list) {
+		if (catchall->elem == elem_priv) {
+			nft_setelem_catchall_destroy(catchall);
+			break;
+		}
+	}
+}

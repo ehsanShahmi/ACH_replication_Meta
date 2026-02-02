@@ -1,0 +1,121 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+nl80211: check for the required netlink attributes presence
+
+nl80211_set_rekey_data() does not check if the required attributes
+NL80211_REKEY_DATA_{REPLAY_CTR,KEK,KCK} are present when processing
+NL80211_CMD_SET_REKEY_OFFLOAD request. This request can be issued by
+users with CAP_NET_ADMIN privilege and may result in NULL dereference
+and a system crash. Add a check for the required attributes presence.
+This patch is based on the patch by bo Zhang.
+
+This fixes CVE-2017-12153.
+
+References: https://bugzilla.redhat.com/show_bug.cgi?id=1491046
+Fixes: e5497d766ad ("cfg80211/nl80211: support GTK rekey offload")
+Cc: <stable@vger.kernel.org> # v3.1-rc1
+Reported-by: bo Zhang <zhangbo5891001@gmail.com>
+Signed-off-by: Vladis Dronov <vdronov@redhat.com>
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+
+
+The vulnerable function:
+static int nl80211_set_rekey_data(struct sk_buff *skb, struct genl_info *info)
+{
+	struct cfg80211_registered_device *rdev = info->user_ptr[0];
+	struct net_device *dev = info->user_ptr[1];
+	struct wireless_dev *wdev = dev->ieee80211_ptr;
+	struct nlattr *tb[NUM_NL80211_REKEY_DATA];
+	struct cfg80211_gtk_rekey_data rekey_data;
+	int err;
+
+	if (!info->attrs[NL80211_ATTR_REKEY_DATA])
+		return -EINVAL;
+
+	err = nla_parse_nested(tb, MAX_NL80211_REKEY_DATA,
+			       info->attrs[NL80211_ATTR_REKEY_DATA],
+			       nl80211_rekey_policy, info->extack);
+	if (err)
+		return err;
+
+	if (nla_len(tb[NL80211_REKEY_DATA_REPLAY_CTR]) != NL80211_REPLAY_CTR_LEN)
+		return -ERANGE;
+	if (nla_len(tb[NL80211_REKEY_DATA_KEK]) != NL80211_KEK_LEN)
+		return -ERANGE;
+	if (nla_len(tb[NL80211_REKEY_DATA_KCK]) != NL80211_KCK_LEN)
+		return -ERANGE;
+
+	rekey_data.kek = nla_data(tb[NL80211_REKEY_DATA_KEK]);
+	rekey_data.kck = nla_data(tb[NL80211_REKEY_DATA_KCK]);
+	rekey_data.replay_ctr = nla_data(tb[NL80211_REKEY_DATA_REPLAY_CTR]);
+
+	wdev_lock(wdev);
+	if (!wdev->current_bss) {
+		err = -ENOTCONN;
+		goto out;
+	}
+
+	if (!rdev->ops->set_rekey_data) {
+		err = -EOPNOTSUPP;
+		goto out;
+	}
+
+	err = rdev_set_rekey_data(rdev, dev, &rekey_data);
+ out:
+	wdev_unlock(wdev);
+	return err;
+}
+
+
+
+The corrected function:
+static int nl80211_set_rekey_data(struct sk_buff *skb, struct genl_info *info)
+{
+	struct cfg80211_registered_device *rdev = info->user_ptr[0];
+	struct net_device *dev = info->user_ptr[1];
+	struct wireless_dev *wdev = dev->ieee80211_ptr;
+	struct nlattr *tb[NUM_NL80211_REKEY_DATA];
+	struct cfg80211_gtk_rekey_data rekey_data;
+	int err;
+
+	if (!info->attrs[NL80211_ATTR_REKEY_DATA])
+		return -EINVAL;
+
+	err = nla_parse_nested(tb, MAX_NL80211_REKEY_DATA,
+			       info->attrs[NL80211_ATTR_REKEY_DATA],
+			       nl80211_rekey_policy, info->extack);
+	if (err)
+		return err;
+
+	if (!tb[NL80211_REKEY_DATA_REPLAY_CTR] || !tb[NL80211_REKEY_DATA_KEK] ||
+	    !tb[NL80211_REKEY_DATA_KCK])
+		return -EINVAL;
+	if (nla_len(tb[NL80211_REKEY_DATA_REPLAY_CTR]) != NL80211_REPLAY_CTR_LEN)
+		return -ERANGE;
+	if (nla_len(tb[NL80211_REKEY_DATA_KEK]) != NL80211_KEK_LEN)
+		return -ERANGE;
+	if (nla_len(tb[NL80211_REKEY_DATA_KCK]) != NL80211_KCK_LEN)
+		return -ERANGE;
+
+	rekey_data.kek = nla_data(tb[NL80211_REKEY_DATA_KEK]);
+	rekey_data.kck = nla_data(tb[NL80211_REKEY_DATA_KCK]);
+	rekey_data.replay_ctr = nla_data(tb[NL80211_REKEY_DATA_REPLAY_CTR]);
+
+	wdev_lock(wdev);
+	if (!wdev->current_bss) {
+		err = -ENOTCONN;
+		goto out;
+	}
+
+	if (!rdev->ops->set_rekey_data) {
+		err = -EOPNOTSUPP;
+		goto out;
+	}
+
+	err = rdev_set_rekey_data(rdev, dev, &rekey_data);
+ out:
+	wdev_unlock(wdev);
+	return err;
+}

@@ -1,0 +1,349 @@
+The vulnerable issue:
+ice: fix concurrent reset and removal of VFs
+
+Commit c503e63200c6 ("ice: Stop processing VF messages during teardown")
+introduced a driver state flag, ICE_VF_DEINIT_IN_PROGRESS, which is
+intended to prevent some issues with concurrently handling messages from
+VFs while tearing down the VFs.
+
+This change was motivated by crashes caused while tearing down and
+bringing up VFs in rapid succession.
+
+It turns out that the fix actually introduces issues with the VF driver
+caused because the PF no longer responds to any messages sent by the VF
+during its .remove routine. This results in the VF potentially removing
+its DMA memory before the PF has shut down the device queues.
+
+Additionally, the fix doesn't actually resolve concurrency issues within
+the ice driver. It is possible for a VF to initiate a reset just prior
+to the ice driver removing VFs. This can result in the remove task
+concurrently operating while the VF is being reset. This results in
+similar memory corruption and panics purportedly fixed by that commit.
+
+Fix this concurrency at its root by protecting both the reset and
+removal flows using the existing VF cfg_lock. This ensures that we
+cannot remove the VF while any outstanding critical tasks such as a
+virtchnl message or a reset are occurring.
+
+This locking change also fixes the root cause originally fixed by commit
+c503e63200c6 ("ice: Stop processing VF messages during teardown"), so we
+can simply revert it.
+
+Note that I kept these two changes together because simply reverting the
+original commit alone would leave the driver vulnerable to worse race
+conditions.
+
+Fixes: c503e63200c6 ("ice: Stop processing VF messages during teardown")
+Signed-off-by: Jacob Keller <jacob.e.keller@intel.com>
+Tested-by: Konrad Jankowski <konrad0.jankowski@intel.com>
+Signed-off-by: Tony Nguyen <anthony.l.nguyen@intel.com>
+
+
+
+The vulnerable function:
+static void ice_handle_mdd_event(struct ice_pf *pf)
+{
+	struct device *dev = ice_pf_to_dev(pf);
+	struct ice_hw *hw = &pf->hw;
+	unsigned int i;
+	u32 reg;
+
+	if (!test_and_clear_bit(ICE_MDD_EVENT_PENDING, pf->state)) {
+		/* Since the VF MDD event logging is rate limited, check if
+		 * there are pending MDD events.
+		 */
+		ice_print_vfs_mdd_events(pf);
+		return;
+	}
+
+	/* find what triggered an MDD event */
+	reg = rd32(hw, GL_MDET_TX_PQM);
+	if (reg & GL_MDET_TX_PQM_VALID_M) {
+		u8 pf_num = (reg & GL_MDET_TX_PQM_PF_NUM_M) >>
+				GL_MDET_TX_PQM_PF_NUM_S;
+		u16 vf_num = (reg & GL_MDET_TX_PQM_VF_NUM_M) >>
+				GL_MDET_TX_PQM_VF_NUM_S;
+		u8 event = (reg & GL_MDET_TX_PQM_MAL_TYPE_M) >>
+				GL_MDET_TX_PQM_MAL_TYPE_S;
+		u16 queue = ((reg & GL_MDET_TX_PQM_QNUM_M) >>
+				GL_MDET_TX_PQM_QNUM_S);
+
+		if (netif_msg_tx_err(pf))
+			dev_info(dev, "Malicious Driver Detection event %d on TX queue %d PF# %d VF# %d\n",
+				 event, queue, pf_num, vf_num);
+		wr32(hw, GL_MDET_TX_PQM, 0xffffffff);
+	}
+
+	reg = rd32(hw, GL_MDET_TX_TCLAN);
+	if (reg & GL_MDET_TX_TCLAN_VALID_M) {
+		u8 pf_num = (reg & GL_MDET_TX_TCLAN_PF_NUM_M) >>
+				GL_MDET_TX_TCLAN_PF_NUM_S;
+		u16 vf_num = (reg & GL_MDET_TX_TCLAN_VF_NUM_M) >>
+				GL_MDET_TX_TCLAN_VF_NUM_S;
+		u8 event = (reg & GL_MDET_TX_TCLAN_MAL_TYPE_M) >>
+				GL_MDET_TX_TCLAN_MAL_TYPE_S;
+		u16 queue = ((reg & GL_MDET_TX_TCLAN_QNUM_M) >>
+				GL_MDET_TX_TCLAN_QNUM_S);
+
+		if (netif_msg_tx_err(pf))
+			dev_info(dev, "Malicious Driver Detection event %d on TX queue %d PF# %d VF# %d\n",
+				 event, queue, pf_num, vf_num);
+		wr32(hw, GL_MDET_TX_TCLAN, 0xffffffff);
+	}
+
+	reg = rd32(hw, GL_MDET_RX);
+	if (reg & GL_MDET_RX_VALID_M) {
+		u8 pf_num = (reg & GL_MDET_RX_PF_NUM_M) >>
+				GL_MDET_RX_PF_NUM_S;
+		u16 vf_num = (reg & GL_MDET_RX_VF_NUM_M) >>
+				GL_MDET_RX_VF_NUM_S;
+		u8 event = (reg & GL_MDET_RX_MAL_TYPE_M) >>
+				GL_MDET_RX_MAL_TYPE_S;
+		u16 queue = ((reg & GL_MDET_RX_QNUM_M) >>
+				GL_MDET_RX_QNUM_S);
+
+		if (netif_msg_rx_err(pf))
+			dev_info(dev, "Malicious Driver Detection event %d on RX queue %d PF# %d VF# %d\n",
+				 event, queue, pf_num, vf_num);
+		wr32(hw, GL_MDET_RX, 0xffffffff);
+	}
+
+	/* check to see if this PF caused an MDD event */
+	reg = rd32(hw, PF_MDET_TX_PQM);
+	if (reg & PF_MDET_TX_PQM_VALID_M) {
+		wr32(hw, PF_MDET_TX_PQM, 0xFFFF);
+		if (netif_msg_tx_err(pf))
+			dev_info(dev, "Malicious Driver Detection event TX_PQM detected on PF\n");
+	}
+
+	reg = rd32(hw, PF_MDET_TX_TCLAN);
+	if (reg & PF_MDET_TX_TCLAN_VALID_M) {
+		wr32(hw, PF_MDET_TX_TCLAN, 0xFFFF);
+		if (netif_msg_tx_err(pf))
+			dev_info(dev, "Malicious Driver Detection event TX_TCLAN detected on PF\n");
+	}
+
+	reg = rd32(hw, PF_MDET_RX);
+	if (reg & PF_MDET_RX_VALID_M) {
+		wr32(hw, PF_MDET_RX, 0xFFFF);
+		if (netif_msg_rx_err(pf))
+			dev_info(dev, "Malicious Driver Detection event RX detected on PF\n");
+	}
+
+	/* Check to see if one of the VFs caused an MDD event, and then
+	 * increment counters and set print pending
+	 */
+	ice_for_each_vf(pf, i) {
+		struct ice_vf *vf = &pf->vf[i];
+
+		reg = rd32(hw, VP_MDET_TX_PQM(i));
+		if (reg & VP_MDET_TX_PQM_VALID_M) {
+			wr32(hw, VP_MDET_TX_PQM(i), 0xFFFF);
+			vf->mdd_tx_events.count++;
+			set_bit(ICE_MDD_VF_PRINT_PENDING, pf->state);
+			if (netif_msg_tx_err(pf))
+				dev_info(dev, "Malicious Driver Detection event TX_PQM detected on VF %d\n",
+					 i);
+		}
+
+		reg = rd32(hw, VP_MDET_TX_TCLAN(i));
+		if (reg & VP_MDET_TX_TCLAN_VALID_M) {
+			wr32(hw, VP_MDET_TX_TCLAN(i), 0xFFFF);
+			vf->mdd_tx_events.count++;
+			set_bit(ICE_MDD_VF_PRINT_PENDING, pf->state);
+			if (netif_msg_tx_err(pf))
+				dev_info(dev, "Malicious Driver Detection event TX_TCLAN detected on VF %d\n",
+					 i);
+		}
+
+		reg = rd32(hw, VP_MDET_TX_TDPU(i));
+		if (reg & VP_MDET_TX_TDPU_VALID_M) {
+			wr32(hw, VP_MDET_TX_TDPU(i), 0xFFFF);
+			vf->mdd_tx_events.count++;
+			set_bit(ICE_MDD_VF_PRINT_PENDING, pf->state);
+			if (netif_msg_tx_err(pf))
+				dev_info(dev, "Malicious Driver Detection event TX_TDPU detected on VF %d\n",
+					 i);
+		}
+
+		reg = rd32(hw, VP_MDET_RX(i));
+		if (reg & VP_MDET_RX_VALID_M) {
+			wr32(hw, VP_MDET_RX(i), 0xFFFF);
+			vf->mdd_rx_events.count++;
+			set_bit(ICE_MDD_VF_PRINT_PENDING, pf->state);
+			if (netif_msg_rx_err(pf))
+				dev_info(dev, "Malicious Driver Detection event RX detected on VF %d\n",
+					 i);
+
+			/* Since the queue is disabled on VF Rx MDD events, the
+			 * PF can be configured to reset the VF through ethtool
+			 * private flag mdd-auto-reset-vf.
+			 */
+			if (test_bit(ICE_FLAG_MDD_AUTO_RESET_VF, pf->flags)) {
+				/* VF MDD event counters will be cleared by
+				 * reset, so print the event prior to reset.
+				 */
+				ice_print_vf_rx_mdd_event(vf);
+				ice_reset_vf(&pf->vf[i], false);
+			}
+		}
+	}
+
+	ice_print_vfs_mdd_events(pf);
+}
+
+
+
+The corrected function:
+static void ice_handle_mdd_event(struct ice_pf *pf)
+{
+	struct device *dev = ice_pf_to_dev(pf);
+	struct ice_hw *hw = &pf->hw;
+	unsigned int i;
+	u32 reg;
+
+	if (!test_and_clear_bit(ICE_MDD_EVENT_PENDING, pf->state)) {
+		/* Since the VF MDD event logging is rate limited, check if
+		 * there are pending MDD events.
+		 */
+		ice_print_vfs_mdd_events(pf);
+		return;
+	}
+
+	/* find what triggered an MDD event */
+	reg = rd32(hw, GL_MDET_TX_PQM);
+	if (reg & GL_MDET_TX_PQM_VALID_M) {
+		u8 pf_num = (reg & GL_MDET_TX_PQM_PF_NUM_M) >>
+				GL_MDET_TX_PQM_PF_NUM_S;
+		u16 vf_num = (reg & GL_MDET_TX_PQM_VF_NUM_M) >>
+				GL_MDET_TX_PQM_VF_NUM_S;
+		u8 event = (reg & GL_MDET_TX_PQM_MAL_TYPE_M) >>
+				GL_MDET_TX_PQM_MAL_TYPE_S;
+		u16 queue = ((reg & GL_MDET_TX_PQM_QNUM_M) >>
+				GL_MDET_TX_PQM_QNUM_S);
+
+		if (netif_msg_tx_err(pf))
+			dev_info(dev, "Malicious Driver Detection event %d on TX queue %d PF# %d VF# %d\n",
+				 event, queue, pf_num, vf_num);
+		wr32(hw, GL_MDET_TX_PQM, 0xffffffff);
+	}
+
+	reg = rd32(hw, GL_MDET_TX_TCLAN);
+	if (reg & GL_MDET_TX_TCLAN_VALID_M) {
+		u8 pf_num = (reg & GL_MDET_TX_TCLAN_PF_NUM_M) >>
+				GL_MDET_TX_TCLAN_PF_NUM_S;
+		u16 vf_num = (reg & GL_MDET_TX_TCLAN_VF_NUM_M) >>
+				GL_MDET_TX_TCLAN_VF_NUM_S;
+		u8 event = (reg & GL_MDET_TX_TCLAN_MAL_TYPE_M) >>
+				GL_MDET_TX_TCLAN_MAL_TYPE_S;
+		u16 queue = ((reg & GL_MDET_TX_TCLAN_QNUM_M) >>
+				GL_MDET_TX_TCLAN_QNUM_S);
+
+		if (netif_msg_tx_err(pf))
+			dev_info(dev, "Malicious Driver Detection event %d on TX queue %d PF# %d VF# %d\n",
+				 event, queue, pf_num, vf_num);
+		wr32(hw, GL_MDET_TX_TCLAN, 0xffffffff);
+	}
+
+	reg = rd32(hw, GL_MDET_RX);
+	if (reg & GL_MDET_RX_VALID_M) {
+		u8 pf_num = (reg & GL_MDET_RX_PF_NUM_M) >>
+				GL_MDET_RX_PF_NUM_S;
+		u16 vf_num = (reg & GL_MDET_RX_VF_NUM_M) >>
+				GL_MDET_RX_VF_NUM_S;
+		u8 event = (reg & GL_MDET_RX_MAL_TYPE_M) >>
+				GL_MDET_RX_MAL_TYPE_S;
+		u16 queue = ((reg & GL_MDET_RX_QNUM_M) >>
+				GL_MDET_RX_QNUM_S);
+
+		if (netif_msg_rx_err(pf))
+			dev_info(dev, "Malicious Driver Detection event %d on RX queue %d PF# %d VF# %d\n",
+				 event, queue, pf_num, vf_num);
+		wr32(hw, GL_MDET_RX, 0xffffffff);
+	}
+
+	/* check to see if this PF caused an MDD event */
+	reg = rd32(hw, PF_MDET_TX_PQM);
+	if (reg & PF_MDET_TX_PQM_VALID_M) {
+		wr32(hw, PF_MDET_TX_PQM, 0xFFFF);
+		if (netif_msg_tx_err(pf))
+			dev_info(dev, "Malicious Driver Detection event TX_PQM detected on PF\n");
+	}
+
+	reg = rd32(hw, PF_MDET_TX_TCLAN);
+	if (reg & PF_MDET_TX_TCLAN_VALID_M) {
+		wr32(hw, PF_MDET_TX_TCLAN, 0xFFFF);
+		if (netif_msg_tx_err(pf))
+			dev_info(dev, "Malicious Driver Detection event TX_TCLAN detected on PF\n");
+	}
+
+	reg = rd32(hw, PF_MDET_RX);
+	if (reg & PF_MDET_RX_VALID_M) {
+		wr32(hw, PF_MDET_RX, 0xFFFF);
+		if (netif_msg_rx_err(pf))
+			dev_info(dev, "Malicious Driver Detection event RX detected on PF\n");
+	}
+
+	/* Check to see if one of the VFs caused an MDD event, and then
+	 * increment counters and set print pending
+	 */
+	ice_for_each_vf(pf, i) {
+		struct ice_vf *vf = &pf->vf[i];
+
+		reg = rd32(hw, VP_MDET_TX_PQM(i));
+		if (reg & VP_MDET_TX_PQM_VALID_M) {
+			wr32(hw, VP_MDET_TX_PQM(i), 0xFFFF);
+			vf->mdd_tx_events.count++;
+			set_bit(ICE_MDD_VF_PRINT_PENDING, pf->state);
+			if (netif_msg_tx_err(pf))
+				dev_info(dev, "Malicious Driver Detection event TX_PQM detected on VF %d\n",
+					 i);
+		}
+
+		reg = rd32(hw, VP_MDET_TX_TCLAN(i));
+		if (reg & VP_MDET_TX_TCLAN_VALID_M) {
+			wr32(hw, VP_MDET_TX_TCLAN(i), 0xFFFF);
+			vf->mdd_tx_events.count++;
+			set_bit(ICE_MDD_VF_PRINT_PENDING, pf->state);
+			if (netif_msg_tx_err(pf))
+				dev_info(dev, "Malicious Driver Detection event TX_TCLAN detected on VF %d\n",
+					 i);
+		}
+
+		reg = rd32(hw, VP_MDET_TX_TDPU(i));
+		if (reg & VP_MDET_TX_TDPU_VALID_M) {
+			wr32(hw, VP_MDET_TX_TDPU(i), 0xFFFF);
+			vf->mdd_tx_events.count++;
+			set_bit(ICE_MDD_VF_PRINT_PENDING, pf->state);
+			if (netif_msg_tx_err(pf))
+				dev_info(dev, "Malicious Driver Detection event TX_TDPU detected on VF %d\n",
+					 i);
+		}
+
+		reg = rd32(hw, VP_MDET_RX(i));
+		if (reg & VP_MDET_RX_VALID_M) {
+			wr32(hw, VP_MDET_RX(i), 0xFFFF);
+			vf->mdd_rx_events.count++;
+			set_bit(ICE_MDD_VF_PRINT_PENDING, pf->state);
+			if (netif_msg_rx_err(pf))
+				dev_info(dev, "Malicious Driver Detection event RX detected on VF %d\n",
+					 i);
+
+			/* Since the queue is disabled on VF Rx MDD events, the
+			 * PF can be configured to reset the VF through ethtool
+			 * private flag mdd-auto-reset-vf.
+			 */
+			if (test_bit(ICE_FLAG_MDD_AUTO_RESET_VF, pf->flags)) {
+				/* VF MDD event counters will be cleared by
+				 * reset, so print the event prior to reset.
+				 */
+				ice_print_vf_rx_mdd_event(vf);
+				mutex_lock(&pf->vf[i].cfg_lock);
+				ice_reset_vf(&pf->vf[i], false);
+				mutex_unlock(&pf->vf[i].cfg_lock);
+			}
+		}
+	}
+
+	ice_print_vfs_mdd_events(pf);
+}

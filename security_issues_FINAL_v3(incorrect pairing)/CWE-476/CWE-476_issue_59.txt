@@ -1,0 +1,91 @@
+The vulnerable issue:
+drm/msm/dpu: invalid parameter check in dpu_setup_dspp_pcc
+
+The function performs a check on the "ctx" input parameter, however, it
+is used before the check.
+
+Initialize the "base" variable after the sanity check to avoid a
+possible NULL pointer dereference.
+
+Fixes: 4259ff7ae509e ("drm/msm/dpu: add support for pcc color block in dpu driver")
+Addresses-Coverity-ID: 1493866 ("Null pointer dereference")
+Signed-off-by: José Expósito <jose.exposito89@gmail.com>
+Link: https://lore.kernel.org/r/20220109192431.135949-1-jose.exposito89@gmail.com
+Signed-off-by: Dmitry Baryshkov <dmitry.baryshkov@linaro.org>
+
+
+
+The vulnerable function:
+static void dpu_setup_dspp_pcc(struct dpu_hw_dspp *ctx,
+		struct dpu_hw_pcc_cfg *cfg)
+{
+
+	u32 base = ctx->cap->sblk->pcc.base;
+
+	if (!ctx || !base) {
+		DRM_ERROR("invalid ctx %pK pcc base 0x%x\n", ctx, base);
+		return;
+	}
+
+	if (!cfg) {
+		DRM_DEBUG_DRIVER("disable pcc feature\n");
+		DPU_REG_WRITE(&ctx->hw, base, PCC_DIS);
+		return;
+	}
+
+	DPU_REG_WRITE(&ctx->hw, base + PCC_RED_R_OFF, cfg->r.r);
+	DPU_REG_WRITE(&ctx->hw, base + PCC_RED_G_OFF, cfg->r.g);
+	DPU_REG_WRITE(&ctx->hw, base + PCC_RED_B_OFF, cfg->r.b);
+
+	DPU_REG_WRITE(&ctx->hw, base + PCC_GREEN_R_OFF, cfg->g.r);
+	DPU_REG_WRITE(&ctx->hw, base + PCC_GREEN_G_OFF, cfg->g.g);
+	DPU_REG_WRITE(&ctx->hw, base + PCC_GREEN_B_OFF, cfg->g.b);
+
+	DPU_REG_WRITE(&ctx->hw, base + PCC_BLUE_R_OFF, cfg->b.r);
+	DPU_REG_WRITE(&ctx->hw, base + PCC_BLUE_G_OFF, cfg->b.g);
+	DPU_REG_WRITE(&ctx->hw, base + PCC_BLUE_B_OFF, cfg->b.b);
+
+	DPU_REG_WRITE(&ctx->hw, base, PCC_EN);
+}
+
+
+
+The corrected function:
+static void dpu_setup_dspp_pcc(struct dpu_hw_dspp *ctx,
+		struct dpu_hw_pcc_cfg *cfg)
+{
+
+	u32 base;
+
+	if (!ctx) {
+		DRM_ERROR("invalid ctx %pK\n", ctx);
+		return;
+	}
+
+	base = ctx->cap->sblk->pcc.base;
+
+	if (!base) {
+		DRM_ERROR("invalid ctx %pK pcc base 0x%x\n", ctx, base);
+		return;
+	}
+
+	if (!cfg) {
+		DRM_DEBUG_DRIVER("disable pcc feature\n");
+		DPU_REG_WRITE(&ctx->hw, base, PCC_DIS);
+		return;
+	}
+
+	DPU_REG_WRITE(&ctx->hw, base + PCC_RED_R_OFF, cfg->r.r);
+	DPU_REG_WRITE(&ctx->hw, base + PCC_RED_G_OFF, cfg->r.g);
+	DPU_REG_WRITE(&ctx->hw, base + PCC_RED_B_OFF, cfg->r.b);
+
+	DPU_REG_WRITE(&ctx->hw, base + PCC_GREEN_R_OFF, cfg->g.r);
+	DPU_REG_WRITE(&ctx->hw, base + PCC_GREEN_G_OFF, cfg->g.g);
+	DPU_REG_WRITE(&ctx->hw, base + PCC_GREEN_B_OFF, cfg->g.b);
+
+	DPU_REG_WRITE(&ctx->hw, base + PCC_BLUE_R_OFF, cfg->b.r);
+	DPU_REG_WRITE(&ctx->hw, base + PCC_BLUE_G_OFF, cfg->b.g);
+	DPU_REG_WRITE(&ctx->hw, base + PCC_BLUE_B_OFF, cfg->b.b);
+
+	DPU_REG_WRITE(&ctx->hw, base, PCC_EN);
+}

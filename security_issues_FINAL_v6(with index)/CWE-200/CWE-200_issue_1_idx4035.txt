@@ -1,0 +1,92 @@
+This issue file has CWE-200. Your task is to create this CWE-200 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+staging: comedi: fix infoleak to userspace
+
+driver_name and board_name are pointers to strings, not buffers of size
+COMEDI_NAMELEN.  Copying COMEDI_NAMELEN bytes of a string containing
+less than COMEDI_NAMELEN-1 bytes would leak some unrelated bytes.
+
+Signed-off-by: Vasiliy Kulikov <segoon@openwall.com>
+Cc: stable <stable@kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+
+
+The vulnerable function:
+static int do_devinfo_ioctl(struct comedi_device *dev,
+			    struct comedi_devinfo __user *arg,
+			    struct file *file)
+{
+	struct comedi_devinfo devinfo;
+	const unsigned minor = iminor(file->f_dentry->d_inode);
+	struct comedi_device_file_info *dev_file_info =
+	    comedi_get_device_file_info(minor);
+	struct comedi_subdevice *read_subdev =
+	    comedi_get_read_subdevice(dev_file_info);
+	struct comedi_subdevice *write_subdev =
+	    comedi_get_write_subdevice(dev_file_info);
+
+	memset(&devinfo, 0, sizeof(devinfo));
+
+	/* fill devinfo structure */
+	devinfo.version_code = COMEDI_VERSION_CODE;
+	devinfo.n_subdevs = dev->n_subdevices;
+	memcpy(devinfo.driver_name, dev->driver->driver_name, COMEDI_NAMELEN);
+	memcpy(devinfo.board_name, dev->board_name, COMEDI_NAMELEN);
+
+	if (read_subdev)
+		devinfo.read_subdevice = read_subdev - dev->subdevices;
+	else
+		devinfo.read_subdevice = -1;
+
+	if (write_subdev)
+		devinfo.write_subdevice = write_subdev - dev->subdevices;
+	else
+		devinfo.write_subdevice = -1;
+
+	if (copy_to_user(arg, &devinfo, sizeof(struct comedi_devinfo)))
+		return -EFAULT;
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int do_devinfo_ioctl(struct comedi_device *dev,
+			    struct comedi_devinfo __user *arg,
+			    struct file *file)
+{
+	struct comedi_devinfo devinfo;
+	const unsigned minor = iminor(file->f_dentry->d_inode);
+	struct comedi_device_file_info *dev_file_info =
+	    comedi_get_device_file_info(minor);
+	struct comedi_subdevice *read_subdev =
+	    comedi_get_read_subdevice(dev_file_info);
+	struct comedi_subdevice *write_subdev =
+	    comedi_get_write_subdevice(dev_file_info);
+
+	memset(&devinfo, 0, sizeof(devinfo));
+
+	/* fill devinfo structure */
+	devinfo.version_code = COMEDI_VERSION_CODE;
+	devinfo.n_subdevs = dev->n_subdevices;
+	strlcpy(devinfo.driver_name, dev->driver->driver_name, COMEDI_NAMELEN);
+	strlcpy(devinfo.board_name, dev->board_name, COMEDI_NAMELEN);
+
+	if (read_subdev)
+		devinfo.read_subdevice = read_subdev - dev->subdevices;
+	else
+		devinfo.read_subdevice = -1;
+
+	if (write_subdev)
+		devinfo.write_subdevice = write_subdev - dev->subdevices;
+	else
+		devinfo.write_subdevice = -1;
+
+	if (copy_to_user(arg, &devinfo, sizeof(struct comedi_devinfo)))
+		return -EFAULT;
+
+	return 0;
+}

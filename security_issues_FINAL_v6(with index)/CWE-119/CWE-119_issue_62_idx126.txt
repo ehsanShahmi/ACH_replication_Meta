@@ -1,0 +1,67 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+[media] dw2102: don't do DMA on stack
+
+On Kernel 4.9, WARNINGs about doing DMA on stack are hit at
+the dw2102 driver: one in su3000_power_ctrl() and the other in tt_s2_4600_frontend_attach().
+
+Both were due to the use of buffers on the stack as parameters to
+dvb_usb_generic_rw() and the resulting attempt to do DMA with them.
+
+The device was non-functional as a result.
+
+So, switch this driver over to use a buffer within the device state
+structure, as has been done with other DVB-USB drivers.
+
+Tested with TechnoTrend TT-connect S2-4600.
+
+[mchehab@osg.samsung.com: fixed a warning at su3000_i2c_transfer() that
+ state var were dereferenced before check 'd']
+Signed-off-by: Jonathan McDowell <noodles@earth.li>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@s-opensource.com>
+
+
+
+The vulnerable function:
+static int su3000_power_ctrl(struct dvb_usb_device *d, int i)
+{
+	struct dw2102_state *state = (struct dw2102_state *)d->priv;
+	u8 obuf[] = {0xde, 0};
+
+	info("%s: %d, initialized %d", __func__, i, state->initialized);
+
+	if (i && !state->initialized) {
+		state->initialized = 1;
+		/* reset board */
+		return dvb_usb_generic_rw(d, obuf, 2, NULL, 0, 0);
+	}
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int su3000_power_ctrl(struct dvb_usb_device *d, int i)
+{
+	struct dw2102_state *state = (struct dw2102_state *)d->priv;
+	int ret = 0;
+
+	info("%s: %d, initialized %d", __func__, i, state->initialized);
+
+	if (i && !state->initialized) {
+		mutex_lock(&d->data_mutex);
+
+		state->data[0] = 0xde;
+		state->data[1] = 0;
+
+		state->initialized = 1;
+		/* reset board */
+		ret = dvb_usb_generic_rw(d, state->data, 2, NULL, 0, 0);
+		mutex_unlock(&d->data_mutex);
+	}
+
+	return ret;
+}

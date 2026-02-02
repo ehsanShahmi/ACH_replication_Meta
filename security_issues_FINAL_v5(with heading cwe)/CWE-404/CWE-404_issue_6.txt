@@ -1,0 +1,136 @@
+This issue file has CWE-404. Your task is to create this CWE-404 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+KEYS: fix keyctl_set_reqkey_keyring() to not leak thread keyrings
+
+This fixes CVE-2017-7472.
+
+Running the following program as an unprivileged user exhausts kernel
+memory by leaking thread keyrings:
+
+	#include <keyutils.h>
+
+	int main()
+	{
+		for (;;)
+			keyctl_set_reqkey_keyring(KEY_REQKEY_DEFL_THREAD_KEYRING);
+	}
+
+Fix it by only creating a new thread keyring if there wasn't one before.
+To make things more consistent, make install_thread_keyring_to_cred()
+and install_process_keyring_to_cred() both return 0 if the corresponding
+keyring is already present.
+
+Fixes: d84f4f992cbd ("CRED: Inaugurate COW credentials")
+Cc: stable@vger.kernel.org # 2.6.29+
+Signed-off-by: Eric Biggers <ebiggers@google.com>
+Signed-off-by: David Howells <dhowells@redhat.com>
+
+
+
+The vulnerable function:
+long keyctl_set_reqkey_keyring(int reqkey_defl)
+{
+	struct cred *new;
+	int ret, old_setting;
+
+	old_setting = current_cred_xxx(jit_keyring);
+
+	if (reqkey_defl == KEY_REQKEY_DEFL_NO_CHANGE)
+		return old_setting;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+
+	switch (reqkey_defl) {
+	case KEY_REQKEY_DEFL_THREAD_KEYRING:
+		ret = install_thread_keyring_to_cred(new);
+		if (ret < 0)
+			goto error;
+		goto set;
+
+	case KEY_REQKEY_DEFL_PROCESS_KEYRING:
+		ret = install_process_keyring_to_cred(new);
+		if (ret < 0) {
+			if (ret != -EEXIST)
+				goto error;
+			ret = 0;
+		}
+		goto set;
+
+	case KEY_REQKEY_DEFL_DEFAULT:
+	case KEY_REQKEY_DEFL_SESSION_KEYRING:
+	case KEY_REQKEY_DEFL_USER_KEYRING:
+	case KEY_REQKEY_DEFL_USER_SESSION_KEYRING:
+	case KEY_REQKEY_DEFL_REQUESTOR_KEYRING:
+		goto set;
+
+	case KEY_REQKEY_DEFL_NO_CHANGE:
+	case KEY_REQKEY_DEFL_GROUP_KEYRING:
+	default:
+		ret = -EINVAL;
+		goto error;
+	}
+
+set:
+	new->jit_keyring = reqkey_defl;
+	commit_creds(new);
+	return old_setting;
+error:
+	abort_creds(new);
+	return ret;
+}
+
+
+
+The corrected function:
+long keyctl_set_reqkey_keyring(int reqkey_defl)
+{
+	struct cred *new;
+	int ret, old_setting;
+
+	old_setting = current_cred_xxx(jit_keyring);
+
+	if (reqkey_defl == KEY_REQKEY_DEFL_NO_CHANGE)
+		return old_setting;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+
+	switch (reqkey_defl) {
+	case KEY_REQKEY_DEFL_THREAD_KEYRING:
+		ret = install_thread_keyring_to_cred(new);
+		if (ret < 0)
+			goto error;
+		goto set;
+
+	case KEY_REQKEY_DEFL_PROCESS_KEYRING:
+		ret = install_process_keyring_to_cred(new);
+		if (ret < 0)
+			goto error;
+		goto set;
+
+	case KEY_REQKEY_DEFL_DEFAULT:
+	case KEY_REQKEY_DEFL_SESSION_KEYRING:
+	case KEY_REQKEY_DEFL_USER_KEYRING:
+	case KEY_REQKEY_DEFL_USER_SESSION_KEYRING:
+	case KEY_REQKEY_DEFL_REQUESTOR_KEYRING:
+		goto set;
+
+	case KEY_REQKEY_DEFL_NO_CHANGE:
+	case KEY_REQKEY_DEFL_GROUP_KEYRING:
+	default:
+		ret = -EINVAL;
+		goto error;
+	}
+
+set:
+	new->jit_keyring = reqkey_defl;
+	commit_creds(new);
+	return old_setting;
+error:
+	abort_creds(new);
+	return ret;
+}

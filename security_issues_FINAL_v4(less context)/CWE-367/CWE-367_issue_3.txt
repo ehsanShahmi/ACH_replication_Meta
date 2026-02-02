@@ -1,0 +1,105 @@
+The vulnerable issue:
+nfc: replace improper check device_is_registered() in netlink related functions
+
+The device_is_registered() in nfc core is used to check whether
+nfc device is registered in netlink related functions such as
+nfc_fw_download(), nfc_dev_up() and so on. Although device_is_registered()
+is protected by device_lock, there is still a race condition between
+device_del() and device_is_registered(). The root cause is that
+kobject_del() in device_del() is not protected by device_lock.
+
+   (cleanup task)         |     (netlink task)
+                          |
+nfc_unregister_device     | nfc_fw_download
+ device_del               |  device_lock
+  ...                     |   if (!device_is_registered)//(1)
+  kobject_del//(2)        |   ...
+ ...                      |  device_unlock
+
+The device_is_registered() returns the value of state_in_sysfs and
+the state_in_sysfs is set to zero in kobject_del(). If we pass check in
+position (1), then set zero in position (2). As a result, the check
+in position (1) is useless.
+
+This patch uses bool variable instead of device_is_registered() to judge
+whether the nfc device is registered, which is well synchronized.
+
+Fixes: 3e256b8f8dfa ("NFC: add nfc subsystem core")
+Signed-off-by: Duoming Zhou <duoming@zju.edu.cn>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+int nfc_deactivate_target(struct nfc_dev *dev, u32 target_idx, u8 mode)
+{
+	int rc = 0;
+
+	pr_debug("dev_name=%s target_idx=%u\n",
+		 dev_name(&dev->dev), target_idx);
+
+	device_lock(&dev->dev);
+
+	if (!device_is_registered(&dev->dev)) {
+		rc = -ENODEV;
+		goto error;
+	}
+
+	if (dev->active_target == NULL) {
+		rc = -ENOTCONN;
+		goto error;
+	}
+
+	if (dev->active_target->idx != target_idx) {
+		rc = -ENOTCONN;
+		goto error;
+	}
+
+	if (dev->ops->check_presence)
+		del_timer_sync(&dev->check_pres_timer);
+
+	dev->ops->deactivate_target(dev, dev->active_target, mode);
+	dev->active_target = NULL;
+
+error:
+	device_unlock(&dev->dev);
+	return rc;
+}
+
+
+
+The corrected function:
+int nfc_deactivate_target(struct nfc_dev *dev, u32 target_idx, u8 mode)
+{
+	int rc = 0;
+
+	pr_debug("dev_name=%s target_idx=%u\n",
+		 dev_name(&dev->dev), target_idx);
+
+	device_lock(&dev->dev);
+
+	if (dev->shutting_down) {
+		rc = -ENODEV;
+		goto error;
+	}
+
+	if (dev->active_target == NULL) {
+		rc = -ENOTCONN;
+		goto error;
+	}
+
+	if (dev->active_target->idx != target_idx) {
+		rc = -ENOTCONN;
+		goto error;
+	}
+
+	if (dev->ops->check_presence)
+		del_timer_sync(&dev->check_pres_timer);
+
+	dev->ops->deactivate_target(dev, dev->active_target, mode);
+	dev->active_target = NULL;
+
+error:
+	device_unlock(&dev->dev);
+	return rc;
+}

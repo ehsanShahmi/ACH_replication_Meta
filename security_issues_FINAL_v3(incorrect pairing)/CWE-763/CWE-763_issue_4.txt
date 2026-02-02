@@ -1,0 +1,433 @@
+The vulnerable issue:
+uaccess: Add speculation barrier to copy_from_user()
+
+The results of "access_ok()" can be mis-speculated.  The result is that
+you can end speculatively:
+
+	if (access_ok(from, size))
+		// Right here
+
+even for bad from/size combinations.  On first glance, it would be ideal
+to just add a speculation barrier to "access_ok()" so that its results
+can never be mis-speculated.
+
+But there are lots of system calls just doing access_ok() via
+"copy_to_user()" and friends (example: fstat() and friends).  Those are
+generally not problematic because they do not _consume_ data from
+userspace other than the pointer.  They are also very quick and common
+system calls that should not be needlessly slowed down.
+
+"copy_from_user()" on the other hand uses a user-controller pointer and
+is frequently followed up with code that might affect caches.  Take
+something like this:
+
+	if (!copy_from_user(&kernelvar, uptr, size))
+		do_something_with(kernelvar);
+
+If userspace passes in an evil 'uptr' that *actually* points to a kernel
+addresses, and then do_something_with() has cache (or other)
+side-effects, it could allow userspace to infer kernel data values.
+
+Add a barrier to the common copy_from_user() code to prevent
+mis-speculated values which happen after the copy.
+
+Also add a stub for architectures that do not define barrier_nospec().
+This makes the macro usable in generic code.
+
+Since the barrier is now usable in generic code, the x86 #ifdef in the
+BPF code can also go away.
+
+Reported-by: Jordy Zomer <jordyzomer@google.com>
+Suggested-by: Linus Torvalds <torvalds@linuxfoundation.org>
+Signed-off-by: Dave Hansen <dave.hansen@linux.intel.com>
+Reviewed-by: Thomas Gleixner <tglx@linutronix.de>
+Acked-by: Daniel Borkmann <daniel@iogearbox.net>   # BPF bits
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+static u64 ___bpf_prog_run(u64 *regs, const struct bpf_insn *insn)
+{
+#define BPF_INSN_2_LBL(x, y)    [BPF_##x | BPF_##y] = &&x##_##y
+#define BPF_INSN_3_LBL(x, y, z) [BPF_##x | BPF_##y | BPF_##z] = &&x##_##y##_##z
+	static const void * const jumptable[256] __annotate_jump_table = {
+		[0 ... 255] = &&default_label,
+		/* Now overwrite non-defaults ... */
+		BPF_INSN_MAP(BPF_INSN_2_LBL, BPF_INSN_3_LBL),
+		/* Non-UAPI available opcodes. */
+		[BPF_JMP | BPF_CALL_ARGS] = &&JMP_CALL_ARGS,
+		[BPF_JMP | BPF_TAIL_CALL] = &&JMP_TAIL_CALL,
+		[BPF_ST  | BPF_NOSPEC] = &&ST_NOSPEC,
+		[BPF_LDX | BPF_PROBE_MEM | BPF_B] = &&LDX_PROBE_MEM_B,
+		[BPF_LDX | BPF_PROBE_MEM | BPF_H] = &&LDX_PROBE_MEM_H,
+		[BPF_LDX | BPF_PROBE_MEM | BPF_W] = &&LDX_PROBE_MEM_W,
+		[BPF_LDX | BPF_PROBE_MEM | BPF_DW] = &&LDX_PROBE_MEM_DW,
+	};
+#undef BPF_INSN_3_LBL
+#undef BPF_INSN_2_LBL
+	u32 tail_call_cnt = 0;
+
+#define CONT	 ({ insn++; goto select_insn; })
+#define CONT_JMP ({ insn++; goto select_insn; })
+
+select_insn:
+	goto *jumptable[insn->code];
+
+	/* Explicitly mask the register-based shift amounts with 63 or 31
+	 * to avoid undefined behavior. Normally this won't affect the
+	 * generated code, for example, in case of native 64 bit archs such
+	 * as x86-64 or arm64, the compiler is optimizing the AND away for
+	 * the interpreter. In case of JITs, each of the JIT backends compiles
+	 * the BPF shift operations to machine instructions which produce
+	 * implementation-defined results in such a case; the resulting
+	 * contents of the register may be arbitrary, but program behaviour
+	 * as a whole remains defined. In other words, in case of JIT backends,
+	 * the AND must /not/ be added to the emitted LSH/RSH/ARSH translation.
+	 */
+	/* ALU (shifts) */
+#define SHT(OPCODE, OP)					\
+	ALU64_##OPCODE##_X:				\
+		DST = DST OP (SRC & 63);		\
+		CONT;					\
+	ALU_##OPCODE##_X:				\
+		DST = (u32) DST OP ((u32) SRC & 31);	\
+		CONT;					\
+	ALU64_##OPCODE##_K:				\
+		DST = DST OP IMM;			\
+		CONT;					\
+	ALU_##OPCODE##_K:				\
+		DST = (u32) DST OP (u32) IMM;		\
+		CONT;
+	/* ALU (rest) */
+#define ALU(OPCODE, OP)					\
+	ALU64_##OPCODE##_X:				\
+		DST = DST OP SRC;			\
+		CONT;					\
+	ALU_##OPCODE##_X:				\
+		DST = (u32) DST OP (u32) SRC;		\
+		CONT;					\
+	ALU64_##OPCODE##_K:				\
+		DST = DST OP IMM;			\
+		CONT;					\
+	ALU_##OPCODE##_K:				\
+		DST = (u32) DST OP (u32) IMM;		\
+		CONT;
+	ALU(ADD,  +)
+	ALU(SUB,  -)
+	ALU(AND,  &)
+	ALU(OR,   |)
+	ALU(XOR,  ^)
+	ALU(MUL,  *)
+	SHT(LSH, <<)
+	SHT(RSH, >>)
+#undef SHT
+#undef ALU
+	ALU_NEG:
+		DST = (u32) -DST;
+		CONT;
+	ALU64_NEG:
+		DST = -DST;
+		CONT;
+	ALU_MOV_X:
+		DST = (u32) SRC;
+		CONT;
+	ALU_MOV_K:
+		DST = (u32) IMM;
+		CONT;
+	ALU64_MOV_X:
+		DST = SRC;
+		CONT;
+	ALU64_MOV_K:
+		DST = IMM;
+		CONT;
+	LD_IMM_DW:
+		DST = (u64) (u32) insn[0].imm | ((u64) (u32) insn[1].imm) << 32;
+		insn++;
+		CONT;
+	ALU_ARSH_X:
+		DST = (u64) (u32) (((s32) DST) >> (SRC & 31));
+		CONT;
+	ALU_ARSH_K:
+		DST = (u64) (u32) (((s32) DST) >> IMM);
+		CONT;
+	ALU64_ARSH_X:
+		(*(s64 *) &DST) >>= (SRC & 63);
+		CONT;
+	ALU64_ARSH_K:
+		(*(s64 *) &DST) >>= IMM;
+		CONT;
+	ALU64_MOD_X:
+		div64_u64_rem(DST, SRC, &AX);
+		DST = AX;
+		CONT;
+	ALU_MOD_X:
+		AX = (u32) DST;
+		DST = do_div(AX, (u32) SRC);
+		CONT;
+	ALU64_MOD_K:
+		div64_u64_rem(DST, IMM, &AX);
+		DST = AX;
+		CONT;
+	ALU_MOD_K:
+		AX = (u32) DST;
+		DST = do_div(AX, (u32) IMM);
+		CONT;
+	ALU64_DIV_X:
+		DST = div64_u64(DST, SRC);
+		CONT;
+	ALU_DIV_X:
+		AX = (u32) DST;
+		do_div(AX, (u32) SRC);
+		DST = (u32) AX;
+		CONT;
+	ALU64_DIV_K:
+		DST = div64_u64(DST, IMM);
+		CONT;
+	ALU_DIV_K:
+		AX = (u32) DST;
+		do_div(AX, (u32) IMM);
+		DST = (u32) AX;
+		CONT;
+	ALU_END_TO_BE:
+		switch (IMM) {
+		case 16:
+			DST = (__force u16) cpu_to_be16(DST);
+			break;
+		case 32:
+			DST = (__force u32) cpu_to_be32(DST);
+			break;
+		case 64:
+			DST = (__force u64) cpu_to_be64(DST);
+			break;
+		}
+		CONT;
+	ALU_END_TO_LE:
+		switch (IMM) {
+		case 16:
+			DST = (__force u16) cpu_to_le16(DST);
+			break;
+		case 32:
+			DST = (__force u32) cpu_to_le32(DST);
+			break;
+		case 64:
+			DST = (__force u64) cpu_to_le64(DST);
+			break;
+		}
+		CONT;
+
+	/* CALL */
+	JMP_CALL:
+		/* Function call scratches BPF_R1-BPF_R5 registers,
+		 * preserves BPF_R6-BPF_R9, and stores return value
+		 * into BPF_R0.
+		 */
+		BPF_R0 = (__bpf_call_base + insn->imm)(BPF_R1, BPF_R2, BPF_R3,
+						       BPF_R4, BPF_R5);
+		CONT;
+
+	JMP_CALL_ARGS:
+		BPF_R0 = (__bpf_call_base_args + insn->imm)(BPF_R1, BPF_R2,
+							    BPF_R3, BPF_R4,
+							    BPF_R5,
+							    insn + insn->off + 1);
+		CONT;
+
+	JMP_TAIL_CALL: {
+		struct bpf_map *map = (struct bpf_map *) (unsigned long) BPF_R2;
+		struct bpf_array *array = container_of(map, struct bpf_array, map);
+		struct bpf_prog *prog;
+		u32 index = BPF_R3;
+
+		if (unlikely(index >= array->map.max_entries))
+			goto out;
+
+		if (unlikely(tail_call_cnt >= MAX_TAIL_CALL_CNT))
+			goto out;
+
+		tail_call_cnt++;
+
+		prog = READ_ONCE(array->ptrs[index]);
+		if (!prog)
+			goto out;
+
+		/* ARG1 at this point is guaranteed to point to CTX from
+		 * the verifier side due to the fact that the tail call is
+		 * handled like a helper, that is, bpf_tail_call_proto,
+		 * where arg1_type is ARG_PTR_TO_CTX.
+		 */
+		insn = prog->insnsi;
+		goto select_insn;
+out:
+		CONT;
+	}
+	JMP_JA:
+		insn += insn->off;
+		CONT;
+	JMP_EXIT:
+		return BPF_R0;
+	/* JMP */
+#define COND_JMP(SIGN, OPCODE, CMP_OP)				\
+	JMP_##OPCODE##_X:					\
+		if ((SIGN##64) DST CMP_OP (SIGN##64) SRC) {	\
+			insn += insn->off;			\
+			CONT_JMP;				\
+		}						\
+		CONT;						\
+	JMP32_##OPCODE##_X:					\
+		if ((SIGN##32) DST CMP_OP (SIGN##32) SRC) {	\
+			insn += insn->off;			\
+			CONT_JMP;				\
+		}						\
+		CONT;						\
+	JMP_##OPCODE##_K:					\
+		if ((SIGN##64) DST CMP_OP (SIGN##64) IMM) {	\
+			insn += insn->off;			\
+			CONT_JMP;				\
+		}						\
+		CONT;						\
+	JMP32_##OPCODE##_K:					\
+		if ((SIGN##32) DST CMP_OP (SIGN##32) IMM) {	\
+			insn += insn->off;			\
+			CONT_JMP;				\
+		}						\
+		CONT;
+	COND_JMP(u, JEQ, ==)
+	COND_JMP(u, JNE, !=)
+	COND_JMP(u, JGT, >)
+	COND_JMP(u, JLT, <)
+	COND_JMP(u, JGE, >=)
+	COND_JMP(u, JLE, <=)
+	COND_JMP(u, JSET, &)
+	COND_JMP(s, JSGT, >)
+	COND_JMP(s, JSLT, <)
+	COND_JMP(s, JSGE, >=)
+	COND_JMP(s, JSLE, <=)
+#undef COND_JMP
+	/* ST, STX and LDX*/
+	ST_NOSPEC:
+		/* Speculation barrier for mitigating Speculative Store Bypass.
+		 * In case of arm64, we rely on the firmware mitigation as
+		 * controlled via the ssbd kernel parameter. Whenever the
+		 * mitigation is enabled, it works for all of the kernel code
+		 * with no need to provide any additional instructions here.
+		 * In case of x86, we use 'lfence' insn for mitigation. We
+		 * reuse preexisting logic from Spectre v1 mitigation that
+		 * happens to produce the required code on x86 for v4 as well.
+		 */
+#ifdef CONFIG_X86
+		barrier_nospec();
+#endif
+		CONT;
+#define LDST(SIZEOP, SIZE)						\
+	STX_MEM_##SIZEOP:						\
+		*(SIZE *)(unsigned long) (DST + insn->off) = SRC;	\
+		CONT;							\
+	ST_MEM_##SIZEOP:						\
+		*(SIZE *)(unsigned long) (DST + insn->off) = IMM;	\
+		CONT;							\
+	LDX_MEM_##SIZEOP:						\
+		DST = *(SIZE *)(unsigned long) (SRC + insn->off);	\
+		CONT;							\
+	LDX_PROBE_MEM_##SIZEOP:						\
+		bpf_probe_read_kernel(&DST, sizeof(SIZE),		\
+				      (const void *)(long) (SRC + insn->off));	\
+		DST = *((SIZE *)&DST);					\
+		CONT;
+
+	LDST(B,   u8)
+	LDST(H,  u16)
+	LDST(W,  u32)
+	LDST(DW, u64)
+#undef LDST
+
+#define ATOMIC_ALU_OP(BOP, KOP)						\
+		case BOP:						\
+			if (BPF_SIZE(insn->code) == BPF_W)		\
+				atomic_##KOP((u32) SRC, (atomic_t *)(unsigned long) \
+					     (DST + insn->off));	\
+			else						\
+				atomic64_##KOP((u64) SRC, (atomic64_t *)(unsigned long) \
+					       (DST + insn->off));	\
+			break;						\
+		case BOP | BPF_FETCH:					\
+			if (BPF_SIZE(insn->code) == BPF_W)		\
+				SRC = (u32) atomic_fetch_##KOP(		\
+					(u32) SRC,			\
+					(atomic_t *)(unsigned long) (DST + insn->off)); \
+			else						\
+				SRC = (u64) atomic64_fetch_##KOP(	\
+					(u64) SRC,			\
+					(atomic64_t *)(unsigned long) (DST + insn->off)); \
+			break;
+
+	STX_ATOMIC_DW:
+	STX_ATOMIC_W:
+		switch (IMM) {
+		ATOMIC_ALU_OP(BPF_ADD, add)
+		ATOMIC_ALU_OP(BPF_AND, and)
+		ATOMIC_ALU_OP(BPF_OR, or)
+		ATOMIC_ALU_OP(BPF_XOR, xor)
+#undef ATOMIC_ALU_OP
+
+		case BPF_XCHG:
+			if (BPF_SIZE(insn->code) == BPF_W)
+				SRC = (u32) atomic_xchg(
+					(atomic_t *)(unsigned long) (DST + insn->off),
+					(u32) SRC);
+			else
+				SRC = (u64) atomic64_xchg(
+					(atomic64_t *)(unsigned long) (DST + insn->off),
+					(u64) SRC);
+			break;
+		case BPF_CMPXCHG:
+			if (BPF_SIZE(insn->code) == BPF_W)
+				BPF_R0 = (u32) atomic_cmpxchg(
+					(atomic_t *)(unsigned long) (DST + insn->off),
+					(u32) BPF_R0, (u32) SRC);
+			else
+				BPF_R0 = (u64) atomic64_cmpxchg(
+					(atomic64_t *)(unsigned long) (DST + insn->off),
+					(u64) BPF_R0, (u64) SRC);
+			break;
+
+		default:
+			goto default_label;
+		}
+		CONT;
+
+	default_label:
+		/* If we ever reach this, we have a bug somewhere. Die hard here
+		 * instead of just returning 0; we could be somewhere in a subprog,
+		 * so execution could continue otherwise which we do /not/ want.
+		 *
+		 * Note, verifier whitelists all opcodes in bpf_opcode_in_insntable().
+		 */
+		pr_warn("BPF interpreter: unknown opcode %02x (imm: 0x%x)\n",
+			insn->code, insn->imm);
+		BUG_ON(1);
+		return 0;
+}
+
+
+
+The corrected function:
+unsigned long _copy_from_user(void *to, const void __user *from, unsigned long n)
+{
+	unsigned long res = n;
+	might_fault();
+	if (!should_fail_usercopy() && likely(access_ok(from, n))) {
+		/*
+		 * Ensure that bad access_ok() speculation will not
+		 * lead to nasty side effects *after* the copy is
+		 * finished:
+		 */
+		barrier_nospec();
+		instrument_copy_from_user_before(to, from, n);
+		res = raw_copy_from_user(to, from, n);
+		instrument_copy_from_user_after(to, from, n, res);
+	}
+	if (unlikely(res))
+		memset(to + (n - res), 0, res);
+	return res;
+}

@@ -1,0 +1,163 @@
+The vulnerable issue:
+ASoC: meson: axg-card: fix 'use-after-free'
+
+Buffer 'card->dai_link' is reallocated in 'meson_card_reallocate_links()',
+so move 'pad' pointer initialization after this function when memory is
+already reallocated.
+
+Kasan bug report:
+
+==================================================================
+BUG: KASAN: slab-use-after-free in axg_card_add_link+0x76c/0x9bc
+Read of size 8 at addr ffff000000e8b260 by task modprobe/356
+
+CPU: 0 PID: 356 Comm: modprobe Tainted: G O 6.9.12-sdkernel #1
+Call trace:
+ dump_backtrace+0x94/0xec
+ show_stack+0x18/0x24
+ dump_stack_lvl+0x78/0x90
+ print_report+0xfc/0x5c0
+ kasan_report+0xb8/0xfc
+ __asan_load8+0x9c/0xb8
+ axg_card_add_link+0x76c/0x9bc [snd_soc_meson_axg_sound_card]
+ meson_card_probe+0x344/0x3b8 [snd_soc_meson_card_utils]
+ platform_probe+0x8c/0xf4
+ really_probe+0x110/0x39c
+ __driver_probe_device+0xb8/0x18c
+ driver_probe_device+0x108/0x1d8
+ __driver_attach+0xd0/0x25c
+ bus_for_each_dev+0xe0/0x154
+ driver_attach+0x34/0x44
+ bus_add_driver+0x134/0x294
+ driver_register+0xa8/0x1e8
+ __platform_driver_register+0x44/0x54
+ axg_card_pdrv_init+0x20/0x1000 [snd_soc_meson_axg_sound_card]
+ do_one_initcall+0xdc/0x25c
+ do_init_module+0x10c/0x334
+ load_module+0x24c4/0x26cc
+ init_module_from_file+0xd4/0x128
+ __arm64_sys_finit_module+0x1f4/0x41c
+ invoke_syscall+0x60/0x188
+ el0_svc_common.constprop.0+0x78/0x13c
+ do_el0_svc+0x30/0x40
+ el0_svc+0x38/0x78
+ el0t_64_sync_handler+0x100/0x12c
+ el0t_64_sync+0x190/0x194
+
+Fixes: 7864a79f37b5 ("ASoC: meson: add axg sound card support")
+Cc: Stable@vger.kernel.org
+Signed-off-by: Arseniy Krasnov <avkrasnov@salutedevices.com>
+Reviewed-by: Jerome Brunet <jbrunet@baylibre.com>
+Link: https://patch.msgid.link/20240911142425.598631-1-avkrasnov@salutedevices.com
+Signed-off-by: Mark Brown <broonie@kernel.org>
+
+
+
+The vulnerable function:
+static int axg_card_add_tdm_loopback(struct snd_soc_card *card,
+				     int *index)
+{
+	struct meson_card *priv = snd_soc_card_get_drvdata(card);
+	struct snd_soc_dai_link *pad = &card->dai_link[*index];
+	struct snd_soc_dai_link *lb;
+	struct snd_soc_dai_link_component *dlc;
+	int ret;
+
+	/* extend links */
+	ret = meson_card_reallocate_links(card, card->num_links + 1);
+	if (ret)
+		return ret;
+
+	lb = &card->dai_link[*index + 1];
+
+	lb->name = devm_kasprintf(card->dev, GFP_KERNEL, "%s-lb", pad->name);
+	if (!lb->name)
+		return -ENOMEM;
+
+	dlc = devm_kzalloc(card->dev, sizeof(*dlc), GFP_KERNEL);
+	if (!dlc)
+		return -ENOMEM;
+
+	lb->cpus = dlc;
+	lb->codecs = &snd_soc_dummy_dlc;
+	lb->num_cpus = 1;
+	lb->num_codecs = 1;
+
+	lb->stream_name = lb->name;
+	lb->cpus->of_node = pad->cpus->of_node;
+	lb->cpus->dai_name = "TDM Loopback";
+	lb->dpcm_capture = 1;
+	lb->no_pcm = 1;
+	lb->ops = &axg_card_tdm_be_ops;
+	lb->init = axg_card_tdm_dai_lb_init;
+
+	/* Provide the same link data to the loopback */
+	priv->link_data[*index + 1] = priv->link_data[*index];
+
+	/*
+	 * axg_card_clean_references() will iterate over this link,
+	 * make sure the node count is balanced
+	 */
+	of_node_get(lb->cpus->of_node);
+
+	/* Let add_links continue where it should */
+	*index += 1;
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int axg_card_add_tdm_loopback(struct snd_soc_card *card,
+				     int *index)
+{
+	struct meson_card *priv = snd_soc_card_get_drvdata(card);
+	struct snd_soc_dai_link *pad;
+	struct snd_soc_dai_link *lb;
+	struct snd_soc_dai_link_component *dlc;
+	int ret;
+
+	/* extend links */
+	ret = meson_card_reallocate_links(card, card->num_links + 1);
+	if (ret)
+		return ret;
+
+	pad = &card->dai_link[*index];
+	lb = &card->dai_link[*index + 1];
+
+	lb->name = devm_kasprintf(card->dev, GFP_KERNEL, "%s-lb", pad->name);
+	if (!lb->name)
+		return -ENOMEM;
+
+	dlc = devm_kzalloc(card->dev, sizeof(*dlc), GFP_KERNEL);
+	if (!dlc)
+		return -ENOMEM;
+
+	lb->cpus = dlc;
+	lb->codecs = &snd_soc_dummy_dlc;
+	lb->num_cpus = 1;
+	lb->num_codecs = 1;
+
+	lb->stream_name = lb->name;
+	lb->cpus->of_node = pad->cpus->of_node;
+	lb->cpus->dai_name = "TDM Loopback";
+	lb->dpcm_capture = 1;
+	lb->no_pcm = 1;
+	lb->ops = &axg_card_tdm_be_ops;
+	lb->init = axg_card_tdm_dai_lb_init;
+
+	/* Provide the same link data to the loopback */
+	priv->link_data[*index + 1] = priv->link_data[*index];
+
+	/*
+	 * axg_card_clean_references() will iterate over this link,
+	 * make sure the node count is balanced
+	 */
+	of_node_get(lb->cpus->of_node);
+
+	/* Let add_links continue where it should */
+	*index += 1;
+
+	return 0;
+}

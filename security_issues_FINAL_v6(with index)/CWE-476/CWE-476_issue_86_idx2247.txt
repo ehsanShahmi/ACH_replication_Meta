@@ -1,0 +1,69 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+drm/gma500: fix null pointer dereference in psb_intel_lvds_get_modes
+
+In psb_intel_lvds_get_modes(), the return value of drm_mode_duplicate() is
+assigned to mode, which will lead to a possible NULL pointer dereference
+on failure of drm_mode_duplicate(). Add a check to avoid npd.
+
+Cc: stable@vger.kernel.org
+Fixes: 89c78134cc54 ("gma500: Add Poulsbo support")
+Signed-off-by: Ma Ke <make24@iscas.ac.cn>
+Signed-off-by: Patrik Jakobsson <patrik.r.jakobsson@gmail.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20240709092011.3204970-1-make24@iscas.ac.cn
+
+
+
+The vulnerable function:
+static int psb_intel_lvds_get_modes(struct drm_connector *connector)
+{
+	struct drm_device *dev = connector->dev;
+	struct drm_psb_private *dev_priv = to_drm_psb_private(dev);
+	struct psb_intel_mode_device *mode_dev = &dev_priv->mode_dev;
+	int ret = 0;
+
+	if (!IS_MRST(dev))
+		ret = psb_intel_ddc_get_modes(connector, connector->ddc);
+
+	if (ret)
+		return ret;
+
+	if (mode_dev->panel_fixed_mode != NULL) {
+		struct drm_display_mode *mode =
+		    drm_mode_duplicate(dev, mode_dev->panel_fixed_mode);
+		drm_mode_probed_add(connector, mode);
+		return 1;
+	}
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int psb_intel_lvds_get_modes(struct drm_connector *connector)
+{
+	struct drm_device *dev = connector->dev;
+	struct drm_psb_private *dev_priv = to_drm_psb_private(dev);
+	struct psb_intel_mode_device *mode_dev = &dev_priv->mode_dev;
+	int ret = 0;
+
+	if (!IS_MRST(dev))
+		ret = psb_intel_ddc_get_modes(connector, connector->ddc);
+
+	if (ret)
+		return ret;
+
+	if (mode_dev->panel_fixed_mode != NULL) {
+		struct drm_display_mode *mode =
+		    drm_mode_duplicate(dev, mode_dev->panel_fixed_mode);
+		if (!mode)
+			return 0;
+
+		drm_mode_probed_add(connector, mode);
+		return 1;
+	}
+
+	return 0;
+}

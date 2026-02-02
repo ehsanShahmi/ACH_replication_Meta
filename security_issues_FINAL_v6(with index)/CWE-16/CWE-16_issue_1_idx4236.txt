@@ -1,0 +1,76 @@
+This issue file has CWE-16. Your task is to create this CWE-16 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+kernel/sys.c: fix stack memory content leak via UNAME26
+
+Calling uname() with the UNAME26 personality set allows a leak of kernel
+stack contents.  This fixes it by defensively calculating the length of
+copy_to_user() call, making the len argument unsigned, and initializing
+the stack buffer to zero (now technically unneeded, but hey, overkill).
+
+CVE-2012-0957
+
+Reported-by: PaX Team <pageexec@freemail.hu>
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Cc: Andi Kleen <ak@linux.intel.com>
+Cc: PaX Team <pageexec@freemail.hu>
+Cc: Brad Spengler <spender@grsecurity.net>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+static int override_release(char __user *release, int len)
+{
+	int ret = 0;
+	char buf[65];
+
+	if (current->personality & UNAME26) {
+		char *rest = UTS_RELEASE;
+		int ndots = 0;
+		unsigned v;
+
+		while (*rest) {
+			if (*rest == '.' && ++ndots >= 3)
+				break;
+			if (!isdigit(*rest) && *rest != '.')
+				break;
+			rest++;
+		}
+		v = ((LINUX_VERSION_CODE >> 8) & 0xff) + 40;
+		snprintf(buf, len, "2.6.%u%s", v, rest);
+		ret = copy_to_user(release, buf, len);
+	}
+	return ret;
+}
+
+
+
+The corrected function:
+static int override_release(char __user *release, size_t len)
+{
+	int ret = 0;
+
+	if (current->personality & UNAME26) {
+		const char *rest = UTS_RELEASE;
+		char buf[65] = { 0 };
+		int ndots = 0;
+		unsigned v;
+		size_t copy;
+
+		while (*rest) {
+			if (*rest == '.' && ++ndots >= 3)
+				break;
+			if (!isdigit(*rest) && *rest != '.')
+				break;
+			rest++;
+		}
+		v = ((LINUX_VERSION_CODE >> 8) & 0xff) + 40;
+		copy = min(sizeof(buf), max_t(size_t, 1, len));
+		copy = scnprintf(buf, copy, "2.6.%u%s", v, rest);
+		ret = copy_to_user(release, buf, copy + 1);
+	}
+	return ret;
+}

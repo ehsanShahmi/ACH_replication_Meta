@@ -37,9 +37,9 @@ def save_issues_by_cwe(issue_dataset: pd.DataFrame, base_output_dir: str = './se
             
             # Construct the specific string format requested
             formatted_content = (
-                "The vulnerable issue: " + str(row_vuln['commit_message']).strip() + 
-                "\nThe vulnerable function: " + str(row_vuln['func_body']).strip() + 
-                "\nThe corrected function: " + str(row_fix['func_body']).strip()
+                "The vulnerable issue:\n" + str(row_vuln['commit_message']).strip() + 
+                "\n\n\n\nThe vulnerable function:\n" + str(row_vuln['func_body']).strip() + 
+                "\n\n\n\nThe corrected function:\n" + str(row_fix['func_body']).strip()
             )
             
             # Store the CWE list and the formatted content
@@ -91,8 +91,9 @@ def main():
     # Filter for linux and reset index is CRITICAL here so that [i+1] 
     # refers to the next linux record, not the original global index
     secVulEval = secVulEvalfull[secVulEvalfull['project'] == 'linux'].reset_index(drop=True)
+    # print (secVulEval.shape)
 
-    save_issues_by_cwe(secVulEval)
+    # save_issues_by_cwe(secVulEval)
 
 if __name__ == "__main__":
     main()

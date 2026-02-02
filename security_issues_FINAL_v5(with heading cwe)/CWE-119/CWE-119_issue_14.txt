@@ -1,0 +1,132 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+nfsd: stricter decoding of write-like NFSv2/v3 ops
+
+The NFSv2/v3 code does not systematically check whether we decode past
+the end of the buffer.  This generally appears to be harmless, but there
+are a few places where we do arithmetic on the pointers involved and
+don't account for the possibility that a length could be negative.  Add
+checks to catch these.
+
+Reported-by: Tuomas Haanpää <thaan@synopsys.com>
+Reported-by: Ari Kauppi <ari@synopsys.com>
+Reviewed-by: NeilBrown <neilb@suse.com>
+Cc: stable@vger.kernel.org
+Signed-off-by: J. Bruce Fields <bfields@redhat.com>
+
+
+
+The vulnerable function:
+int
+nfssvc_decode_writeargs(struct svc_rqst *rqstp, __be32 *p,
+					struct nfsd_writeargs *args)
+{
+	unsigned int len, hdr, dlen;
+	struct kvec *head = rqstp->rq_arg.head;
+	int v;
+
+	p = decode_fh(p, &args->fh);
+	if (!p)
+		return 0;
+
+	p++;				/* beginoffset */
+	args->offset = ntohl(*p++);	/* offset */
+	p++;				/* totalcount */
+	len = args->len = ntohl(*p++);
+	/*
+	 * The protocol specifies a maximum of 8192 bytes.
+	 */
+	if (len > NFSSVC_MAXBLKSIZE_V2)
+		return 0;
+
+	/*
+	 * Check to make sure that we got the right number of
+	 * bytes.
+	 */
+	hdr = (void*)p - head->iov_base;
+	dlen = head->iov_len + rqstp->rq_arg.page_len - hdr;
+
+	/*
+	 * Round the length of the data which was specified up to
+	 * the next multiple of XDR units and then compare that
+	 * against the length which was actually received.
+	 * Note that when RPCSEC/GSS (for example) is used, the
+	 * data buffer can be padded so dlen might be larger
+	 * than required.  It must never be smaller.
+	 */
+	if (dlen < XDR_QUADLEN(len)*4)
+		return 0;
+
+	rqstp->rq_vec[0].iov_base = (void*)p;
+	rqstp->rq_vec[0].iov_len = head->iov_len - hdr;
+	v = 0;
+	while (len > rqstp->rq_vec[v].iov_len) {
+		len -= rqstp->rq_vec[v].iov_len;
+		v++;
+		rqstp->rq_vec[v].iov_base = page_address(rqstp->rq_pages[v]);
+		rqstp->rq_vec[v].iov_len = PAGE_SIZE;
+	}
+	rqstp->rq_vec[v].iov_len = len;
+	args->vlen = v + 1;
+	return 1;
+}
+
+
+
+The corrected function:
+int
+nfssvc_decode_writeargs(struct svc_rqst *rqstp, __be32 *p,
+					struct nfsd_writeargs *args)
+{
+	unsigned int len, hdr, dlen;
+	struct kvec *head = rqstp->rq_arg.head;
+	int v;
+
+	p = decode_fh(p, &args->fh);
+	if (!p)
+		return 0;
+
+	p++;				/* beginoffset */
+	args->offset = ntohl(*p++);	/* offset */
+	p++;				/* totalcount */
+	len = args->len = ntohl(*p++);
+	/*
+	 * The protocol specifies a maximum of 8192 bytes.
+	 */
+	if (len > NFSSVC_MAXBLKSIZE_V2)
+		return 0;
+
+	/*
+	 * Check to make sure that we got the right number of
+	 * bytes.
+	 */
+	hdr = (void*)p - head->iov_base;
+	if (hdr > head->iov_len)
+		return 0;
+	dlen = head->iov_len + rqstp->rq_arg.page_len - hdr;
+
+	/*
+	 * Round the length of the data which was specified up to
+	 * the next multiple of XDR units and then compare that
+	 * against the length which was actually received.
+	 * Note that when RPCSEC/GSS (for example) is used, the
+	 * data buffer can be padded so dlen might be larger
+	 * than required.  It must never be smaller.
+	 */
+	if (dlen < XDR_QUADLEN(len)*4)
+		return 0;
+
+	rqstp->rq_vec[0].iov_base = (void*)p;
+	rqstp->rq_vec[0].iov_len = head->iov_len - hdr;
+	v = 0;
+	while (len > rqstp->rq_vec[v].iov_len) {
+		len -= rqstp->rq_vec[v].iov_len;
+		v++;
+		rqstp->rq_vec[v].iov_base = page_address(rqstp->rq_pages[v]);
+		rqstp->rq_vec[v].iov_len = PAGE_SIZE;
+	}
+	rqstp->rq_vec[v].iov_len = len;
+	args->vlen = v + 1;
+	return 1;
+}

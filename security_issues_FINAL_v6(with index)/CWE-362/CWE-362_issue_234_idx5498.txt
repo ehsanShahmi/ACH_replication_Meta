@@ -1,0 +1,39 @@
+This issue file has CWE-362. Your task is to create this CWE-362 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+driver core: platform: fix race condition with driver_override
+
+The driver_override implementation is susceptible to race condition when
+different threads are reading vs storing a different driver override.
+Add locking to avoid race condition.
+
+Fixes: 3d713e0e382e ("driver core: platform: add device binding path 'driver_override'")
+Cc: stable@vger.kernel.org
+Signed-off-by: Adrian Salido <salidoa@google.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+
+
+The vulnerable function:
+static ssize_t driver_override_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+
+	return sprintf(buf, "%s\n", pdev->driver_override);
+}
+
+
+
+The corrected function:
+static ssize_t driver_override_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	ssize_t len;
+
+	device_lock(dev);
+	len = sprintf(buf, "%s\n", pdev->driver_override);
+	device_unlock(dev);
+	return len;
+}

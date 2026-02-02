@@ -1,0 +1,91 @@
+This issue file has CWE-129. Your task is to create this CWE-129 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+nfsd: encoders mustn't use unitialized values in error cases
+
+In error cases, lgp->lg_layout_type may be out of bounds; so we
+shouldn't be using it until after the check of nfserr.
+
+This was seen to crash nfsd threads when the server receives a LAYOUTGET
+request with a large layout type.
+
+GETDEVICEINFO has the same problem.
+
+Reported-by: Ari Kauppi <Ari.Kauppi@synopsys.com>
+Reviewed-by: Christoph Hellwig <hch@lst.de>
+Cc: stable@vger.kernel.org
+Signed-off-by: J. Bruce Fields <bfields@redhat.com>
+
+
+
+The vulnerable function:
+nfsd4_encode_layoutget(struct nfsd4_compoundres *resp, __be32 nfserr,
+		struct nfsd4_layoutget *lgp)
+{
+	struct xdr_stream *xdr = &resp->xdr;
+	const struct nfsd4_layout_ops *ops =
+		nfsd4_layout_ops[lgp->lg_layout_type];
+	__be32 *p;
+
+	dprintk("%s: err %d\n", __func__, nfserr);
+	if (nfserr)
+		goto out;
+
+	nfserr = nfserr_resource;
+	p = xdr_reserve_space(xdr, 36 + sizeof(stateid_opaque_t));
+	if (!p)
+		goto out;
+
+	*p++ = cpu_to_be32(1);	/* we always set return-on-close */
+	*p++ = cpu_to_be32(lgp->lg_sid.si_generation);
+	p = xdr_encode_opaque_fixed(p, &lgp->lg_sid.si_opaque,
+				    sizeof(stateid_opaque_t));
+
+	*p++ = cpu_to_be32(1);	/* we always return a single layout */
+	p = xdr_encode_hyper(p, lgp->lg_seg.offset);
+	p = xdr_encode_hyper(p, lgp->lg_seg.length);
+	*p++ = cpu_to_be32(lgp->lg_seg.iomode);
+	*p++ = cpu_to_be32(lgp->lg_layout_type);
+
+	nfserr = ops->encode_layoutget(xdr, lgp);
+out:
+	kfree(lgp->lg_content);
+	return nfserr;
+}
+
+
+
+The corrected function:
+nfsd4_encode_layoutget(struct nfsd4_compoundres *resp, __be32 nfserr,
+		struct nfsd4_layoutget *lgp)
+{
+	struct xdr_stream *xdr = &resp->xdr;
+	const struct nfsd4_layout_ops *ops;
+	__be32 *p;
+
+	dprintk("%s: err %d\n", __func__, nfserr);
+	if (nfserr)
+		goto out;
+
+	nfserr = nfserr_resource;
+	p = xdr_reserve_space(xdr, 36 + sizeof(stateid_opaque_t));
+	if (!p)
+		goto out;
+
+	*p++ = cpu_to_be32(1);	/* we always set return-on-close */
+	*p++ = cpu_to_be32(lgp->lg_sid.si_generation);
+	p = xdr_encode_opaque_fixed(p, &lgp->lg_sid.si_opaque,
+				    sizeof(stateid_opaque_t));
+
+	*p++ = cpu_to_be32(1);	/* we always return a single layout */
+	p = xdr_encode_hyper(p, lgp->lg_seg.offset);
+	p = xdr_encode_hyper(p, lgp->lg_seg.length);
+	*p++ = cpu_to_be32(lgp->lg_seg.iomode);
+	*p++ = cpu_to_be32(lgp->lg_layout_type);
+
+	ops = nfsd4_layout_ops[lgp->lg_layout_type];
+	nfserr = ops->encode_layoutget(xdr, lgp);
+out:
+	kfree(lgp->lg_content);
+	return nfserr;
+}

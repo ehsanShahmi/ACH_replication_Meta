@@ -1,0 +1,49 @@
+This issue file has CWE-19. Your task is to create this CWE-19 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+[POWERPC] Never panic when taking altivec exceptions from userspace
+
+At the moment we rely on a cpu feature bit or a firmware property to
+detect altivec. If we dont have either of these and the cpu does in fact
+support altivec we can cause a panic from userspace.
+
+It seems safer to always send a signal if we manage to get an 0xf20
+exception from userspace.
+
+Signed-off-by: Anton Blanchard <anton@samba.org>
+Signed-off-by: Paul Mackerras <paulus@samba.org>
+
+
+
+The vulnerable function:
+void altivec_unavailable_exception(struct pt_regs *regs)
+{
+#if !defined(CONFIG_ALTIVEC)
+	if (user_mode(regs)) {
+		/* A user program has executed an altivec instruction,
+		   but this kernel doesn't support altivec. */
+		_exception(SIGILL, regs, ILL_ILLOPC, regs->nip);
+		return;
+	}
+#endif
+	printk(KERN_EMERG "Unrecoverable VMX/Altivec Unavailable Exception "
+			"%lx at %lx\n", regs->trap, regs->nip);
+	die("Unrecoverable VMX/Altivec Unavailable Exception", regs, SIGABRT);
+}
+
+
+
+The corrected function:
+void altivec_unavailable_exception(struct pt_regs *regs)
+{
+	if (user_mode(regs)) {
+		/* A user program has executed an altivec instruction,
+		   but this kernel doesn't support altivec. */
+		_exception(SIGILL, regs, ILL_ILLOPC, regs->nip);
+		return;
+	}
+
+	printk(KERN_EMERG "Unrecoverable VMX/Altivec Unavailable Exception "
+			"%lx at %lx\n", regs->trap, regs->nip);
+	die("Unrecoverable VMX/Altivec Unavailable Exception", regs, SIGABRT);
+}

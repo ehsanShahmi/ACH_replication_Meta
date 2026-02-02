@@ -1,0 +1,74 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+netfilter: tproxy: bail out if IP has been disabled on the device
+
+syzbot reports:
+general protection fault, probably for non-canonical address 0xdffffc0000000003: 0000 [#1] PREEMPT SMP KASAN PTI
+KASAN: null-ptr-deref in range [0x0000000000000018-0x000000000000001f]
+[..]
+RIP: 0010:nf_tproxy_laddr4+0xb7/0x340 net/ipv4/netfilter/nf_tproxy_ipv4.c:62
+Call Trace:
+ nft_tproxy_eval_v4 net/netfilter/nft_tproxy.c:56 [inline]
+ nft_tproxy_eval+0xa9a/0x1a00 net/netfilter/nft_tproxy.c:168
+
+__in_dev_get_rcu() can return NULL, so check for this.
+
+Reported-and-tested-by: syzbot+b94a6818504ea90d7661@syzkaller.appspotmail.com
+Fixes: cc6eb4338569 ("tproxy: use the interface primary IP address as a default value for --on-ip")
+Signed-off-by: Florian Westphal <fw@strlen.de>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+
+
+
+The vulnerable function:
+__be32 nf_tproxy_laddr4(struct sk_buff *skb, __be32 user_laddr, __be32 daddr)
+{
+	const struct in_ifaddr *ifa;
+	struct in_device *indev;
+	__be32 laddr;
+
+	if (user_laddr)
+		return user_laddr;
+
+	laddr = 0;
+	indev = __in_dev_get_rcu(skb->dev);
+
+	in_dev_for_each_ifa_rcu(ifa, indev) {
+		if (ifa->ifa_flags & IFA_F_SECONDARY)
+			continue;
+
+		laddr = ifa->ifa_local;
+		break;
+	}
+
+	return laddr ? laddr : daddr;
+}
+
+
+
+The corrected function:
+__be32 nf_tproxy_laddr4(struct sk_buff *skb, __be32 user_laddr, __be32 daddr)
+{
+	const struct in_ifaddr *ifa;
+	struct in_device *indev;
+	__be32 laddr;
+
+	if (user_laddr)
+		return user_laddr;
+
+	laddr = 0;
+	indev = __in_dev_get_rcu(skb->dev);
+	if (!indev)
+		return daddr;
+
+	in_dev_for_each_ifa_rcu(ifa, indev) {
+		if (ifa->ifa_flags & IFA_F_SECONDARY)
+			continue;
+
+		laddr = ifa->ifa_local;
+		break;
+	}
+
+	return laddr ? laddr : daddr;
+}

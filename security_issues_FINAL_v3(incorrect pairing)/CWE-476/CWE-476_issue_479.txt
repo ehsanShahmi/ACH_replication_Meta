@@ -1,0 +1,137 @@
+The vulnerable issue:
+module: Fix NULL vs IS_ERR checking for module_get_next_page
+
+The module_get_next_page() function return error pointers on error
+instead of NULL.
+Use IS_ERR() to check the return value to fix this.
+
+Fixes: b1ae6dc41eaa ("module: add in-kernel support for decompressing")
+Signed-off-by: Miaoqian Lin <linmq006@gmail.com>
+Reviewed-by: Dmitry Torokhov <dmitry.torokhov@gmail.com
+Signed-off-by: Luis Chamberlain <mcgrof@kernel.org>
+
+
+
+The vulnerable function:
+static ssize_t module_gzip_decompress(struct load_info *info,
+				      const void *buf, size_t size)
+{
+	struct z_stream_s s = { 0 };
+	size_t new_size = 0;
+	size_t gzip_hdr_len;
+	ssize_t retval;
+	int rc;
+
+	gzip_hdr_len = module_gzip_header_len(buf, size);
+	if (!gzip_hdr_len) {
+		pr_err("not a gzip compressed module\n");
+		return -EINVAL;
+	}
+
+	s.next_in = buf + gzip_hdr_len;
+	s.avail_in = size - gzip_hdr_len;
+
+	s.workspace = kmalloc(zlib_inflate_workspacesize(), GFP_KERNEL);
+	if (!s.workspace)
+		return -ENOMEM;
+
+	rc = zlib_inflateInit2(&s, -MAX_WBITS);
+	if (rc != Z_OK) {
+		pr_err("failed to initialize decompressor: %d\n", rc);
+		retval = -EINVAL;
+		goto out;
+	}
+
+	do {
+		struct page *page = module_get_next_page(info);
+
+		if (!page) {
+			retval = -ENOMEM;
+			goto out_inflate_end;
+		}
+
+		s.next_out = kmap_local_page(page);
+		s.avail_out = PAGE_SIZE;
+		rc = zlib_inflate(&s, 0);
+		kunmap_local(s.next_out);
+
+		new_size += PAGE_SIZE - s.avail_out;
+	} while (rc == Z_OK);
+
+	if (rc != Z_STREAM_END) {
+		pr_err("decompression failed with status %d\n", rc);
+		retval = -EINVAL;
+		goto out_inflate_end;
+	}
+
+	retval = new_size;
+
+out_inflate_end:
+	zlib_inflateEnd(&s);
+out:
+	kfree(s.workspace);
+	return retval;
+}
+
+
+
+The corrected function:
+static ssize_t module_gzip_decompress(struct load_info *info,
+				      const void *buf, size_t size)
+{
+	struct z_stream_s s = { 0 };
+	size_t new_size = 0;
+	size_t gzip_hdr_len;
+	ssize_t retval;
+	int rc;
+
+	gzip_hdr_len = module_gzip_header_len(buf, size);
+	if (!gzip_hdr_len) {
+		pr_err("not a gzip compressed module\n");
+		return -EINVAL;
+	}
+
+	s.next_in = buf + gzip_hdr_len;
+	s.avail_in = size - gzip_hdr_len;
+
+	s.workspace = kmalloc(zlib_inflate_workspacesize(), GFP_KERNEL);
+	if (!s.workspace)
+		return -ENOMEM;
+
+	rc = zlib_inflateInit2(&s, -MAX_WBITS);
+	if (rc != Z_OK) {
+		pr_err("failed to initialize decompressor: %d\n", rc);
+		retval = -EINVAL;
+		goto out;
+	}
+
+	do {
+		struct page *page = module_get_next_page(info);
+
+		if (IS_ERR(page)) {
+			retval = PTR_ERR(page);
+			goto out_inflate_end;
+		}
+
+		s.next_out = kmap_local_page(page);
+		s.avail_out = PAGE_SIZE;
+		rc = zlib_inflate(&s, 0);
+		kunmap_local(s.next_out);
+
+		new_size += PAGE_SIZE - s.avail_out;
+	} while (rc == Z_OK);
+
+	if (rc != Z_STREAM_END) {
+		pr_err("decompression failed with status %d\n", rc);
+		retval = -EINVAL;
+		goto out_inflate_end;
+	}
+
+	retval = new_size;
+
+out_inflate_end:
+	zlib_inflateEnd(&s);
+out:
+	kfree(s.workspace);
+	return retval;
+}

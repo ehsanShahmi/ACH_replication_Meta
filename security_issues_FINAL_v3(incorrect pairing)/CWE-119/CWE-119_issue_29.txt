@@ -1,0 +1,63 @@
+The vulnerable issue:
+iwlwifi: Sanity check for sta_id
+
+On my testing, I saw some strange behavior
+
+[  421.739708] iwlwifi 0000:01:00.0: ACTIVATE a non DRIVER active station id 148 addr 00:00:00:00:00:00
+[  421.739719] iwlwifi 0000:01:00.0: iwl_sta_ucode_activate Added STA id 148 addr 00:00:00:00:00:00 to uCode
+
+not sure how it happen, but adding the sanity check to prevent memory
+corruption
+
+Signed-off-by: Wey-Yi Guy <wey-yi.w.guy@intel.com>
+Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+
+
+The vulnerable function:
+static void iwl_sta_ucode_activate(struct iwl_priv *priv, u8 sta_id)
+{
+
+	if (!(priv->stations[sta_id].used & IWL_STA_DRIVER_ACTIVE))
+		IWL_ERR(priv, "ACTIVATE a non DRIVER active station id %u "
+			"addr %pM\n",
+			sta_id, priv->stations[sta_id].sta.sta.addr);
+
+	if (priv->stations[sta_id].used & IWL_STA_UCODE_ACTIVE) {
+		IWL_DEBUG_ASSOC(priv,
+				"STA id %u addr %pM already present in uCode "
+				"(according to driver)\n",
+				sta_id, priv->stations[sta_id].sta.sta.addr);
+	} else {
+		priv->stations[sta_id].used |= IWL_STA_UCODE_ACTIVE;
+		IWL_DEBUG_ASSOC(priv, "Added STA id %u addr %pM to uCode\n",
+				sta_id, priv->stations[sta_id].sta.sta.addr);
+	}
+}
+
+
+
+The corrected function:
+static int iwl_sta_ucode_activate(struct iwl_priv *priv, u8 sta_id)
+{
+	if (sta_id >= IWLAGN_STATION_COUNT) {
+		IWL_ERR(priv, "invalid sta_id %u", sta_id);
+		return -EINVAL;
+	}
+	if (!(priv->stations[sta_id].used & IWL_STA_DRIVER_ACTIVE))
+		IWL_ERR(priv, "ACTIVATE a non DRIVER active station id %u "
+			"addr %pM\n",
+			sta_id, priv->stations[sta_id].sta.sta.addr);
+
+	if (priv->stations[sta_id].used & IWL_STA_UCODE_ACTIVE) {
+		IWL_DEBUG_ASSOC(priv,
+				"STA id %u addr %pM already present in uCode "
+				"(according to driver)\n",
+				sta_id, priv->stations[sta_id].sta.sta.addr);
+	} else {
+		priv->stations[sta_id].used |= IWL_STA_UCODE_ACTIVE;
+		IWL_DEBUG_ASSOC(priv, "Added STA id %u addr %pM to uCode\n",
+				sta_id, priv->stations[sta_id].sta.sta.addr);
+	}
+	return 0;
+}

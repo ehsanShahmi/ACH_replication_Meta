@@ -1,0 +1,22 @@
+This issue file has NVD-CWE-noinfo. Your task is to create this NVD-CWE-noinfo type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+NFSv4: Convert the open and close ops to use fmode
+
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+
+
+The vulnerable function:
+void nfs4_close_sync(struct path *path, struct nfs4_state *state, mode_t mode)
+{
+	__nfs4_close(path, state, mode, 1);
+}
+
+
+
+The corrected function:
+void nfs4_close_sync(struct path *path, struct nfs4_state *state, fmode_t fmode)
+{
+	__nfs4_close(path, state, fmode, 1);
+}

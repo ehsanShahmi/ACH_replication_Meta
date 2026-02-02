@@ -1,0 +1,123 @@
+The vulnerable issue:
+x86/entry/64: Don't use IST entry for #BP stack
+
+There's nothing IST-worthy about #BP/int3.  We don't allow kprobes
+in the small handful of places in the kernel that run at CPL0 with
+an invalid stack, and 32-bit kernels have used normal interrupt
+gates for #BP forever.
+
+Furthermore, we don't allow kprobes in places that have usergs while
+in kernel mode, so "paranoid" is also unnecessary.
+
+Signed-off-by: Andy Lutomirski <luto@kernel.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: stable@vger.kernel.org
+
+
+
+The vulnerable function:
+dotraplinkage void notrace do_int3(struct pt_regs *regs, long error_code)
+{
+#ifdef CONFIG_DYNAMIC_FTRACE
+	/*
+	 * ftrace must be first, everything else may cause a recursive crash.
+	 * See note by declaration of modifying_ftrace_code in ftrace.c
+	 */
+	if (unlikely(atomic_read(&modifying_ftrace_code)) &&
+	    ftrace_int3_handler(regs))
+		return;
+#endif
+	if (poke_int3_handler(regs))
+		return;
+
+	ist_enter(regs);
+	RCU_LOCKDEP_WARN(!rcu_is_watching(), "entry code didn't wake RCU");
+#ifdef CONFIG_KGDB_LOW_LEVEL_TRAP
+	if (kgdb_ll_trap(DIE_INT3, "int3", regs, error_code, X86_TRAP_BP,
+				SIGTRAP) == NOTIFY_STOP)
+		goto exit;
+#endif /* CONFIG_KGDB_LOW_LEVEL_TRAP */
+
+#ifdef CONFIG_KPROBES
+	if (kprobe_int3_handler(regs))
+		goto exit;
+#endif
+
+	if (notify_die(DIE_INT3, "int3", regs, error_code, X86_TRAP_BP,
+			SIGTRAP) == NOTIFY_STOP)
+		goto exit;
+
+	/*
+	 * Let others (NMI) know that the debug stack is in use
+	 * as we may switch to the interrupt stack.
+	 */
+	debug_stack_usage_inc();
+	cond_local_irq_enable(regs);
+	do_trap(X86_TRAP_BP, SIGTRAP, "int3", regs, error_code, NULL);
+	cond_local_irq_disable(regs);
+	debug_stack_usage_dec();
+exit:
+	ist_exit(regs);
+}
+
+
+
+The corrected function:
+static int __dwc3_gadget_kick_transfer(struct dwc3_ep *dep)
+{
+	struct dwc3_gadget_ep_cmd_params params;
+	struct dwc3_request		*req;
+	int				starting;
+	int				ret;
+	u32				cmd;
+
+	if (!dwc3_calc_trbs_left(dep))
+		return 0;
+
+	starting = !(dep->flags & DWC3_EP_BUSY);
+
+	dwc3_prepare_trbs(dep);
+	req = next_request(&dep->started_list);
+	if (!req) {
+		dep->flags |= DWC3_EP_PENDING_REQUEST;
+		return 0;
+	}
+
+	memset(&params, 0, sizeof(params));
+
+	if (starting) {
+		params.param0 = upper_32_bits(req->trb_dma);
+		params.param1 = lower_32_bits(req->trb_dma);
+		cmd = DWC3_DEPCMD_STARTTRANSFER;
+
+		if (usb_endpoint_xfer_isoc(dep->endpoint.desc))
+			cmd |= DWC3_DEPCMD_PARAM(dep->frame_number);
+	} else {
+		cmd = DWC3_DEPCMD_UPDATETRANSFER |
+			DWC3_DEPCMD_PARAM(dep->resource_index);
+	}
+
+	ret = dwc3_send_gadget_ep_cmd(dep, cmd, &params);
+	if (ret < 0) {
+		/*
+		 * FIXME we need to iterate over the list of requests
+		 * here and stop, unmap, free and del each of the linked
+		 * requests instead of what we do now.
+		 */
+		if (req->trb)
+			memset(req->trb, 0, sizeof(struct dwc3_trb));
+		dep->queued_requests--;
+		dwc3_gadget_giveback(dep, req, ret);
+		return ret;
+	}
+
+	dep->flags |= DWC3_EP_BUSY;
+
+	if (starting) {
+		dep->resource_index = dwc3_gadget_ep_get_transfer_index(dep);
+		WARN_ON_ONCE(!dep->resource_index);
+	}
+
+	return 0;
+}

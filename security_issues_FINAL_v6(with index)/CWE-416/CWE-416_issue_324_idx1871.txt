@@ -1,0 +1,76 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+firewire: fix potential uaf in outbound_phy_packet_callback()
+
+&e->event and e point to the same address, and &e->event could
+be freed in queue_event. So there is a potential uaf issue if
+we dereference e after calling queue_event(). Fix this by adding
+a temporary variable to maintain e->client in advance, this can
+avoid the potential uaf issue.
+
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Chengfeng Ye <cyeaa@connect.ust.hk>
+Signed-off-by: Takashi Sakamoto <o-takashi@sakamocchi.jp>
+Link: https://lore.kernel.org/r/20220409041243.603210-2-o-takashi@sakamocchi.jp
+Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+
+
+The vulnerable function:
+static void outbound_phy_packet_callback(struct fw_packet *packet,
+					 struct fw_card *card, int status)
+{
+	struct outbound_phy_packet_event *e =
+		container_of(packet, struct outbound_phy_packet_event, p);
+
+	switch (status) {
+	/* expected: */
+	case ACK_COMPLETE:	e->phy_packet.rcode = RCODE_COMPLETE;	break;
+	/* should never happen with PHY packets: */
+	case ACK_PENDING:	e->phy_packet.rcode = RCODE_COMPLETE;	break;
+	case ACK_BUSY_X:
+	case ACK_BUSY_A:
+	case ACK_BUSY_B:	e->phy_packet.rcode = RCODE_BUSY;	break;
+	case ACK_DATA_ERROR:	e->phy_packet.rcode = RCODE_DATA_ERROR;	break;
+	case ACK_TYPE_ERROR:	e->phy_packet.rcode = RCODE_TYPE_ERROR;	break;
+	/* stale generation; cancelled; on certain controllers: no ack */
+	default:		e->phy_packet.rcode = status;		break;
+	}
+	e->phy_packet.data[0] = packet->timestamp;
+
+	queue_event(e->client, &e->event, &e->phy_packet,
+		    sizeof(e->phy_packet) + e->phy_packet.length, NULL, 0);
+	client_put(e->client);
+}
+
+
+
+The corrected function:
+static void outbound_phy_packet_callback(struct fw_packet *packet,
+					 struct fw_card *card, int status)
+{
+	struct outbound_phy_packet_event *e =
+		container_of(packet, struct outbound_phy_packet_event, p);
+	struct client *e_client;
+
+	switch (status) {
+	/* expected: */
+	case ACK_COMPLETE:	e->phy_packet.rcode = RCODE_COMPLETE;	break;
+	/* should never happen with PHY packets: */
+	case ACK_PENDING:	e->phy_packet.rcode = RCODE_COMPLETE;	break;
+	case ACK_BUSY_X:
+	case ACK_BUSY_A:
+	case ACK_BUSY_B:	e->phy_packet.rcode = RCODE_BUSY;	break;
+	case ACK_DATA_ERROR:	e->phy_packet.rcode = RCODE_DATA_ERROR;	break;
+	case ACK_TYPE_ERROR:	e->phy_packet.rcode = RCODE_TYPE_ERROR;	break;
+	/* stale generation; cancelled; on certain controllers: no ack */
+	default:		e->phy_packet.rcode = status;		break;
+	}
+	e->phy_packet.data[0] = packet->timestamp;
+
+	e_client = e->client;
+	queue_event(e->client, &e->event, &e->phy_packet,
+		    sizeof(e->phy_packet) + e->phy_packet.length, NULL, 0);
+	client_put(e_client);
+}

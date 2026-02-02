@@ -1,0 +1,61 @@
+The vulnerable issue:
+Sched: fix skip_clock_update optimization
+
+idle_balance() drops/retakes rq->lock, leaving the previous task
+vulnerable to set_tsk_need_resched().  Clear it after we return
+from balancing instead, and in setup_thread_stack() as well, so
+no successfully descheduled or never scheduled task has it set.
+
+Need resched confused the skip_clock_update logic, which assumes
+that the next call to update_rq_clock() will come nearly immediately
+after being set.  Make the optimization robust against the waking
+a sleeper before it sucessfully deschedules case by checking that
+the current task has not been dequeued before setting the flag,
+since it is that useless clock update we're trying to save, and
+clear unconditionally in schedule() proper instead of conditionally
+in put_prev_task().
+
+Signed-off-by: Mike Galbraith <efault@gmx.de>
+Reported-by: Bjoern B. Brandenburg <bbb.lst@gmail.com>
+Tested-by: Yong Zhang <yong.zhang0@gmail.com>
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: stable@kernel.org
+LKML-Reference: <1291802742.1417.9.camel@marge.simson.net>
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+
+
+The vulnerable function:
+inline void update_rq_clock(struct rq *rq)
+{
+	if (!rq->skip_clock_update) {
+		int cpu = cpu_of(rq);
+		u64 irq_time;
+
+		rq->clock = sched_clock_cpu(cpu);
+		irq_time = irq_time_cpu(cpu);
+		if (rq->clock - irq_time > rq->clock_task)
+			rq->clock_task = rq->clock - irq_time;
+
+		sched_irq_time_avg_update(rq, irq_time);
+	}
+}
+
+
+
+The corrected function:
+inline void update_rq_clock(struct rq *rq)
+{
+	int cpu = cpu_of(rq);
+	u64 irq_time;
+
+	if (rq->skip_clock_update)
+		return;
+
+	rq->clock = sched_clock_cpu(cpu);
+	irq_time = irq_time_cpu(cpu);
+	if (rq->clock - irq_time > rq->clock_task)
+		rq->clock_task = rq->clock - irq_time;
+
+	sched_irq_time_avg_update(rq, irq_time);
+}

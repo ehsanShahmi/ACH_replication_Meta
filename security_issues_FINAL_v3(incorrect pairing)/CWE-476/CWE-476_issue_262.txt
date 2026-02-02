@@ -1,0 +1,170 @@
+The vulnerable issue:
+drm/amd/display: Add NULL pointer check for kzalloc
+
+[Why & How]
+Check return pointer of kzalloc before using it.
+
+Reviewed-by: Alex Hung <alex.hung@amd.com>
+Acked-by: Wayne Lin <wayne.lin@amd.com>
+Signed-off-by: Hersen Wu <hersenxs.wu@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+
+
+
+The vulnerable function:
+void dcn32_clk_mgr_construct(
+		struct dc_context *ctx,
+		struct clk_mgr_internal *clk_mgr,
+		struct pp_smu_funcs *pp_smu,
+		struct dccg *dccg)
+{
+	struct clk_log_info log_info = {0};
+
+	clk_mgr->base.ctx = ctx;
+	clk_mgr->base.funcs = &dcn32_funcs;
+	if (ASICREV_IS_GC_11_0_2(clk_mgr->base.ctx->asic_id.hw_internal_rev)) {
+		clk_mgr->regs = &clk_mgr_regs_dcn321;
+		clk_mgr->clk_mgr_shift = &clk_mgr_shift_dcn321;
+		clk_mgr->clk_mgr_mask = &clk_mgr_mask_dcn321;
+	} else {
+		clk_mgr->regs = &clk_mgr_regs_dcn32;
+		clk_mgr->clk_mgr_shift = &clk_mgr_shift_dcn32;
+		clk_mgr->clk_mgr_mask = &clk_mgr_mask_dcn32;
+	}
+
+	clk_mgr->dccg = dccg;
+	clk_mgr->dfs_bypass_disp_clk = 0;
+
+	clk_mgr->dprefclk_ss_percentage = 0;
+	clk_mgr->dprefclk_ss_divider = 1000;
+	clk_mgr->ss_on_dprefclk = false;
+	clk_mgr->dfs_ref_freq_khz = 100000;
+
+	/* Changed from DCN3.2_clock_frequency doc to match
+	 * dcn32_dump_clk_registers from 4 * dentist_vco_freq_khz /
+	 * dprefclk DID divider
+	 */
+	clk_mgr->base.dprefclk_khz = 716666;
+	if (ctx->dc->debug.disable_dtb_ref_clk_switch) {
+		//initialize DTB ref clock value if DPM disabled
+		if (ctx->dce_version == DCN_VERSION_3_21)
+			clk_mgr->base.clks.ref_dtbclk_khz = 477800;
+		else
+			clk_mgr->base.clks.ref_dtbclk_khz = 268750;
+	}
+
+
+	/* integer part is now VCO frequency in kHz */
+	clk_mgr->base.dentist_vco_freq_khz = dcn32_get_vco_frequency_from_reg(clk_mgr);
+
+	/* in case we don't get a value from the register, use default */
+	if (clk_mgr->base.dentist_vco_freq_khz == 0)
+		clk_mgr->base.dentist_vco_freq_khz = 4300000; /* Updated as per HW docs */
+
+	dcn32_dump_clk_registers(&clk_mgr->base.boot_snapshot, &clk_mgr->base, &log_info);
+
+	if (ctx->dc->debug.disable_dtb_ref_clk_switch &&
+			clk_mgr->base.clks.ref_dtbclk_khz != clk_mgr->base.boot_snapshot.dtbclk) {
+		clk_mgr->base.clks.ref_dtbclk_khz = clk_mgr->base.boot_snapshot.dtbclk;
+	}
+
+	if (clk_mgr->base.boot_snapshot.dprefclk != 0) {
+		clk_mgr->base.dprefclk_khz = clk_mgr->base.boot_snapshot.dprefclk;
+	}
+	dcn32_clock_read_ss_info(clk_mgr);
+
+	clk_mgr->dfs_bypass_enabled = false;
+
+	clk_mgr->smu_present = false;
+
+	clk_mgr->base.bw_params = kzalloc(sizeof(*clk_mgr->base.bw_params), GFP_KERNEL);
+
+	/* need physical address of table to give to PMFW */
+	clk_mgr->wm_range_table = dm_helpers_allocate_gpu_mem(clk_mgr->base.ctx,
+			DC_MEM_ALLOC_TYPE_GART, sizeof(WatermarksExternal_t),
+			&clk_mgr->wm_range_table_addr);
+}
+
+
+
+The corrected function:
+void dcn32_clk_mgr_construct(
+		struct dc_context *ctx,
+		struct clk_mgr_internal *clk_mgr,
+		struct pp_smu_funcs *pp_smu,
+		struct dccg *dccg)
+{
+	struct clk_log_info log_info = {0};
+
+	clk_mgr->base.ctx = ctx;
+	clk_mgr->base.funcs = &dcn32_funcs;
+	if (ASICREV_IS_GC_11_0_2(clk_mgr->base.ctx->asic_id.hw_internal_rev)) {
+		clk_mgr->regs = &clk_mgr_regs_dcn321;
+		clk_mgr->clk_mgr_shift = &clk_mgr_shift_dcn321;
+		clk_mgr->clk_mgr_mask = &clk_mgr_mask_dcn321;
+	} else {
+		clk_mgr->regs = &clk_mgr_regs_dcn32;
+		clk_mgr->clk_mgr_shift = &clk_mgr_shift_dcn32;
+		clk_mgr->clk_mgr_mask = &clk_mgr_mask_dcn32;
+	}
+
+	clk_mgr->dccg = dccg;
+	clk_mgr->dfs_bypass_disp_clk = 0;
+
+	clk_mgr->dprefclk_ss_percentage = 0;
+	clk_mgr->dprefclk_ss_divider = 1000;
+	clk_mgr->ss_on_dprefclk = false;
+	clk_mgr->dfs_ref_freq_khz = 100000;
+
+	/* Changed from DCN3.2_clock_frequency doc to match
+	 * dcn32_dump_clk_registers from 4 * dentist_vco_freq_khz /
+	 * dprefclk DID divider
+	 */
+	clk_mgr->base.dprefclk_khz = 716666;
+	if (ctx->dc->debug.disable_dtb_ref_clk_switch) {
+		//initialize DTB ref clock value if DPM disabled
+		if (ctx->dce_version == DCN_VERSION_3_21)
+			clk_mgr->base.clks.ref_dtbclk_khz = 477800;
+		else
+			clk_mgr->base.clks.ref_dtbclk_khz = 268750;
+	}
+
+
+	/* integer part is now VCO frequency in kHz */
+	clk_mgr->base.dentist_vco_freq_khz = dcn32_get_vco_frequency_from_reg(clk_mgr);
+
+	/* in case we don't get a value from the register, use default */
+	if (clk_mgr->base.dentist_vco_freq_khz == 0)
+		clk_mgr->base.dentist_vco_freq_khz = 4300000; /* Updated as per HW docs */
+
+	dcn32_dump_clk_registers(&clk_mgr->base.boot_snapshot, &clk_mgr->base, &log_info);
+
+	if (ctx->dc->debug.disable_dtb_ref_clk_switch &&
+			clk_mgr->base.clks.ref_dtbclk_khz != clk_mgr->base.boot_snapshot.dtbclk) {
+		clk_mgr->base.clks.ref_dtbclk_khz = clk_mgr->base.boot_snapshot.dtbclk;
+	}
+
+	if (clk_mgr->base.boot_snapshot.dprefclk != 0) {
+		clk_mgr->base.dprefclk_khz = clk_mgr->base.boot_snapshot.dprefclk;
+	}
+	dcn32_clock_read_ss_info(clk_mgr);
+
+	clk_mgr->dfs_bypass_enabled = false;
+
+	clk_mgr->smu_present = false;
+
+	clk_mgr->base.bw_params = kzalloc(sizeof(*clk_mgr->base.bw_params), GFP_KERNEL);
+	if (!clk_mgr->base.bw_params) {
+		BREAK_TO_DEBUGGER();
+		return;
+	}
+
+	/* need physical address of table to give to PMFW */
+	clk_mgr->wm_range_table = dm_helpers_allocate_gpu_mem(clk_mgr->base.ctx,
+			DC_MEM_ALLOC_TYPE_GART, sizeof(WatermarksExternal_t),
+			&clk_mgr->wm_range_table_addr);
+	if (!clk_mgr->wm_range_table) {
+		BREAK_TO_DEBUGGER();
+		return;
+	}
+}

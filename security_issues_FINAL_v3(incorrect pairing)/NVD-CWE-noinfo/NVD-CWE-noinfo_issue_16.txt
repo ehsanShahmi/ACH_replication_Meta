@@ -1,0 +1,34 @@
+The vulnerable issue:
+NFSv4: Convert the open and close ops to use fmode
+
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+
+
+The vulnerable function:
+static struct nfs4_opendata *nfs4_open_recoverdata_alloc(struct nfs_open_context *ctx, struct nfs4_state *state)
+{
+	struct nfs4_opendata *opendata;
+
+	opendata = nfs4_opendata_alloc(&ctx->path, state->owner, 0, NULL);
+	if (opendata == NULL)
+		return ERR_PTR(-ENOMEM);
+	opendata->state = state;
+	atomic_inc(&state->count);
+	return opendata;
+}
+
+
+
+The corrected function:
+static struct nfs4_opendata *nfs4_open_recoverdata_alloc(struct nfs_open_context *ctx, struct nfs4_state *state)
+{
+	struct nfs4_opendata *opendata;
+
+	opendata = nfs4_opendata_alloc(&ctx->path, state->owner, 0, 0, NULL);
+	if (opendata == NULL)
+		return ERR_PTR(-ENOMEM);
+	opendata->state = state;
+	atomic_inc(&state->count);
+	return opendata;
+}

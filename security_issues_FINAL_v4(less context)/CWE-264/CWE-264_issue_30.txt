@@ -1,0 +1,48 @@
+The vulnerable issue:
+fs,userns: Change inode_capable to capable_wrt_inode_uidgid
+
+The kernel has no concept of capabilities with respect to inodes; inodes
+exist independently of namespaces.  For example, inode_capable(inode,
+CAP_LINUX_IMMUTABLE) would be nonsense.
+
+This patch changes inode_capable to check for uid and gid mappings and
+renames it to capable_wrt_inode_uidgid, which should make it more
+obvious what it does.
+
+Fixes CVE-2014-4014.
+
+Cc: Theodore Ts'o <tytso@mit.edu>
+Cc: Serge Hallyn <serge.hallyn@ubuntu.com>
+Cc: "Eric W. Biederman" <ebiederm@xmission.com>
+Cc: Dave Chinner <david@fromorbit.com>
+Cc: stable@vger.kernel.org
+Signed-off-by: Andy Lutomirski <luto@amacapital.net>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+bool inode_owner_or_capable(const struct inode *inode)
+{
+	if (uid_eq(current_fsuid(), inode->i_uid))
+		return true;
+	if (inode_capable(inode, CAP_FOWNER))
+		return true;
+	return false;
+}
+
+
+
+The corrected function:
+bool inode_owner_or_capable(const struct inode *inode)
+{
+	struct user_namespace *ns;
+
+	if (uid_eq(current_fsuid(), inode->i_uid))
+		return true;
+
+	ns = current_user_ns();
+	if (ns_capable(ns, CAP_FOWNER) && kuid_has_mapping(ns, inode->i_uid))
+		return true;
+	return false;
+}

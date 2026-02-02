@@ -1,0 +1,91 @@
+This issue file has CWE-404. Your task is to create this CWE-404 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+HID: cp2112: fix sleep-while-atomic
+
+A recent commit fixing DMA-buffers on stack added a shared transfer
+buffer protected by a spinlock. This is broken as the USB HID request
+callbacks can sleep. Fix this up by replacing the spinlock with a mutex.
+
+Fixes: 1ffb3c40ffb5 ("HID: cp2112: make transfer buffers DMA capable")
+Cc: stable <stable@vger.kernel.org>	# 4.9
+Signed-off-by: Johan Hovold <johan@kernel.org>
+Reviewed-by: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+
+
+The vulnerable function:
+static int cp2112_gpio_direction_input(struct gpio_chip *chip, unsigned offset)
+{
+	struct cp2112_device *dev = gpiochip_get_data(chip);
+	struct hid_device *hdev = dev->hdev;
+	u8 *buf = dev->in_out_buffer;
+	unsigned long flags;
+	int ret;
+
+	spin_lock_irqsave(&dev->lock, flags);
+
+	ret = hid_hw_raw_request(hdev, CP2112_GPIO_CONFIG, buf,
+				 CP2112_GPIO_CONFIG_LENGTH, HID_FEATURE_REPORT,
+				 HID_REQ_GET_REPORT);
+	if (ret != CP2112_GPIO_CONFIG_LENGTH) {
+		hid_err(hdev, "error requesting GPIO config: %d\n", ret);
+		goto exit;
+	}
+
+	buf[1] &= ~(1 << offset);
+	buf[2] = gpio_push_pull;
+
+	ret = hid_hw_raw_request(hdev, CP2112_GPIO_CONFIG, buf,
+				 CP2112_GPIO_CONFIG_LENGTH, HID_FEATURE_REPORT,
+				 HID_REQ_SET_REPORT);
+	if (ret < 0) {
+		hid_err(hdev, "error setting GPIO config: %d\n", ret);
+		goto exit;
+	}
+
+	ret = 0;
+
+exit:
+	spin_unlock_irqrestore(&dev->lock, flags);
+	return ret <= 0 ? ret : -EIO;
+}
+
+
+
+The corrected function:
+static int cp2112_gpio_direction_input(struct gpio_chip *chip, unsigned offset)
+{
+	struct cp2112_device *dev = gpiochip_get_data(chip);
+	struct hid_device *hdev = dev->hdev;
+	u8 *buf = dev->in_out_buffer;
+	int ret;
+
+	mutex_lock(&dev->lock);
+
+	ret = hid_hw_raw_request(hdev, CP2112_GPIO_CONFIG, buf,
+				 CP2112_GPIO_CONFIG_LENGTH, HID_FEATURE_REPORT,
+				 HID_REQ_GET_REPORT);
+	if (ret != CP2112_GPIO_CONFIG_LENGTH) {
+		hid_err(hdev, "error requesting GPIO config: %d\n", ret);
+		goto exit;
+	}
+
+	buf[1] &= ~(1 << offset);
+	buf[2] = gpio_push_pull;
+
+	ret = hid_hw_raw_request(hdev, CP2112_GPIO_CONFIG, buf,
+				 CP2112_GPIO_CONFIG_LENGTH, HID_FEATURE_REPORT,
+				 HID_REQ_SET_REPORT);
+	if (ret < 0) {
+		hid_err(hdev, "error setting GPIO config: %d\n", ret);
+		goto exit;
+	}
+
+	ret = 0;
+
+exit:
+	mutex_unlock(&dev->lock);
+	return ret <= 0 ? ret : -EIO;
+}

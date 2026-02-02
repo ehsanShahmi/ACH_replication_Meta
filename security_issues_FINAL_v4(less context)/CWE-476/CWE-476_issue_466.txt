@@ -1,0 +1,269 @@
+The vulnerable issue:
+xfs: validate cached inodes are free when allocated
+
+A recent fuzzed filesystem image cached random dcache corruption
+when the reproducer was run. This often showed up as panics in
+lookup_slow() on a null inode->i_ops pointer when doing pathwalks.
+
+BUG: unable to handle kernel NULL pointer dereference at 0000000000000000
+....
+Call Trace:
+ lookup_slow+0x44/0x60
+ walk_component+0x3dd/0x9f0
+ link_path_walk+0x4a7/0x830
+ path_lookupat+0xc1/0x470
+ filename_lookup+0x129/0x270
+ user_path_at_empty+0x36/0x40
+ path_listxattr+0x98/0x110
+ SyS_listxattr+0x13/0x20
+ do_syscall_64+0xf5/0x280
+ entry_SYSCALL_64_after_hwframe+0x42/0xb7
+
+but had many different failure modes including deadlocks trying to
+lock the inode that was just allocated or KASAN reports of
+use-after-free violations.
+
+The cause of the problem was a corrupt INOBT on a v4 fs where the
+root inode was marked as free in the inobt record. Hence when we
+allocated an inode, it chose the root inode to allocate, found it in
+the cache and re-initialised it.
+
+We recently fixed a similar inode allocation issue caused by inobt
+record corruption problem in xfs_iget_cache_miss() in commit
+ee457001ed6c ("xfs: catch inode allocation state mismatch
+corruption"). This change adds similar checks to the cache-hit path
+to catch it, and turns the reproducer into a corruption shutdown
+situation.
+
+Reported-by: Wen Xu <wen.xu@gatech.edu>
+Signed-Off-By: Dave Chinner <dchinner@redhat.com>
+Reviewed-by: Christoph Hellwig <hch@lst.de>
+Reviewed-by: Carlos Maiolino <cmaiolino@redhat.com>
+Reviewed-by: Darrick J. Wong <darrick.wong@oracle.com>
+[darrick: fix typos in comment]
+Signed-off-by: Darrick J. Wong <darrick.wong@oracle.com>
+
+
+
+The vulnerable function:
+xfs_iget_cache_miss(
+	struct xfs_mount	*mp,
+	struct xfs_perag	*pag,
+	xfs_trans_t		*tp,
+	xfs_ino_t		ino,
+	struct xfs_inode	**ipp,
+	int			flags,
+	int			lock_flags)
+{
+	struct xfs_inode	*ip;
+	int			error;
+	xfs_agino_t		agino = XFS_INO_TO_AGINO(mp, ino);
+	int			iflags;
+
+	ip = xfs_inode_alloc(mp, ino);
+	if (!ip)
+		return -ENOMEM;
+
+	error = xfs_iread(mp, tp, ip, flags);
+	if (error)
+		goto out_destroy;
+
+	if (!xfs_inode_verify_forks(ip)) {
+		error = -EFSCORRUPTED;
+		goto out_destroy;
+	}
+
+	trace_xfs_iget_miss(ip);
+
+
+	/*
+	 * If we are allocating a new inode, then check what was returned is
+	 * actually a free, empty inode. If we are not allocating an inode,
+	 * the check we didn't find a free inode.
+	 */
+	if (flags & XFS_IGET_CREATE) {
+		if (VFS_I(ip)->i_mode != 0) {
+			xfs_warn(mp,
+"Corruption detected! Free inode 0x%llx not marked free on disk",
+				ino);
+			error = -EFSCORRUPTED;
+			goto out_destroy;
+		}
+		if (ip->i_d.di_nblocks != 0) {
+			xfs_warn(mp,
+"Corruption detected! Free inode 0x%llx has blocks allocated!",
+				ino);
+			error = -EFSCORRUPTED;
+			goto out_destroy;
+		}
+	} else if (VFS_I(ip)->i_mode == 0) {
+		error = -ENOENT;
+		goto out_destroy;
+	}
+
+	/*
+	 * Preload the radix tree so we can insert safely under the
+	 * write spinlock. Note that we cannot sleep inside the preload
+	 * region. Since we can be called from transaction context, don't
+	 * recurse into the file system.
+	 */
+	if (radix_tree_preload(GFP_NOFS)) {
+		error = -EAGAIN;
+		goto out_destroy;
+	}
+
+	/*
+	 * Because the inode hasn't been added to the radix-tree yet it can't
+	 * be found by another thread, so we can do the non-sleeping lock here.
+	 */
+	if (lock_flags) {
+		if (!xfs_ilock_nowait(ip, lock_flags))
+			BUG();
+	}
+
+	/*
+	 * These values must be set before inserting the inode into the radix
+	 * tree as the moment it is inserted a concurrent lookup (allowed by the
+	 * RCU locking mechanism) can find it and that lookup must see that this
+	 * is an inode currently under construction (i.e. that XFS_INEW is set).
+	 * The ip->i_flags_lock that protects the XFS_INEW flag forms the
+	 * memory barrier that ensures this detection works correctly at lookup
+	 * time.
+	 */
+	iflags = XFS_INEW;
+	if (flags & XFS_IGET_DONTCACHE)
+		iflags |= XFS_IDONTCACHE;
+	ip->i_udquot = NULL;
+	ip->i_gdquot = NULL;
+	ip->i_pdquot = NULL;
+	xfs_iflags_set(ip, iflags);
+
+	/* insert the new inode */
+	spin_lock(&pag->pag_ici_lock);
+	error = radix_tree_insert(&pag->pag_ici_root, agino, ip);
+	if (unlikely(error)) {
+		WARN_ON(error != -EEXIST);
+		XFS_STATS_INC(mp, xs_ig_dup);
+		error = -EAGAIN;
+		goto out_preload_end;
+	}
+	spin_unlock(&pag->pag_ici_lock);
+	radix_tree_preload_end();
+
+	*ipp = ip;
+	return 0;
+
+out_preload_end:
+	spin_unlock(&pag->pag_ici_lock);
+	radix_tree_preload_end();
+	if (lock_flags)
+		xfs_iunlock(ip, lock_flags);
+out_destroy:
+	__destroy_inode(VFS_I(ip));
+	xfs_inode_free(ip);
+	return error;
+}
+
+
+
+The corrected function:
+xfs_iget_cache_miss(
+	struct xfs_mount	*mp,
+	struct xfs_perag	*pag,
+	xfs_trans_t		*tp,
+	xfs_ino_t		ino,
+	struct xfs_inode	**ipp,
+	int			flags,
+	int			lock_flags)
+{
+	struct xfs_inode	*ip;
+	int			error;
+	xfs_agino_t		agino = XFS_INO_TO_AGINO(mp, ino);
+	int			iflags;
+
+	ip = xfs_inode_alloc(mp, ino);
+	if (!ip)
+		return -ENOMEM;
+
+	error = xfs_iread(mp, tp, ip, flags);
+	if (error)
+		goto out_destroy;
+
+	if (!xfs_inode_verify_forks(ip)) {
+		error = -EFSCORRUPTED;
+		goto out_destroy;
+	}
+
+	trace_xfs_iget_miss(ip);
+
+
+	/*
+	 * Check the inode free state is valid. This also detects lookup
+	 * racing with unlinks.
+	 */
+	error = xfs_iget_check_free_state(ip, flags);
+	if (error)
+		goto out_destroy;
+
+	/*
+	 * Preload the radix tree so we can insert safely under the
+	 * write spinlock. Note that we cannot sleep inside the preload
+	 * region. Since we can be called from transaction context, don't
+	 * recurse into the file system.
+	 */
+	if (radix_tree_preload(GFP_NOFS)) {
+		error = -EAGAIN;
+		goto out_destroy;
+	}
+
+	/*
+	 * Because the inode hasn't been added to the radix-tree yet it can't
+	 * be found by another thread, so we can do the non-sleeping lock here.
+	 */
+	if (lock_flags) {
+		if (!xfs_ilock_nowait(ip, lock_flags))
+			BUG();
+	}
+
+	/*
+	 * These values must be set before inserting the inode into the radix
+	 * tree as the moment it is inserted a concurrent lookup (allowed by the
+	 * RCU locking mechanism) can find it and that lookup must see that this
+	 * is an inode currently under construction (i.e. that XFS_INEW is set).
+	 * The ip->i_flags_lock that protects the XFS_INEW flag forms the
+	 * memory barrier that ensures this detection works correctly at lookup
+	 * time.
+	 */
+	iflags = XFS_INEW;
+	if (flags & XFS_IGET_DONTCACHE)
+		iflags |= XFS_IDONTCACHE;
+	ip->i_udquot = NULL;
+	ip->i_gdquot = NULL;
+	ip->i_pdquot = NULL;
+	xfs_iflags_set(ip, iflags);
+
+	/* insert the new inode */
+	spin_lock(&pag->pag_ici_lock);
+	error = radix_tree_insert(&pag->pag_ici_root, agino, ip);
+	if (unlikely(error)) {
+		WARN_ON(error != -EEXIST);
+		XFS_STATS_INC(mp, xs_ig_dup);
+		error = -EAGAIN;
+		goto out_preload_end;
+	}
+	spin_unlock(&pag->pag_ici_lock);
+	radix_tree_preload_end();
+
+	*ipp = ip;
+	return 0;
+
+out_preload_end:
+	spin_unlock(&pag->pag_ici_lock);
+	radix_tree_preload_end();
+	if (lock_flags)
+		xfs_iunlock(ip, lock_flags);
+out_destroy:
+	__destroy_inode(VFS_I(ip));
+	xfs_inode_free(ip);
+	return error;
+}

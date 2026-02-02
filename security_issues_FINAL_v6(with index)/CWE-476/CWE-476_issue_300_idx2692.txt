@@ -1,0 +1,117 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+tee: amdtee: fix an IS_ERR() vs NULL bug
+
+The __get_free_pages() function does not return error pointers it returns
+NULL so fix this condition to avoid a NULL dereference.
+
+Fixes: 757cc3e9ff1d ("tee: add AMD-TEE driver")
+Signed-off-by: Dan Carpenter <dan.carpenter@oracle.com>
+Acked-by: Rijo Thomas <Rijo-john.Thomas@amd.com>
+Signed-off-by: Jens Wiklander <jens.wiklander@linaro.org>
+
+
+
+The vulnerable function:
+static int copy_ta_binary(struct tee_context *ctx, void *ptr, void **ta,
+			  size_t *ta_size)
+{
+	const struct firmware *fw;
+	char fw_name[TA_PATH_MAX];
+	struct {
+		u32 lo;
+		u16 mid;
+		u16 hi_ver;
+		u8 seq_n[8];
+	} *uuid = ptr;
+	int n, rc = 0;
+
+	n = snprintf(fw_name, TA_PATH_MAX,
+		     "%s/%08x-%04x-%04x-%02x%02x%02x%02x%02x%02x%02x%02x.bin",
+		     TA_LOAD_PATH, uuid->lo, uuid->mid, uuid->hi_ver,
+		     uuid->seq_n[0], uuid->seq_n[1],
+		     uuid->seq_n[2], uuid->seq_n[3],
+		     uuid->seq_n[4], uuid->seq_n[5],
+		     uuid->seq_n[6], uuid->seq_n[7]);
+	if (n < 0 || n >= TA_PATH_MAX) {
+		pr_err("failed to get firmware name\n");
+		return -EINVAL;
+	}
+
+	mutex_lock(&drv_mutex);
+	n = request_firmware(&fw, fw_name, &ctx->teedev->dev);
+	if (n) {
+		pr_err("failed to load firmware %s\n", fw_name);
+		rc = -ENOMEM;
+		goto unlock;
+	}
+
+	*ta_size = roundup(fw->size, PAGE_SIZE);
+	*ta = (void *)__get_free_pages(GFP_KERNEL, get_order(*ta_size));
+	if (IS_ERR(*ta)) {
+		pr_err("%s: get_free_pages failed 0x%llx\n", __func__,
+		       (u64)*ta);
+		rc = -ENOMEM;
+		goto rel_fw;
+	}
+
+	memcpy(*ta, fw->data, fw->size);
+rel_fw:
+	release_firmware(fw);
+unlock:
+	mutex_unlock(&drv_mutex);
+	return rc;
+}
+
+
+
+The corrected function:
+static int copy_ta_binary(struct tee_context *ctx, void *ptr, void **ta,
+			  size_t *ta_size)
+{
+	const struct firmware *fw;
+	char fw_name[TA_PATH_MAX];
+	struct {
+		u32 lo;
+		u16 mid;
+		u16 hi_ver;
+		u8 seq_n[8];
+	} *uuid = ptr;
+	int n, rc = 0;
+
+	n = snprintf(fw_name, TA_PATH_MAX,
+		     "%s/%08x-%04x-%04x-%02x%02x%02x%02x%02x%02x%02x%02x.bin",
+		     TA_LOAD_PATH, uuid->lo, uuid->mid, uuid->hi_ver,
+		     uuid->seq_n[0], uuid->seq_n[1],
+		     uuid->seq_n[2], uuid->seq_n[3],
+		     uuid->seq_n[4], uuid->seq_n[5],
+		     uuid->seq_n[6], uuid->seq_n[7]);
+	if (n < 0 || n >= TA_PATH_MAX) {
+		pr_err("failed to get firmware name\n");
+		return -EINVAL;
+	}
+
+	mutex_lock(&drv_mutex);
+	n = request_firmware(&fw, fw_name, &ctx->teedev->dev);
+	if (n) {
+		pr_err("failed to load firmware %s\n", fw_name);
+		rc = -ENOMEM;
+		goto unlock;
+	}
+
+	*ta_size = roundup(fw->size, PAGE_SIZE);
+	*ta = (void *)__get_free_pages(GFP_KERNEL, get_order(*ta_size));
+	if (!*ta) {
+		pr_err("%s: get_free_pages failed\n", __func__);
+		rc = -ENOMEM;
+		goto rel_fw;
+	}
+
+	memcpy(*ta, fw->data, fw->size);
+rel_fw:
+	release_firmware(fw);
+unlock:
+	mutex_unlock(&drv_mutex);
+	return rc;
+}

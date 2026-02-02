@@ -1,0 +1,200 @@
+This issue file has CWE-125. Your task is to create this CWE-125 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+drm/amdgpu: fix mc_data out-of-bounds read warning
+
+Clear warning that read mc_data[i-1] may out-of-bounds.
+
+Signed-off-by: Tim Huang <Tim.Huang@amd.com>
+Reviewed-by: Alex Deucher <alexander.deucher@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+
+
+
+The vulnerable function:
+int amdgpu_atombios_init_mc_reg_table(struct amdgpu_device *adev,
+				      u8 module_index,
+				      struct atom_mc_reg_table *reg_table)
+{
+	int index = GetIndexIntoMasterTable(DATA, VRAM_Info);
+	u8 frev, crev, num_entries, t_mem_id, num_ranges = 0;
+	u32 i = 0, j;
+	u16 data_offset, size;
+	union vram_info *vram_info;
+
+	memset(reg_table, 0, sizeof(struct atom_mc_reg_table));
+
+	if (amdgpu_atom_parse_data_header(adev->mode_info.atom_context, index, &size,
+				   &frev, &crev, &data_offset)) {
+		vram_info = (union vram_info *)
+			(adev->mode_info.atom_context->bios + data_offset);
+		switch (frev) {
+		case 1:
+			DRM_ERROR("old table version %d, %d\n", frev, crev);
+			return -EINVAL;
+		case 2:
+			switch (crev) {
+			case 1:
+				if (module_index < vram_info->v2_1.ucNumOfVRAMModule) {
+					ATOM_INIT_REG_BLOCK *reg_block =
+						(ATOM_INIT_REG_BLOCK *)
+						((u8 *)vram_info + le16_to_cpu(vram_info->v2_1.usMemClkPatchTblOffset));
+					ATOM_MEMORY_SETTING_DATA_BLOCK *reg_data =
+						(ATOM_MEMORY_SETTING_DATA_BLOCK *)
+						((u8 *)reg_block + (2 * sizeof(u16)) +
+						 le16_to_cpu(reg_block->usRegIndexTblSize));
+					ATOM_INIT_REG_INDEX_FORMAT *format = &reg_block->asRegIndexBuf[0];
+					num_entries = (u8)((le16_to_cpu(reg_block->usRegIndexTblSize)) /
+							   sizeof(ATOM_INIT_REG_INDEX_FORMAT)) - 1;
+					if (num_entries > VBIOS_MC_REGISTER_ARRAY_SIZE)
+						return -EINVAL;
+					while (i < num_entries) {
+						if (format->ucPreRegDataLength & ACCESS_PLACEHOLDER)
+							break;
+						reg_table->mc_reg_address[i].s1 =
+							(u16)(le16_to_cpu(format->usRegIndex));
+						reg_table->mc_reg_address[i].pre_reg_data =
+							(u8)(format->ucPreRegDataLength);
+						i++;
+						format = (ATOM_INIT_REG_INDEX_FORMAT *)
+							((u8 *)format + sizeof(ATOM_INIT_REG_INDEX_FORMAT));
+					}
+					reg_table->last = i;
+					while ((le32_to_cpu(*(u32 *)reg_data) != END_OF_REG_DATA_BLOCK) &&
+					       (num_ranges < VBIOS_MAX_AC_TIMING_ENTRIES)) {
+						t_mem_id = (u8)((le32_to_cpu(*(u32 *)reg_data) & MEM_ID_MASK)
+								>> MEM_ID_SHIFT);
+						if (module_index == t_mem_id) {
+							reg_table->mc_reg_table_entry[num_ranges].mclk_max =
+								(u32)((le32_to_cpu(*(u32 *)reg_data) & CLOCK_RANGE_MASK)
+								      >> CLOCK_RANGE_SHIFT);
+							for (i = 0, j = 1; i < reg_table->last; i++) {
+								if ((reg_table->mc_reg_address[i].pre_reg_data & LOW_NIBBLE_MASK) == DATA_FROM_TABLE) {
+									reg_table->mc_reg_table_entry[num_ranges].mc_data[i] =
+										(u32)le32_to_cpu(*((u32 *)reg_data + j));
+									j++;
+								} else if ((reg_table->mc_reg_address[i].pre_reg_data & LOW_NIBBLE_MASK) == DATA_EQU_PREV) {
+									reg_table->mc_reg_table_entry[num_ranges].mc_data[i] =
+										reg_table->mc_reg_table_entry[num_ranges].mc_data[i - 1];
+								}
+							}
+							num_ranges++;
+						}
+						reg_data = (ATOM_MEMORY_SETTING_DATA_BLOCK *)
+							((u8 *)reg_data + le16_to_cpu(reg_block->usRegDataBlkSize));
+					}
+					if (le32_to_cpu(*(u32 *)reg_data) != END_OF_REG_DATA_BLOCK)
+						return -EINVAL;
+					reg_table->num_entries = num_ranges;
+				} else
+					return -EINVAL;
+				break;
+			default:
+				DRM_ERROR("Unknown table version %d, %d\n", frev, crev);
+				return -EINVAL;
+			}
+			break;
+		default:
+			DRM_ERROR("Unknown table version %d, %d\n", frev, crev);
+			return -EINVAL;
+		}
+		return 0;
+	}
+	return -EINVAL;
+}
+
+
+
+The corrected function:
+int amdgpu_atombios_init_mc_reg_table(struct amdgpu_device *adev,
+				      u8 module_index,
+				      struct atom_mc_reg_table *reg_table)
+{
+	int index = GetIndexIntoMasterTable(DATA, VRAM_Info);
+	u8 frev, crev, num_entries, t_mem_id, num_ranges = 0;
+	u32 i = 0, j;
+	u16 data_offset, size;
+	union vram_info *vram_info;
+
+	memset(reg_table, 0, sizeof(struct atom_mc_reg_table));
+
+	if (amdgpu_atom_parse_data_header(adev->mode_info.atom_context, index, &size,
+				   &frev, &crev, &data_offset)) {
+		vram_info = (union vram_info *)
+			(adev->mode_info.atom_context->bios + data_offset);
+		switch (frev) {
+		case 1:
+			DRM_ERROR("old table version %d, %d\n", frev, crev);
+			return -EINVAL;
+		case 2:
+			switch (crev) {
+			case 1:
+				if (module_index < vram_info->v2_1.ucNumOfVRAMModule) {
+					ATOM_INIT_REG_BLOCK *reg_block =
+						(ATOM_INIT_REG_BLOCK *)
+						((u8 *)vram_info + le16_to_cpu(vram_info->v2_1.usMemClkPatchTblOffset));
+					ATOM_MEMORY_SETTING_DATA_BLOCK *reg_data =
+						(ATOM_MEMORY_SETTING_DATA_BLOCK *)
+						((u8 *)reg_block + (2 * sizeof(u16)) +
+						 le16_to_cpu(reg_block->usRegIndexTblSize));
+					ATOM_INIT_REG_INDEX_FORMAT *format = &reg_block->asRegIndexBuf[0];
+					num_entries = (u8)((le16_to_cpu(reg_block->usRegIndexTblSize)) /
+							   sizeof(ATOM_INIT_REG_INDEX_FORMAT)) - 1;
+					if (num_entries > VBIOS_MC_REGISTER_ARRAY_SIZE)
+						return -EINVAL;
+					while (i < num_entries) {
+						if (format->ucPreRegDataLength & ACCESS_PLACEHOLDER)
+							break;
+						reg_table->mc_reg_address[i].s1 =
+							(u16)(le16_to_cpu(format->usRegIndex));
+						reg_table->mc_reg_address[i].pre_reg_data =
+							(u8)(format->ucPreRegDataLength);
+						i++;
+						format = (ATOM_INIT_REG_INDEX_FORMAT *)
+							((u8 *)format + sizeof(ATOM_INIT_REG_INDEX_FORMAT));
+					}
+					reg_table->last = i;
+					while ((le32_to_cpu(*(u32 *)reg_data) != END_OF_REG_DATA_BLOCK) &&
+					       (num_ranges < VBIOS_MAX_AC_TIMING_ENTRIES)) {
+						t_mem_id = (u8)((le32_to_cpu(*(u32 *)reg_data) & MEM_ID_MASK)
+								>> MEM_ID_SHIFT);
+						if (module_index == t_mem_id) {
+							reg_table->mc_reg_table_entry[num_ranges].mclk_max =
+								(u32)((le32_to_cpu(*(u32 *)reg_data) & CLOCK_RANGE_MASK)
+								      >> CLOCK_RANGE_SHIFT);
+							for (i = 0, j = 1; i < reg_table->last; i++) {
+								if ((reg_table->mc_reg_address[i].pre_reg_data & LOW_NIBBLE_MASK) == DATA_FROM_TABLE) {
+									reg_table->mc_reg_table_entry[num_ranges].mc_data[i] =
+										(u32)le32_to_cpu(*((u32 *)reg_data + j));
+									j++;
+								} else if ((reg_table->mc_reg_address[i].pre_reg_data & LOW_NIBBLE_MASK) == DATA_EQU_PREV) {
+									if (i == 0)
+										continue;
+									reg_table->mc_reg_table_entry[num_ranges].mc_data[i] =
+										reg_table->mc_reg_table_entry[num_ranges].mc_data[i - 1];
+								}
+							}
+							num_ranges++;
+						}
+						reg_data = (ATOM_MEMORY_SETTING_DATA_BLOCK *)
+							((u8 *)reg_data + le16_to_cpu(reg_block->usRegDataBlkSize));
+					}
+					if (le32_to_cpu(*(u32 *)reg_data) != END_OF_REG_DATA_BLOCK)
+						return -EINVAL;
+					reg_table->num_entries = num_ranges;
+				} else
+					return -EINVAL;
+				break;
+			default:
+				DRM_ERROR("Unknown table version %d, %d\n", frev, crev);
+				return -EINVAL;
+			}
+			break;
+		default:
+			DRM_ERROR("Unknown table version %d, %d\n", frev, crev);
+			return -EINVAL;
+		}
+		return 0;
+	}
+	return -EINVAL;
+}

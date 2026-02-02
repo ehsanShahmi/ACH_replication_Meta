@@ -1,0 +1,22 @@
+The vulnerable issue:
+procfs: fix a vfsmount longterm reference leak
+
+kern_mount() doesn't pair with plain mntput()...
+
+Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+
+
+The vulnerable function:
+void pid_ns_release_proc(struct pid_namespace *ns)
+{
+	mntput(ns->proc_mnt);
+}
+
+
+
+The corrected function:
+void pid_ns_release_proc(struct pid_namespace *ns)
+{
+	kern_unmount(ns->proc_mnt);
+}

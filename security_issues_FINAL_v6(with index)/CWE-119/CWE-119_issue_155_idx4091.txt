@@ -1,0 +1,102 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+NLS: improve UTF8 -> UTF16 string conversion routine
+
+The utf8s_to_utf16s conversion routine needs to be improved.  Unlike
+its utf16s_to_utf8s sibling, it doesn't accept arguments specifying
+the maximum length of the output buffer or the endianness of its
+16-bit output.
+
+This patch (as1501) adds the two missing arguments, and adjusts the
+only two places in the kernel where the function is called.  A
+follow-on patch will add a third caller that does utilize the new
+capabilities.
+
+The two conversion routines are still annoyingly inconsistent in the
+way they handle invalid byte combinations.  But that's a subject for a
+different patch.
+
+Signed-off-by: Alan Stern <stern@rowland.harvard.edu>
+CC: Clemens Ladisch <clemens@ladisch.de>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+
+
+The vulnerable function:
+int utf8s_to_utf16s(const u8 *s, int len, wchar_t *pwcs)
+{
+	u16 *op;
+	int size;
+	unicode_t u;
+
+	op = pwcs;
+	while (*s && len > 0) {
+		if (*s & 0x80) {
+			size = utf8_to_utf32(s, len, &u);
+			if (size < 0)
+				return -EINVAL;
+
+			if (u >= PLANE_SIZE) {
+				u -= PLANE_SIZE;
+				*op++ = (wchar_t) (SURROGATE_PAIR |
+						((u >> 10) & SURROGATE_BITS));
+				*op++ = (wchar_t) (SURROGATE_PAIR |
+						SURROGATE_LOW |
+						(u & SURROGATE_BITS));
+			} else {
+				*op++ = (wchar_t) u;
+			}
+			s += size;
+			len -= size;
+		} else {
+			*op++ = *s++;
+			len--;
+		}
+	}
+	return op - pwcs;
+}
+
+
+
+The corrected function:
+int utf8s_to_utf16s(const u8 *s, int len, enum utf16_endian endian,
+		wchar_t *pwcs, int maxlen)
+{
+	u16 *op;
+	int size;
+	unicode_t u;
+
+	op = pwcs;
+	while (len > 0 && maxlen > 0 && *s) {
+		if (*s & 0x80) {
+			size = utf8_to_utf32(s, len, &u);
+			if (size < 0)
+				return -EINVAL;
+			s += size;
+			len -= size;
+
+			if (u >= PLANE_SIZE) {
+				if (maxlen < 2)
+					break;
+				u -= PLANE_SIZE;
+				put_utf16(op++, SURROGATE_PAIR |
+						((u >> 10) & SURROGATE_BITS),
+						endian);
+				put_utf16(op++, SURROGATE_PAIR |
+						SURROGATE_LOW |
+						(u & SURROGATE_BITS),
+						endian);
+				maxlen -= 2;
+			} else {
+				put_utf16(op++, u, endian);
+				maxlen--;
+			}
+		} else {
+			put_utf16(op++, *s++, endian);
+			len--;
+			maxlen--;
+		}
+	}
+	return op - pwcs;
+}

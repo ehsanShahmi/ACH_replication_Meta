@@ -1,0 +1,206 @@
+This issue file has CWE-400. Your task is to create this CWE-400 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+perf: Remove the nmi parameter from the swevent and overflow interface
+
+The nmi parameter indicated if we could do wakeups from the current
+context, if not, we would set some state and self-IPI and let the
+resulting interrupt do the wakeup.
+
+For the various event classes:
+
+  - hardware: nmi=0; PMI is in fact an NMI or we run irq_work_run from
+    the PMI-tail (ARM etc.)
+  - tracepoint: nmi=0; since tracepoint could be from NMI context.
+  - software: nmi=[0,1]; some, like the schedule thing cannot
+    perform wakeups, and hence need 0.
+
+As one can see, there is very little nmi=1 usage, and the down-side of
+not using it is that on some platforms some software events can have a
+jiffy delay in wakeup (when arch_irq_work_raise isn't implemented).
+
+The up-side however is that we can remove the nmi parameter and save a
+bunch of conditionals in fast paths.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: Michael Cree <mcree@orcon.net.nz>
+Cc: Will Deacon <will.deacon@arm.com>
+Cc: Deng-Cheng Zhu <dengcheng.zhu@gmail.com>
+Cc: Anton Blanchard <anton@samba.org>
+Cc: Eric B Munson <emunson@mgebm.net>
+Cc: Heiko Carstens <heiko.carstens@de.ibm.com>
+Cc: Paul Mundt <lethal@linux-sh.org>
+Cc: David S. Miller <davem@davemloft.net>
+Cc: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Jason Wessel <jason.wessel@windriver.com>
+Cc: Don Zickus <dzickus@redhat.com>
+Link: http://lkml.kernel.org/n/tip-agjev8eu666tvknpb3iaj0fg@git.kernel.org
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+
+
+The vulnerable function:
+static int intel_pmu_handle_irq(struct pt_regs *regs)
+{
+	struct perf_sample_data data;
+	struct cpu_hw_events *cpuc;
+	int bit, loops;
+	u64 status;
+	int handled;
+
+	perf_sample_data_init(&data, 0);
+
+	cpuc = &__get_cpu_var(cpu_hw_events);
+
+	/*
+	 * Some chipsets need to unmask the LVTPC in a particular spot
+	 * inside the nmi handler.  As a result, the unmasking was pushed
+	 * into all the nmi handlers.
+	 *
+	 * This handler doesn't seem to have any issues with the unmasking
+	 * so it was left at the top.
+	 */
+	apic_write(APIC_LVTPC, APIC_DM_NMI);
+
+	intel_pmu_disable_all();
+	handled = intel_pmu_drain_bts_buffer();
+	status = intel_pmu_get_status();
+	if (!status) {
+		intel_pmu_enable_all(0);
+		return handled;
+	}
+
+	loops = 0;
+again:
+	intel_pmu_ack_status(status);
+	if (++loops > 100) {
+		WARN_ONCE(1, "perfevents: irq loop stuck!\n");
+		perf_event_print_debug();
+		intel_pmu_reset();
+		goto done;
+	}
+
+	inc_irq_stat(apic_perf_irqs);
+
+	intel_pmu_lbr_read();
+
+	/*
+	 * PEBS overflow sets bit 62 in the global status register
+	 */
+	if (__test_and_clear_bit(62, (unsigned long *)&status)) {
+		handled++;
+		x86_pmu.drain_pebs(regs);
+	}
+
+	for_each_set_bit(bit, (unsigned long *)&status, X86_PMC_IDX_MAX) {
+		struct perf_event *event = cpuc->events[bit];
+
+		handled++;
+
+		if (!test_bit(bit, cpuc->active_mask))
+			continue;
+
+		if (!intel_pmu_save_and_restart(event))
+			continue;
+
+		data.period = event->hw.last_period;
+
+		if (perf_event_overflow(event, 1, &data, regs))
+			x86_pmu_stop(event, 0);
+	}
+
+	/*
+	 * Repeat if there is more work to be done:
+	 */
+	status = intel_pmu_get_status();
+	if (status)
+		goto again;
+
+done:
+	intel_pmu_enable_all(0);
+	return handled;
+}
+
+
+
+The corrected function:
+static int intel_pmu_handle_irq(struct pt_regs *regs)
+{
+	struct perf_sample_data data;
+	struct cpu_hw_events *cpuc;
+	int bit, loops;
+	u64 status;
+	int handled;
+
+	perf_sample_data_init(&data, 0);
+
+	cpuc = &__get_cpu_var(cpu_hw_events);
+
+	/*
+	 * Some chipsets need to unmask the LVTPC in a particular spot
+	 * inside the nmi handler.  As a result, the unmasking was pushed
+	 * into all the nmi handlers.
+	 *
+	 * This handler doesn't seem to have any issues with the unmasking
+	 * so it was left at the top.
+	 */
+	apic_write(APIC_LVTPC, APIC_DM_NMI);
+
+	intel_pmu_disable_all();
+	handled = intel_pmu_drain_bts_buffer();
+	status = intel_pmu_get_status();
+	if (!status) {
+		intel_pmu_enable_all(0);
+		return handled;
+	}
+
+	loops = 0;
+again:
+	intel_pmu_ack_status(status);
+	if (++loops > 100) {
+		WARN_ONCE(1, "perfevents: irq loop stuck!\n");
+		perf_event_print_debug();
+		intel_pmu_reset();
+		goto done;
+	}
+
+	inc_irq_stat(apic_perf_irqs);
+
+	intel_pmu_lbr_read();
+
+	/*
+	 * PEBS overflow sets bit 62 in the global status register
+	 */
+	if (__test_and_clear_bit(62, (unsigned long *)&status)) {
+		handled++;
+		x86_pmu.drain_pebs(regs);
+	}
+
+	for_each_set_bit(bit, (unsigned long *)&status, X86_PMC_IDX_MAX) {
+		struct perf_event *event = cpuc->events[bit];
+
+		handled++;
+
+		if (!test_bit(bit, cpuc->active_mask))
+			continue;
+
+		if (!intel_pmu_save_and_restart(event))
+			continue;
+
+		data.period = event->hw.last_period;
+
+		if (perf_event_overflow(event, &data, regs))
+			x86_pmu_stop(event, 0);
+	}
+
+	/*
+	 * Repeat if there is more work to be done:
+	 */
+	status = intel_pmu_get_status();
+	if (status)
+		goto again;
+
+done:
+	intel_pmu_enable_all(0);
+	return handled;
+}

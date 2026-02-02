@@ -1,0 +1,102 @@
+This issue file has CWE-362. Your task is to create this CWE-362 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+hamradio: defer 6pack kfree after unregister_netdev
+
+There is a possible race condition (use-after-free) like below
+
+ (USE)                       |  (FREE)
+  dev_queue_xmit             |
+   __dev_queue_xmit          |
+    __dev_xmit_skb           |
+     sch_direct_xmit         | ...
+      xmit_one               |
+       netdev_start_xmit     | tty_ldisc_kill
+        __netdev_start_xmit  |  6pack_close
+         sp_xmit             |   kfree
+          sp_encaps          |
+                             |
+
+According to the patch "defer ax25 kfree after unregister_netdev", this
+patch reorder the kfree after the unregister_netdev to avoid the possible
+UAF as the unregister_netdev() is well synchronized and won't return if
+there is a running routine.
+
+Signed-off-by: Lin Ma <linma@zju.edu.cn>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static void sixpack_close(struct tty_struct *tty)
+{
+	struct sixpack *sp;
+
+	write_lock_irq(&disc_data_lock);
+	sp = tty->disc_data;
+	tty->disc_data = NULL;
+	write_unlock_irq(&disc_data_lock);
+	if (!sp)
+		return;
+
+	/*
+	 * We have now ensured that nobody can start using ap from now on, but
+	 * we have to wait for all existing users to finish.
+	 */
+	if (!refcount_dec_and_test(&sp->refcnt))
+		wait_for_completion(&sp->dead);
+
+	/* We must stop the queue to avoid potentially scribbling
+	 * on the free buffers. The sp->dead completion is not sufficient
+	 * to protect us from sp->xbuff access.
+	 */
+	netif_stop_queue(sp->dev);
+
+	del_timer_sync(&sp->tx_t);
+	del_timer_sync(&sp->resync_t);
+
+	/* Free all 6pack frame buffers. */
+	kfree(sp->rbuff);
+	kfree(sp->xbuff);
+
+	unregister_netdev(sp->dev);
+}
+
+
+
+The corrected function:
+static void sixpack_close(struct tty_struct *tty)
+{
+	struct sixpack *sp;
+
+	write_lock_irq(&disc_data_lock);
+	sp = tty->disc_data;
+	tty->disc_data = NULL;
+	write_unlock_irq(&disc_data_lock);
+	if (!sp)
+		return;
+
+	/*
+	 * We have now ensured that nobody can start using ap from now on, but
+	 * we have to wait for all existing users to finish.
+	 */
+	if (!refcount_dec_and_test(&sp->refcnt))
+		wait_for_completion(&sp->dead);
+
+	/* We must stop the queue to avoid potentially scribbling
+	 * on the free buffers. The sp->dead completion is not sufficient
+	 * to protect us from sp->xbuff access.
+	 */
+	netif_stop_queue(sp->dev);
+
+	del_timer_sync(&sp->tx_t);
+	del_timer_sync(&sp->resync_t);
+
+	unregister_netdev(sp->dev);
+
+	/* Free all 6pack frame buffers after unreg. */
+	kfree(sp->rbuff);
+	kfree(sp->xbuff);
+
+	free_netdev(sp->dev);
+}

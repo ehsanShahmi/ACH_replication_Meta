@@ -1,0 +1,79 @@
+The vulnerable issue:
+drm/nouveau/dispnv04: fix null pointer dereference in nv17_tv_get_ld_modes
+
+In nv17_tv_get_ld_modes(), the return value of drm_mode_duplicate() is
+assigned to mode, which will lead to a possible NULL pointer dereference
+on failure of drm_mode_duplicate(). Add a check to avoid npd.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Ma Ke <make24@iscas.ac.cn>
+Signed-off-by: Lyude Paul <lyude@redhat.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20240625081828.2620794-1-make24@iscas.ac.cn
+
+
+
+The vulnerable function:
+static int nv17_tv_get_ld_modes(struct drm_encoder *encoder,
+				struct drm_connector *connector)
+{
+	struct nv17_tv_norm_params *tv_norm = get_tv_norm(encoder);
+	const struct drm_display_mode *tv_mode;
+	int n = 0;
+
+	for (tv_mode = nv17_tv_modes; tv_mode->hdisplay; tv_mode++) {
+		struct drm_display_mode *mode;
+
+		mode = drm_mode_duplicate(encoder->dev, tv_mode);
+
+		mode->clock = tv_norm->tv_enc_mode.vrefresh *
+			mode->htotal / 1000 *
+			mode->vtotal / 1000;
+
+		if (mode->flags & DRM_MODE_FLAG_DBLSCAN)
+			mode->clock *= 2;
+
+		if (mode->hdisplay == tv_norm->tv_enc_mode.hdisplay &&
+		    mode->vdisplay == tv_norm->tv_enc_mode.vdisplay)
+			mode->type |= DRM_MODE_TYPE_PREFERRED;
+
+		drm_mode_probed_add(connector, mode);
+		n++;
+	}
+
+	return n;
+}
+
+
+
+The corrected function:
+static int nv17_tv_get_ld_modes(struct drm_encoder *encoder,
+				struct drm_connector *connector)
+{
+	struct nv17_tv_norm_params *tv_norm = get_tv_norm(encoder);
+	const struct drm_display_mode *tv_mode;
+	int n = 0;
+
+	for (tv_mode = nv17_tv_modes; tv_mode->hdisplay; tv_mode++) {
+		struct drm_display_mode *mode;
+
+		mode = drm_mode_duplicate(encoder->dev, tv_mode);
+		if (!mode)
+			continue;
+
+		mode->clock = tv_norm->tv_enc_mode.vrefresh *
+			mode->htotal / 1000 *
+			mode->vtotal / 1000;
+
+		if (mode->flags & DRM_MODE_FLAG_DBLSCAN)
+			mode->clock *= 2;
+
+		if (mode->hdisplay == tv_norm->tv_enc_mode.hdisplay &&
+		    mode->vdisplay == tv_norm->tv_enc_mode.vdisplay)
+			mode->type |= DRM_MODE_TYPE_PREFERRED;
+
+		drm_mode_probed_add(connector, mode);
+		n++;
+	}
+
+	return n;
+}

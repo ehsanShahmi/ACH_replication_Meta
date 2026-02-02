@@ -1,0 +1,43 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+drm/amdgpu/mes: fix use-after-free issue
+
+Delete fence fallback timer to fix the ramdom
+use-after-free issue.
+
+v2: move to amdgpu_mes.c
+
+Signed-off-by: Jack Xiao <Jack.Xiao@amd.com>
+Acked-by: Lijo Lazar <lijo.lazar@amd.com>
+Acked-by: Christian König <christian.koenig@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+
+
+
+The vulnerable function:
+void amdgpu_mes_remove_ring(struct amdgpu_device *adev,
+			    struct amdgpu_ring *ring)
+{
+	if (!ring)
+		return;
+
+	amdgpu_mes_remove_hw_queue(adev, ring->hw_queue_id);
+	amdgpu_ring_fini(ring);
+	kfree(ring);
+}
+
+
+
+The corrected function:
+void amdgpu_mes_remove_ring(struct amdgpu_device *adev,
+			    struct amdgpu_ring *ring)
+{
+	if (!ring)
+		return;
+
+	amdgpu_mes_remove_hw_queue(adev, ring->hw_queue_id);
+	del_timer_sync(&ring->fence_drv.fallback_timer);
+	amdgpu_ring_fini(ring);
+	kfree(ring);
+}

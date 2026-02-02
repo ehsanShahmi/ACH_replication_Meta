@@ -1,0 +1,49 @@
+The vulnerable issue:
+cdrom: Fix info leak/OOB read in cdrom_ioctl_drive_status
+
+Like d88b6d04: "cdrom: information leak in cdrom_ioctl_media_changed()"
+
+There is another cast from unsigned long to int which causes
+a bounds check to fail with specially crafted input. The value is
+then used as an index in the slot array in cdrom_slot_status().
+
+Signed-off-by: Scott Bauer <scott.bauer@intel.com>
+Signed-off-by: Scott Bauer <sbauer@plzdonthack.me>
+Cc: stable@vger.kernel.org
+Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+
+
+The vulnerable function:
+static int cdrom_ioctl_drive_status(struct cdrom_device_info *cdi,
+		unsigned long arg)
+{
+	cd_dbg(CD_DO_IOCTL, "entering CDROM_DRIVE_STATUS\n");
+
+	if (!(cdi->ops->capability & CDC_DRIVE_STATUS))
+		return -ENOSYS;
+ 	if (!CDROM_CAN(CDC_SELECT_DISC) ||
+ 	    (arg == CDSL_CURRENT || arg == CDSL_NONE))
+ 		return cdi->ops->drive_status(cdi, CDSL_CURRENT);
+	if (((int)arg >= cdi->capacity))
+ 		return -EINVAL;
+ 	return cdrom_slot_status(cdi, arg);
+ }
+
+
+
+The corrected function:
+static int cdrom_ioctl_drive_status(struct cdrom_device_info *cdi,
+		unsigned long arg)
+{
+	cd_dbg(CD_DO_IOCTL, "entering CDROM_DRIVE_STATUS\n");
+
+	if (!(cdi->ops->capability & CDC_DRIVE_STATUS))
+		return -ENOSYS;
+ 	if (!CDROM_CAN(CDC_SELECT_DISC) ||
+ 	    (arg == CDSL_CURRENT || arg == CDSL_NONE))
+ 		return cdi->ops->drive_status(cdi, CDSL_CURRENT);
+	if (arg >= cdi->capacity)
+ 		return -EINVAL;
+ 	return cdrom_slot_status(cdi, arg);
+ }

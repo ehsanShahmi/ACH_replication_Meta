@@ -1,0 +1,84 @@
+The vulnerable issue:
+HID: Fix assumption that devices have inputs
+
+The syzbot fuzzer found a slab-out-of-bounds write bug in the hid-gaff
+driver.  The problem is caused by the driver's assumption that the
+device must have an input report.  While this will be true for all
+normal HID input devices, a suitably malicious device can violate the
+assumption.
+
+The same assumption is present in over a dozen other HID drivers.
+This patch fixes them by checking that the list of hid_inputs for the
+hid_device is nonempty before allowing it to be used.
+
+Reported-and-tested-by: syzbot+403741a091bf41d4ae79@syzkaller.appspotmail.com
+Signed-off-by: Alan Stern <stern@rowland.harvard.edu>
+CC: <stable@vger.kernel.org>
+Signed-off-by: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+
+
+
+The vulnerable function:
+int lg3ff_init(struct hid_device *hid)
+{
+	struct hid_input *hidinput = list_entry(hid->inputs.next, struct hid_input, list);
+	struct input_dev *dev = hidinput->input;
+	const signed short *ff_bits = ff3_joystick_ac;
+	int error;
+	int i;
+
+	/* Check that the report looks ok */
+	if (!hid_validate_values(hid, HID_OUTPUT_REPORT, 0, 0, 35))
+		return -ENODEV;
+
+	/* Assume single fixed device G940 */
+	for (i = 0; ff_bits[i] >= 0; i++)
+		set_bit(ff_bits[i], dev->ffbit);
+
+	error = input_ff_create_memless(dev, NULL, hid_lg3ff_play);
+	if (error)
+		return error;
+
+	if (test_bit(FF_AUTOCENTER, dev->ffbit))
+		dev->ff->set_autocenter = hid_lg3ff_set_autocenter;
+
+	hid_info(hid, "Force feedback for Logitech Flight System G940 by Gary Stein <LordCnidarian@gmail.com>\n");
+	return 0;
+}
+
+
+
+The corrected function:
+int lg3ff_init(struct hid_device *hid)
+{
+	struct hid_input *hidinput;
+	struct input_dev *dev;
+	const signed short *ff_bits = ff3_joystick_ac;
+	int error;
+	int i;
+
+	if (list_empty(&hid->inputs)) {
+		hid_err(hid, "no inputs found\n");
+		return -ENODEV;
+	}
+	hidinput = list_entry(hid->inputs.next, struct hid_input, list);
+	dev = hidinput->input;
+
+	/* Check that the report looks ok */
+	if (!hid_validate_values(hid, HID_OUTPUT_REPORT, 0, 0, 35))
+		return -ENODEV;
+
+	/* Assume single fixed device G940 */
+	for (i = 0; ff_bits[i] >= 0; i++)
+		set_bit(ff_bits[i], dev->ffbit);
+
+	error = input_ff_create_memless(dev, NULL, hid_lg3ff_play);
+	if (error)
+		return error;
+
+	if (test_bit(FF_AUTOCENTER, dev->ffbit))
+		dev->ff->set_autocenter = hid_lg3ff_set_autocenter;
+
+	hid_info(hid, "Force feedback for Logitech Flight System G940 by Gary Stein <LordCnidarian@gmail.com>\n");
+	return 0;
+}

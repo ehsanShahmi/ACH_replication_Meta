@@ -1,0 +1,69 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+Fix a few incorrectly checked [io_]remap_pfn_range() calls
+
+Nico Golde reports a few straggling uses of [io_]remap_pfn_range() that
+really should use the vm_iomap_memory() helper.  This trivially converts
+two of them to the helper, and comments about why the third one really
+needs to continue to use remap_pfn_range(), and adds the missing size
+check.
+
+Reported-by: Nico Golde <nico@ngolde.de>
+Cc: stable@kernel.org
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org.
+
+
+
+The vulnerable function:
+static int uio_mmap_physical(struct vm_area_struct *vma)
+{
+	struct uio_device *idev = vma->vm_private_data;
+	int mi = uio_find_mem_index(vma);
+	if (mi < 0)
+		return -EINVAL;
+
+	vma->vm_ops = &uio_physical_vm_ops;
+
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+
+	return remap_pfn_range(vma,
+			       vma->vm_start,
+			       idev->info->mem[mi].addr >> PAGE_SHIFT,
+			       vma->vm_end - vma->vm_start,
+			       vma->vm_page_prot);
+}
+
+
+
+The corrected function:
+static int uio_mmap_physical(struct vm_area_struct *vma)
+{
+	struct uio_device *idev = vma->vm_private_data;
+	int mi = uio_find_mem_index(vma);
+	struct uio_mem *mem;
+	if (mi < 0)
+		return -EINVAL;
+	mem = idev->info->mem + mi;
+
+	if (vma->vm_end - vma->vm_start > mem->size)
+		return -EINVAL;
+
+	vma->vm_ops = &uio_physical_vm_ops;
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+
+	/*
+	 * We cannot use the vm_iomap_memory() helper here,
+	 * because vma->vm_pgoff is the map index we looked
+	 * up above in uio_find_mem_index(), rather than an
+	 * actual page offset into the mmap.
+	 *
+	 * So we just do the physical mmap without a page
+	 * offset.
+	 */
+	return remap_pfn_range(vma,
+			       vma->vm_start,
+			       mem->addr >> PAGE_SHIFT,
+			       vma->vm_end - vma->vm_start,
+			       vma->vm_page_prot);
+}

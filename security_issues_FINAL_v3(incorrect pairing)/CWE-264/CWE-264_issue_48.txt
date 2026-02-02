@@ -1,0 +1,55 @@
+The vulnerable issue:
+xen-pciback: limit guest control of command register
+
+Otherwise the guest can abuse that control to cause e.g. PCIe
+Unsupported Request responses by disabling memory and/or I/O decoding
+and subsequently causing (CPU side) accesses to the respective address
+ranges, which (depending on system configuration) may be fatal to the
+host.
+
+Note that to alter any of the bits collected together as
+PCI_COMMAND_GUEST permissive mode is now required to be enabled
+globally or on the specific device.
+
+This is CVE-2015-2150 / XSA-120.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Reviewed-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: David Vrabel <david.vrabel@citrix.com>
+
+
+
+The vulnerable function:
+static int command_read(struct pci_dev *dev, int offset, u16 *value, void *data)
+{
+	int i;
+	int ret;
+
+	ret = xen_pcibk_read_config_word(dev, offset, value, data);
+	if (!pci_is_enabled(dev))
+		return ret;
+
+	for (i = 0; i < PCI_ROM_RESOURCE; i++) {
+		if (dev->resource[i].flags & IORESOURCE_IO)
+			*value |= PCI_COMMAND_IO;
+		if (dev->resource[i].flags & IORESOURCE_MEM)
+			*value |= PCI_COMMAND_MEMORY;
+	}
+
+	return ret;
+}
+
+
+
+The corrected function:
+static int command_read(struct pci_dev *dev, int offset, u16 *value, void *data)
+{
+	int ret = pci_read_config_word(dev, offset, value);
+	const struct pci_cmd_info *cmd = data;
+
+	*value &= PCI_COMMAND_GUEST;
+	*value |= cmd->val & ~PCI_COMMAND_GUEST;
+
+	return ret;
+}

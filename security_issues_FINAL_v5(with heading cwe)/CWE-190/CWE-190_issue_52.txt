@@ -1,0 +1,52 @@
+This issue file has CWE-190. Your task is to create this CWE-190 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+vfs: make AIO use the proper rw_verify_area() area helpers
+
+We had for some reason overlooked the AIO interface, and it didn't use
+the proper rw_verify_area() helper function that checks (for example)
+mandatory locking on the file, and that the size of the access doesn't
+cause us to overflow the provided offset limits etc.
+
+Instead, AIO did just the security_file_permission() thing (that
+rw_verify_area() also does) directly.
+
+This fixes it to do all the proper helper functions, which not only
+means that now mandatory file locking works with AIO too, we can
+actually remove lines of code.
+
+Reported-by: Manish Honap <manish_honap_vit@yahoo.co.in>
+Cc: stable@vger.kernel.org
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+static ssize_t aio_setup_single_vector(struct kiocb *kiocb)
+{
+	kiocb->ki_iovec = &kiocb->ki_inline_vec;
+	kiocb->ki_iovec->iov_base = kiocb->ki_buf;
+	kiocb->ki_iovec->iov_len = kiocb->ki_left;
+	kiocb->ki_nr_segs = 1;
+	kiocb->ki_cur_seg = 0;
+	return 0;
+}
+
+
+
+The corrected function:
+static ssize_t aio_setup_single_vector(int type, struct file * file, struct kiocb *kiocb)
+{
+	int bytes;
+
+	bytes = rw_verify_area(type, file, &kiocb->ki_pos, kiocb->ki_left);
+	if (bytes < 0)
+		return bytes;
+
+	kiocb->ki_iovec = &kiocb->ki_inline_vec;
+	kiocb->ki_iovec->iov_base = kiocb->ki_buf;
+	kiocb->ki_iovec->iov_len = bytes;
+	kiocb->ki_nr_segs = 1;
+	kiocb->ki_cur_seg = 0;
+	return 0;
+}

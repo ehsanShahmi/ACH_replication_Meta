@@ -1,0 +1,95 @@
+The vulnerable issue:
+scsi: qla2xxx: Fix for possible memory corruption
+
+Init Control Block is dereferenced incorrectly.  Correctly dereference ICB
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Shreyas Deodhar <sdeodhar@marvell.com>
+Signed-off-by: Nilesh Javali <njavali@marvell.com>
+Link: https://lore.kernel.org/r/20240710171057.35066-4-njavali@marvell.com
+Reviewed-by: Himanshu Madhani <himanshu.madhani@oracle.com>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+
+
+The vulnerable function:
+static void
+qla2x00_number_of_exch(scsi_qla_host_t *vha, u32 *ret_cnt, u16 max_cnt)
+{
+	u32 temp;
+	struct init_cb_81xx *icb = (struct init_cb_81xx *)&vha->hw->init_cb;
+	*ret_cnt = FW_DEF_EXCHANGES_CNT;
+
+	if (max_cnt > vha->hw->max_exchg)
+		max_cnt = vha->hw->max_exchg;
+
+	if (qla_ini_mode_enabled(vha)) {
+		if (vha->ql2xiniexchg > max_cnt)
+			vha->ql2xiniexchg = max_cnt;
+
+		if (vha->ql2xiniexchg > FW_DEF_EXCHANGES_CNT)
+			*ret_cnt = vha->ql2xiniexchg;
+
+	} else if (qla_tgt_mode_enabled(vha)) {
+		if (vha->ql2xexchoffld > max_cnt) {
+			vha->ql2xexchoffld = max_cnt;
+			icb->exchange_count = cpu_to_le16(vha->ql2xexchoffld);
+		}
+
+		if (vha->ql2xexchoffld > FW_DEF_EXCHANGES_CNT)
+			*ret_cnt = vha->ql2xexchoffld;
+	} else if (qla_dual_mode_enabled(vha)) {
+		temp = vha->ql2xiniexchg + vha->ql2xexchoffld;
+		if (temp > max_cnt) {
+			vha->ql2xiniexchg -= (temp - max_cnt)/2;
+			vha->ql2xexchoffld -= (((temp - max_cnt)/2) + 1);
+			temp = max_cnt;
+			icb->exchange_count = cpu_to_le16(vha->ql2xexchoffld);
+		}
+
+		if (temp > FW_DEF_EXCHANGES_CNT)
+			*ret_cnt = temp;
+	}
+}
+
+
+
+The corrected function:
+static void
+qla2x00_number_of_exch(scsi_qla_host_t *vha, u32 *ret_cnt, u16 max_cnt)
+{
+	u32 temp;
+	struct init_cb_81xx *icb = (struct init_cb_81xx *)vha->hw->init_cb;
+	*ret_cnt = FW_DEF_EXCHANGES_CNT;
+
+	if (max_cnt > vha->hw->max_exchg)
+		max_cnt = vha->hw->max_exchg;
+
+	if (qla_ini_mode_enabled(vha)) {
+		if (vha->ql2xiniexchg > max_cnt)
+			vha->ql2xiniexchg = max_cnt;
+
+		if (vha->ql2xiniexchg > FW_DEF_EXCHANGES_CNT)
+			*ret_cnt = vha->ql2xiniexchg;
+
+	} else if (qla_tgt_mode_enabled(vha)) {
+		if (vha->ql2xexchoffld > max_cnt) {
+			vha->ql2xexchoffld = max_cnt;
+			icb->exchange_count = cpu_to_le16(vha->ql2xexchoffld);
+		}
+
+		if (vha->ql2xexchoffld > FW_DEF_EXCHANGES_CNT)
+			*ret_cnt = vha->ql2xexchoffld;
+	} else if (qla_dual_mode_enabled(vha)) {
+		temp = vha->ql2xiniexchg + vha->ql2xexchoffld;
+		if (temp > max_cnt) {
+			vha->ql2xiniexchg -= (temp - max_cnt)/2;
+			vha->ql2xexchoffld -= (((temp - max_cnt)/2) + 1);
+			temp = max_cnt;
+			icb->exchange_count = cpu_to_le16(vha->ql2xexchoffld);
+		}
+
+		if (temp > FW_DEF_EXCHANGES_CNT)
+			*ret_cnt = temp;
+	}
+}

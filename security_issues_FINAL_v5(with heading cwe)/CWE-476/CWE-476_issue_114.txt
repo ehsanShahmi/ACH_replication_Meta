@@ -1,0 +1,185 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+bpf: correctly handle malformed BPF_CORE_TYPE_ID_LOCAL relos
+
+In case of malformed relocation record of kind BPF_CORE_TYPE_ID_LOCAL
+referencing a non-existing BTF type, function bpf_core_calc_relo_insn
+would cause a null pointer deference.
+
+Fix this by adding a proper check upper in call stack, as malformed
+relocation records could be passed from user space.
+
+Simplest reproducer is a program:
+
+    r0 = 0
+    exit
+
+With a single relocation record:
+
+    .insn_off = 0,          /* patch first instruction */
+    .type_id = 100500,      /* this type id does not exist */
+    .access_str_off = 6,    /* offset of string "0" */
+    .kind = BPF_CORE_TYPE_ID_LOCAL,
+
+See the link for original reproducer or next commit for a test case.
+
+Fixes: 74753e1462e7 ("libbpf: Replace btf__type_by_id() with btf_type_by_id().")
+Reported-by: Liu RuiTong <cnitlrt@gmail.com>
+Closes: https://lore.kernel.org/bpf/CAK55_s6do7C+DVwbwY_7nKfUz0YLDoiA1v6X3Y9+p0sWzipFSA@mail.gmail.com/
+Acked-by: Andrii Nakryiko <andrii@kernel.org>
+Signed-off-by: Eduard Zingerman <eddyz87@gmail.com>
+Link: https://lore.kernel.org/r/20240822080124.2995724-2-eddyz87@gmail.com
+Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+
+
+
+The vulnerable function:
+int bpf_core_apply(struct bpf_core_ctx *ctx, const struct bpf_core_relo *relo,
+		   int relo_idx, void *insn)
+{
+	bool need_cands = relo->kind != BPF_CORE_TYPE_ID_LOCAL;
+	struct bpf_core_cand_list cands = {};
+	struct bpf_core_relo_res targ_res;
+	struct bpf_core_spec *specs;
+	int err;
+
+	/* ~4k of temp memory necessary to convert LLVM spec like "0:1:0:5"
+	 * into arrays of btf_ids of struct fields and array indices.
+	 */
+	specs = kcalloc(3, sizeof(*specs), GFP_KERNEL);
+	if (!specs)
+		return -ENOMEM;
+
+	if (need_cands) {
+		struct bpf_cand_cache *cc;
+		int i;
+
+		mutex_lock(&cand_cache_mutex);
+		cc = bpf_core_find_cands(ctx, relo->type_id);
+		if (IS_ERR(cc)) {
+			bpf_log(ctx->log, "target candidate search failed for %d\n",
+				relo->type_id);
+			err = PTR_ERR(cc);
+			goto out;
+		}
+		if (cc->cnt) {
+			cands.cands = kcalloc(cc->cnt, sizeof(*cands.cands), GFP_KERNEL);
+			if (!cands.cands) {
+				err = -ENOMEM;
+				goto out;
+			}
+		}
+		for (i = 0; i < cc->cnt; i++) {
+			bpf_log(ctx->log,
+				"CO-RE relocating %s %s: found target candidate [%d]\n",
+				btf_kind_str[cc->kind], cc->name, cc->cands[i].id);
+			cands.cands[i].btf = cc->cands[i].btf;
+			cands.cands[i].id = cc->cands[i].id;
+		}
+		cands.len = cc->cnt;
+		/* cand_cache_mutex needs to span the cache lookup and
+		 * copy of btf pointer into bpf_core_cand_list,
+		 * since module can be unloaded while bpf_core_calc_relo_insn
+		 * is working with module's btf.
+		 */
+	}
+
+	err = bpf_core_calc_relo_insn((void *)ctx->log, relo, relo_idx, ctx->btf, &cands, specs,
+				      &targ_res);
+	if (err)
+		goto out;
+
+	err = bpf_core_patch_insn((void *)ctx->log, insn, relo->insn_off / 8, relo, relo_idx,
+				  &targ_res);
+
+out:
+	kfree(specs);
+	if (need_cands) {
+		kfree(cands.cands);
+		mutex_unlock(&cand_cache_mutex);
+		if (ctx->log->level & BPF_LOG_LEVEL2)
+			print_cand_cache(ctx->log);
+	}
+	return err;
+}
+
+
+
+The corrected function:
+int bpf_core_apply(struct bpf_core_ctx *ctx, const struct bpf_core_relo *relo,
+		   int relo_idx, void *insn)
+{
+	bool need_cands = relo->kind != BPF_CORE_TYPE_ID_LOCAL;
+	struct bpf_core_cand_list cands = {};
+	struct bpf_core_relo_res targ_res;
+	struct bpf_core_spec *specs;
+	const struct btf_type *type;
+	int err;
+
+	/* ~4k of temp memory necessary to convert LLVM spec like "0:1:0:5"
+	 * into arrays of btf_ids of struct fields and array indices.
+	 */
+	specs = kcalloc(3, sizeof(*specs), GFP_KERNEL);
+	if (!specs)
+		return -ENOMEM;
+
+	type = btf_type_by_id(ctx->btf, relo->type_id);
+	if (!type) {
+		bpf_log(ctx->log, "relo #%u: bad type id %u\n",
+			relo_idx, relo->type_id);
+		return -EINVAL;
+	}
+
+	if (need_cands) {
+		struct bpf_cand_cache *cc;
+		int i;
+
+		mutex_lock(&cand_cache_mutex);
+		cc = bpf_core_find_cands(ctx, relo->type_id);
+		if (IS_ERR(cc)) {
+			bpf_log(ctx->log, "target candidate search failed for %d\n",
+				relo->type_id);
+			err = PTR_ERR(cc);
+			goto out;
+		}
+		if (cc->cnt) {
+			cands.cands = kcalloc(cc->cnt, sizeof(*cands.cands), GFP_KERNEL);
+			if (!cands.cands) {
+				err = -ENOMEM;
+				goto out;
+			}
+		}
+		for (i = 0; i < cc->cnt; i++) {
+			bpf_log(ctx->log,
+				"CO-RE relocating %s %s: found target candidate [%d]\n",
+				btf_kind_str[cc->kind], cc->name, cc->cands[i].id);
+			cands.cands[i].btf = cc->cands[i].btf;
+			cands.cands[i].id = cc->cands[i].id;
+		}
+		cands.len = cc->cnt;
+		/* cand_cache_mutex needs to span the cache lookup and
+		 * copy of btf pointer into bpf_core_cand_list,
+		 * since module can be unloaded while bpf_core_calc_relo_insn
+		 * is working with module's btf.
+		 */
+	}
+
+	err = bpf_core_calc_relo_insn((void *)ctx->log, relo, relo_idx, ctx->btf, &cands, specs,
+				      &targ_res);
+	if (err)
+		goto out;
+
+	err = bpf_core_patch_insn((void *)ctx->log, insn, relo->insn_off / 8, relo, relo_idx,
+				  &targ_res);
+
+out:
+	kfree(specs);
+	if (need_cands) {
+		kfree(cands.cands);
+		mutex_unlock(&cand_cache_mutex);
+		if (ctx->log->level & BPF_LOG_LEVEL2)
+			print_cand_cache(ctx->log);
+	}
+	return err;
+}

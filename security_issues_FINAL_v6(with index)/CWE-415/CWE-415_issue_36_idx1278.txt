@@ -1,0 +1,936 @@
+This issue file has CWE-415. Your task is to create this CWE-415 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+scsi: qla2xxx: Fix double free of the ha->vp_map pointer
+
+Coverity scan reported potential risk of double free of the pointer
+ha->vp_map.  ha->vp_map was freed in qla2x00_mem_alloc(), and again freed
+in function qla2x00_mem_free(ha).
+
+Assign NULL to vp_map and kfree take care of NULL.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Saurav Kashyap <skashyap@marvell.com>
+Signed-off-by: Nilesh Javali <njavali@marvell.com>
+Link: https://lore.kernel.org/r/20240227164127.36465-8-njavali@marvell.com
+Reviewed-by: Himanshu Madhani <himanshu.madhani@oracle.com>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+
+
+The vulnerable function:
+static int
+qla2x00_mem_alloc(struct qla_hw_data *ha, uint16_t req_len, uint16_t rsp_len,
+	struct req_que **req, struct rsp_que **rsp)
+{
+	char	name[16];
+	int rc;
+
+	if (QLA_TGT_MODE_ENABLED() || EDIF_CAP(ha)) {
+		ha->vp_map = kcalloc(MAX_MULTI_ID_FABRIC, sizeof(struct qla_vp_map), GFP_KERNEL);
+		if (!ha->vp_map)
+			goto fail;
+	}
+
+	ha->init_cb = dma_alloc_coherent(&ha->pdev->dev, ha->init_cb_size,
+		&ha->init_cb_dma, GFP_KERNEL);
+	if (!ha->init_cb)
+		goto fail_free_vp_map;
+
+	rc = btree_init32(&ha->host_map);
+	if (rc)
+		goto fail_free_init_cb;
+
+	if (qlt_mem_alloc(ha) < 0)
+		goto fail_free_btree;
+
+	ha->gid_list = dma_alloc_coherent(&ha->pdev->dev,
+		qla2x00_gid_list_size(ha), &ha->gid_list_dma, GFP_KERNEL);
+	if (!ha->gid_list)
+		goto fail_free_tgt_mem;
+
+	ha->srb_mempool = mempool_create_slab_pool(SRB_MIN_REQ, srb_cachep);
+	if (!ha->srb_mempool)
+		goto fail_free_gid_list;
+
+	if (IS_P3P_TYPE(ha) || IS_QLA27XX(ha) || (ql2xsecenable && IS_QLA28XX(ha))) {
+		/* Allocate cache for CT6 Ctx. */
+		if (!ctx_cachep) {
+			ctx_cachep = kmem_cache_create("qla2xxx_ctx",
+				sizeof(struct ct6_dsd), 0,
+				SLAB_HWCACHE_ALIGN, NULL);
+			if (!ctx_cachep)
+				goto fail_free_srb_mempool;
+		}
+		ha->ctx_mempool = mempool_create_slab_pool(SRB_MIN_REQ,
+			ctx_cachep);
+		if (!ha->ctx_mempool)
+			goto fail_free_srb_mempool;
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0021,
+		    "ctx_cachep=%p ctx_mempool=%p.\n",
+		    ctx_cachep, ha->ctx_mempool);
+	}
+
+	/* Get memory for cached NVRAM */
+	ha->nvram = kzalloc(MAX_NVRAM_SIZE, GFP_KERNEL);
+	if (!ha->nvram)
+		goto fail_free_ctx_mempool;
+
+	snprintf(name, sizeof(name), "%s_%d", QLA2XXX_DRIVER_NAME,
+		ha->pdev->device);
+	ha->s_dma_pool = dma_pool_create(name, &ha->pdev->dev,
+		DMA_POOL_SIZE, 8, 0);
+	if (!ha->s_dma_pool)
+		goto fail_free_nvram;
+
+	ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0022,
+	    "init_cb=%p gid_list=%p, srb_mempool=%p s_dma_pool=%p.\n",
+	    ha->init_cb, ha->gid_list, ha->srb_mempool, ha->s_dma_pool);
+
+	if (IS_P3P_TYPE(ha) || ql2xenabledif || (IS_QLA28XX(ha) && ql2xsecenable)) {
+		ha->dl_dma_pool = dma_pool_create(name, &ha->pdev->dev,
+			DSD_LIST_DMA_POOL_SIZE, 8, 0);
+		if (!ha->dl_dma_pool) {
+			ql_log_pci(ql_log_fatal, ha->pdev, 0x0023,
+			    "Failed to allocate memory for dl_dma_pool.\n");
+			goto fail_s_dma_pool;
+		}
+
+		ha->fcp_cmnd_dma_pool = dma_pool_create(name, &ha->pdev->dev,
+			FCP_CMND_DMA_POOL_SIZE, 8, 0);
+		if (!ha->fcp_cmnd_dma_pool) {
+			ql_log_pci(ql_log_fatal, ha->pdev, 0x0024,
+			    "Failed to allocate memory for fcp_cmnd_dma_pool.\n");
+			goto fail_dl_dma_pool;
+		}
+
+		if (ql2xenabledif) {
+			u64 bufsize = DIF_BUNDLING_DMA_POOL_SIZE;
+			struct dsd_dma *dsd, *nxt;
+			uint i;
+			/* Creata a DMA pool of buffers for DIF bundling */
+			ha->dif_bundl_pool = dma_pool_create(name,
+			    &ha->pdev->dev, DIF_BUNDLING_DMA_POOL_SIZE, 8, 0);
+			if (!ha->dif_bundl_pool) {
+				ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0024,
+				    "%s: failed create dif_bundl_pool\n",
+				    __func__);
+				goto fail_dif_bundl_dma_pool;
+			}
+
+			INIT_LIST_HEAD(&ha->pool.good.head);
+			INIT_LIST_HEAD(&ha->pool.unusable.head);
+			ha->pool.good.count = 0;
+			ha->pool.unusable.count = 0;
+			for (i = 0; i < 128; i++) {
+				dsd = kzalloc(sizeof(*dsd), GFP_ATOMIC);
+				if (!dsd) {
+					ql_dbg_pci(ql_dbg_init, ha->pdev,
+					    0xe0ee, "%s: failed alloc dsd\n",
+					    __func__);
+					return -ENOMEM;
+				}
+				ha->dif_bundle_kallocs++;
+
+				dsd->dsd_addr = dma_pool_alloc(
+				    ha->dif_bundl_pool, GFP_ATOMIC,
+				    &dsd->dsd_list_dma);
+				if (!dsd->dsd_addr) {
+					ql_dbg_pci(ql_dbg_init, ha->pdev,
+					    0xe0ee,
+					    "%s: failed alloc ->dsd_addr\n",
+					    __func__);
+					kfree(dsd);
+					ha->dif_bundle_kallocs--;
+					continue;
+				}
+				ha->dif_bundle_dma_allocs++;
+
+				/*
+				 * if DMA buffer crosses 4G boundary,
+				 * put it on bad list
+				 */
+				if (MSD(dsd->dsd_list_dma) ^
+				    MSD(dsd->dsd_list_dma + bufsize)) {
+					list_add_tail(&dsd->list,
+					    &ha->pool.unusable.head);
+					ha->pool.unusable.count++;
+				} else {
+					list_add_tail(&dsd->list,
+					    &ha->pool.good.head);
+					ha->pool.good.count++;
+				}
+			}
+
+			/* return the good ones back to the pool */
+			list_for_each_entry_safe(dsd, nxt,
+			    &ha->pool.good.head, list) {
+				list_del(&dsd->list);
+				dma_pool_free(ha->dif_bundl_pool,
+				    dsd->dsd_addr, dsd->dsd_list_dma);
+				ha->dif_bundle_dma_allocs--;
+				kfree(dsd);
+				ha->dif_bundle_kallocs--;
+			}
+
+			ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0024,
+			    "%s: dif dma pool (good=%u unusable=%u)\n",
+			    __func__, ha->pool.good.count,
+			    ha->pool.unusable.count);
+		}
+
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0025,
+		    "dl_dma_pool=%p fcp_cmnd_dma_pool=%p dif_bundl_pool=%p.\n",
+		    ha->dl_dma_pool, ha->fcp_cmnd_dma_pool,
+		    ha->dif_bundl_pool);
+	}
+
+	/* Allocate memory for SNS commands */
+	if (IS_QLA2100(ha) || IS_QLA2200(ha)) {
+	/* Get consistent memory allocated for SNS commands */
+		ha->sns_cmd = dma_alloc_coherent(&ha->pdev->dev,
+		sizeof(struct sns_cmd_pkt), &ha->sns_cmd_dma, GFP_KERNEL);
+		if (!ha->sns_cmd)
+			goto fail_dma_pool;
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0026,
+		    "sns_cmd: %p.\n", ha->sns_cmd);
+	} else {
+	/* Get consistent memory allocated for MS IOCB */
+		ha->ms_iocb = dma_pool_alloc(ha->s_dma_pool, GFP_KERNEL,
+			&ha->ms_iocb_dma);
+		if (!ha->ms_iocb)
+			goto fail_dma_pool;
+	/* Get consistent memory allocated for CT SNS commands */
+		ha->ct_sns = dma_alloc_coherent(&ha->pdev->dev,
+			sizeof(struct ct_sns_pkt), &ha->ct_sns_dma, GFP_KERNEL);
+		if (!ha->ct_sns)
+			goto fail_free_ms_iocb;
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0027,
+		    "ms_iocb=%p ct_sns=%p.\n",
+		    ha->ms_iocb, ha->ct_sns);
+	}
+
+	/* Allocate memory for request ring */
+	*req = kzalloc(sizeof(struct req_que), GFP_KERNEL);
+	if (!*req) {
+		ql_log_pci(ql_log_fatal, ha->pdev, 0x0028,
+		    "Failed to allocate memory for req.\n");
+		goto fail_req;
+	}
+	(*req)->length = req_len;
+	(*req)->ring = dma_alloc_coherent(&ha->pdev->dev,
+		((*req)->length + 1) * sizeof(request_t),
+		&(*req)->dma, GFP_KERNEL);
+	if (!(*req)->ring) {
+		ql_log_pci(ql_log_fatal, ha->pdev, 0x0029,
+		    "Failed to allocate memory for req_ring.\n");
+		goto fail_req_ring;
+	}
+	/* Allocate memory for response ring */
+	*rsp = kzalloc(sizeof(struct rsp_que), GFP_KERNEL);
+	if (!*rsp) {
+		ql_log_pci(ql_log_fatal, ha->pdev, 0x002a,
+		    "Failed to allocate memory for rsp.\n");
+		goto fail_rsp;
+	}
+	(*rsp)->hw = ha;
+	(*rsp)->length = rsp_len;
+	(*rsp)->ring = dma_alloc_coherent(&ha->pdev->dev,
+		((*rsp)->length + 1) * sizeof(response_t),
+		&(*rsp)->dma, GFP_KERNEL);
+	if (!(*rsp)->ring) {
+		ql_log_pci(ql_log_fatal, ha->pdev, 0x002b,
+		    "Failed to allocate memory for rsp_ring.\n");
+		goto fail_rsp_ring;
+	}
+	(*req)->rsp = *rsp;
+	(*rsp)->req = *req;
+	ql_dbg_pci(ql_dbg_init, ha->pdev, 0x002c,
+	    "req=%p req->length=%d req->ring=%p rsp=%p "
+	    "rsp->length=%d rsp->ring=%p.\n",
+	    *req, (*req)->length, (*req)->ring, *rsp, (*rsp)->length,
+	    (*rsp)->ring);
+	/* Allocate memory for NVRAM data for vports */
+	if (ha->nvram_npiv_size) {
+		ha->npiv_info = kcalloc(ha->nvram_npiv_size,
+					sizeof(struct qla_npiv_entry),
+					GFP_KERNEL);
+		if (!ha->npiv_info) {
+			ql_log_pci(ql_log_fatal, ha->pdev, 0x002d,
+			    "Failed to allocate memory for npiv_info.\n");
+			goto fail_npiv_info;
+		}
+	} else
+		ha->npiv_info = NULL;
+
+	/* Get consistent memory allocated for EX-INIT-CB. */
+	if (IS_CNA_CAPABLE(ha) || IS_QLA2031(ha) || IS_QLA27XX(ha) ||
+	    IS_QLA28XX(ha)) {
+		ha->ex_init_cb = dma_pool_alloc(ha->s_dma_pool, GFP_KERNEL,
+		    &ha->ex_init_cb_dma);
+		if (!ha->ex_init_cb)
+			goto fail_ex_init_cb;
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x002e,
+		    "ex_init_cb=%p.\n", ha->ex_init_cb);
+	}
+
+	/* Get consistent memory allocated for Special Features-CB. */
+	if (IS_QLA27XX(ha) || IS_QLA28XX(ha)) {
+		ha->sf_init_cb = dma_pool_zalloc(ha->s_dma_pool, GFP_KERNEL,
+						&ha->sf_init_cb_dma);
+		if (!ha->sf_init_cb)
+			goto fail_sf_init_cb;
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0199,
+			   "sf_init_cb=%p.\n", ha->sf_init_cb);
+	}
+
+
+	/* Get consistent memory allocated for Async Port-Database. */
+	if (!IS_FWI2_CAPABLE(ha)) {
+		ha->async_pd = dma_pool_alloc(ha->s_dma_pool, GFP_KERNEL,
+			&ha->async_pd_dma);
+		if (!ha->async_pd)
+			goto fail_async_pd;
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x002f,
+		    "async_pd=%p.\n", ha->async_pd);
+	}
+
+	INIT_LIST_HEAD(&ha->vp_list);
+
+	/* Allocate memory for our loop_id bitmap */
+	ha->loop_id_map = kcalloc(BITS_TO_LONGS(LOOPID_MAP_SIZE),
+				  sizeof(long),
+				  GFP_KERNEL);
+	if (!ha->loop_id_map)
+		goto fail_loop_id_map;
+	else {
+		qla2x00_set_reserved_loop_ids(ha);
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0123,
+		    "loop_id_map=%p.\n", ha->loop_id_map);
+	}
+
+	ha->sfp_data = dma_alloc_coherent(&ha->pdev->dev,
+	    SFP_DEV_SIZE, &ha->sfp_data_dma, GFP_KERNEL);
+	if (!ha->sfp_data) {
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x011b,
+		    "Unable to allocate memory for SFP read-data.\n");
+		goto fail_sfp_data;
+	}
+
+	ha->flt = dma_alloc_coherent(&ha->pdev->dev,
+	    sizeof(struct qla_flt_header) + FLT_REGIONS_SIZE, &ha->flt_dma,
+	    GFP_KERNEL);
+	if (!ha->flt) {
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x011b,
+		    "Unable to allocate memory for FLT.\n");
+		goto fail_flt_buffer;
+	}
+
+	/* allocate the purex dma pool */
+	ha->purex_dma_pool = dma_pool_create(name, &ha->pdev->dev,
+	    ELS_MAX_PAYLOAD, 8, 0);
+
+	if (!ha->purex_dma_pool) {
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x011b,
+		    "Unable to allocate purex_dma_pool.\n");
+		goto fail_flt;
+	}
+
+	ha->elsrej.size = sizeof(struct fc_els_ls_rjt) + 16;
+	ha->elsrej.c = dma_alloc_coherent(&ha->pdev->dev,
+					  ha->elsrej.size,
+					  &ha->elsrej.cdma,
+					  GFP_KERNEL);
+	if (!ha->elsrej.c) {
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0xffff,
+		    "Alloc failed for els reject cmd.\n");
+		goto fail_elsrej;
+	}
+	ha->elsrej.c->er_cmd = ELS_LS_RJT;
+	ha->elsrej.c->er_reason = ELS_RJT_LOGIC;
+	ha->elsrej.c->er_explan = ELS_EXPL_UNAB_DATA;
+
+	ha->lsrjt.size = sizeof(struct fcnvme_ls_rjt);
+	ha->lsrjt.c = dma_alloc_coherent(&ha->pdev->dev, ha->lsrjt.size,
+			&ha->lsrjt.cdma, GFP_KERNEL);
+	if (!ha->lsrjt.c) {
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0xffff,
+			   "Alloc failed for nvme fc reject cmd.\n");
+		goto fail_lsrjt;
+	}
+
+	return 0;
+
+fail_lsrjt:
+	dma_free_coherent(&ha->pdev->dev, ha->elsrej.size,
+			  ha->elsrej.c, ha->elsrej.cdma);
+fail_elsrej:
+	dma_pool_destroy(ha->purex_dma_pool);
+fail_flt:
+	dma_free_coherent(&ha->pdev->dev, SFP_DEV_SIZE,
+	    ha->flt, ha->flt_dma);
+
+fail_flt_buffer:
+	dma_free_coherent(&ha->pdev->dev, SFP_DEV_SIZE,
+	    ha->sfp_data, ha->sfp_data_dma);
+fail_sfp_data:
+	kfree(ha->loop_id_map);
+fail_loop_id_map:
+	dma_pool_free(ha->s_dma_pool, ha->async_pd, ha->async_pd_dma);
+fail_async_pd:
+	dma_pool_free(ha->s_dma_pool, ha->sf_init_cb, ha->sf_init_cb_dma);
+fail_sf_init_cb:
+	dma_pool_free(ha->s_dma_pool, ha->ex_init_cb, ha->ex_init_cb_dma);
+fail_ex_init_cb:
+	kfree(ha->npiv_info);
+fail_npiv_info:
+	dma_free_coherent(&ha->pdev->dev, ((*rsp)->length + 1) *
+		sizeof(response_t), (*rsp)->ring, (*rsp)->dma);
+	(*rsp)->ring = NULL;
+	(*rsp)->dma = 0;
+fail_rsp_ring:
+	kfree(*rsp);
+	*rsp = NULL;
+fail_rsp:
+	dma_free_coherent(&ha->pdev->dev, ((*req)->length + 1) *
+		sizeof(request_t), (*req)->ring, (*req)->dma);
+	(*req)->ring = NULL;
+	(*req)->dma = 0;
+fail_req_ring:
+	kfree(*req);
+	*req = NULL;
+fail_req:
+	dma_free_coherent(&ha->pdev->dev, sizeof(struct ct_sns_pkt),
+		ha->ct_sns, ha->ct_sns_dma);
+	ha->ct_sns = NULL;
+	ha->ct_sns_dma = 0;
+fail_free_ms_iocb:
+	dma_pool_free(ha->s_dma_pool, ha->ms_iocb, ha->ms_iocb_dma);
+	ha->ms_iocb = NULL;
+	ha->ms_iocb_dma = 0;
+
+	if (ha->sns_cmd)
+		dma_free_coherent(&ha->pdev->dev, sizeof(struct sns_cmd_pkt),
+		    ha->sns_cmd, ha->sns_cmd_dma);
+fail_dma_pool:
+	if (ql2xenabledif) {
+		struct dsd_dma *dsd, *nxt;
+
+		list_for_each_entry_safe(dsd, nxt, &ha->pool.unusable.head,
+		    list) {
+			list_del(&dsd->list);
+			dma_pool_free(ha->dif_bundl_pool, dsd->dsd_addr,
+			    dsd->dsd_list_dma);
+			ha->dif_bundle_dma_allocs--;
+			kfree(dsd);
+			ha->dif_bundle_kallocs--;
+			ha->pool.unusable.count--;
+		}
+		dma_pool_destroy(ha->dif_bundl_pool);
+		ha->dif_bundl_pool = NULL;
+	}
+
+fail_dif_bundl_dma_pool:
+	if (IS_QLA82XX(ha) || ql2xenabledif) {
+		dma_pool_destroy(ha->fcp_cmnd_dma_pool);
+		ha->fcp_cmnd_dma_pool = NULL;
+	}
+fail_dl_dma_pool:
+	if (IS_QLA82XX(ha) || ql2xenabledif) {
+		dma_pool_destroy(ha->dl_dma_pool);
+		ha->dl_dma_pool = NULL;
+	}
+fail_s_dma_pool:
+	dma_pool_destroy(ha->s_dma_pool);
+	ha->s_dma_pool = NULL;
+fail_free_nvram:
+	kfree(ha->nvram);
+	ha->nvram = NULL;
+fail_free_ctx_mempool:
+	mempool_destroy(ha->ctx_mempool);
+	ha->ctx_mempool = NULL;
+fail_free_srb_mempool:
+	mempool_destroy(ha->srb_mempool);
+	ha->srb_mempool = NULL;
+fail_free_gid_list:
+	dma_free_coherent(&ha->pdev->dev, qla2x00_gid_list_size(ha),
+	ha->gid_list,
+	ha->gid_list_dma);
+	ha->gid_list = NULL;
+	ha->gid_list_dma = 0;
+fail_free_tgt_mem:
+	qlt_mem_free(ha);
+fail_free_btree:
+	btree_destroy32(&ha->host_map);
+fail_free_init_cb:
+	dma_free_coherent(&ha->pdev->dev, ha->init_cb_size, ha->init_cb,
+	ha->init_cb_dma);
+	ha->init_cb = NULL;
+	ha->init_cb_dma = 0;
+fail_free_vp_map:
+	kfree(ha->vp_map);
+fail:
+	ql_log(ql_log_fatal, NULL, 0x0030,
+	    "Memory allocation failure.\n");
+	return -ENOMEM;
+}
+
+
+
+The corrected function:
+static int
+qla2x00_mem_alloc(struct qla_hw_data *ha, uint16_t req_len, uint16_t rsp_len,
+	struct req_que **req, struct rsp_que **rsp)
+{
+	char	name[16];
+	int rc;
+
+	if (QLA_TGT_MODE_ENABLED() || EDIF_CAP(ha)) {
+		ha->vp_map = kcalloc(MAX_MULTI_ID_FABRIC, sizeof(struct qla_vp_map), GFP_KERNEL);
+		if (!ha->vp_map)
+			goto fail;
+	}
+
+	ha->init_cb = dma_alloc_coherent(&ha->pdev->dev, ha->init_cb_size,
+		&ha->init_cb_dma, GFP_KERNEL);
+	if (!ha->init_cb)
+		goto fail_free_vp_map;
+
+	rc = btree_init32(&ha->host_map);
+	if (rc)
+		goto fail_free_init_cb;
+
+	if (qlt_mem_alloc(ha) < 0)
+		goto fail_free_btree;
+
+	ha->gid_list = dma_alloc_coherent(&ha->pdev->dev,
+		qla2x00_gid_list_size(ha), &ha->gid_list_dma, GFP_KERNEL);
+	if (!ha->gid_list)
+		goto fail_free_tgt_mem;
+
+	ha->srb_mempool = mempool_create_slab_pool(SRB_MIN_REQ, srb_cachep);
+	if (!ha->srb_mempool)
+		goto fail_free_gid_list;
+
+	if (IS_P3P_TYPE(ha) || IS_QLA27XX(ha) || (ql2xsecenable && IS_QLA28XX(ha))) {
+		/* Allocate cache for CT6 Ctx. */
+		if (!ctx_cachep) {
+			ctx_cachep = kmem_cache_create("qla2xxx_ctx",
+				sizeof(struct ct6_dsd), 0,
+				SLAB_HWCACHE_ALIGN, NULL);
+			if (!ctx_cachep)
+				goto fail_free_srb_mempool;
+		}
+		ha->ctx_mempool = mempool_create_slab_pool(SRB_MIN_REQ,
+			ctx_cachep);
+		if (!ha->ctx_mempool)
+			goto fail_free_srb_mempool;
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0021,
+		    "ctx_cachep=%p ctx_mempool=%p.\n",
+		    ctx_cachep, ha->ctx_mempool);
+	}
+
+	/* Get memory for cached NVRAM */
+	ha->nvram = kzalloc(MAX_NVRAM_SIZE, GFP_KERNEL);
+	if (!ha->nvram)
+		goto fail_free_ctx_mempool;
+
+	snprintf(name, sizeof(name), "%s_%d", QLA2XXX_DRIVER_NAME,
+		ha->pdev->device);
+	ha->s_dma_pool = dma_pool_create(name, &ha->pdev->dev,
+		DMA_POOL_SIZE, 8, 0);
+	if (!ha->s_dma_pool)
+		goto fail_free_nvram;
+
+	ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0022,
+	    "init_cb=%p gid_list=%p, srb_mempool=%p s_dma_pool=%p.\n",
+	    ha->init_cb, ha->gid_list, ha->srb_mempool, ha->s_dma_pool);
+
+	if (IS_P3P_TYPE(ha) || ql2xenabledif || (IS_QLA28XX(ha) && ql2xsecenable)) {
+		ha->dl_dma_pool = dma_pool_create(name, &ha->pdev->dev,
+			DSD_LIST_DMA_POOL_SIZE, 8, 0);
+		if (!ha->dl_dma_pool) {
+			ql_log_pci(ql_log_fatal, ha->pdev, 0x0023,
+			    "Failed to allocate memory for dl_dma_pool.\n");
+			goto fail_s_dma_pool;
+		}
+
+		ha->fcp_cmnd_dma_pool = dma_pool_create(name, &ha->pdev->dev,
+			FCP_CMND_DMA_POOL_SIZE, 8, 0);
+		if (!ha->fcp_cmnd_dma_pool) {
+			ql_log_pci(ql_log_fatal, ha->pdev, 0x0024,
+			    "Failed to allocate memory for fcp_cmnd_dma_pool.\n");
+			goto fail_dl_dma_pool;
+		}
+
+		if (ql2xenabledif) {
+			u64 bufsize = DIF_BUNDLING_DMA_POOL_SIZE;
+			struct dsd_dma *dsd, *nxt;
+			uint i;
+			/* Creata a DMA pool of buffers for DIF bundling */
+			ha->dif_bundl_pool = dma_pool_create(name,
+			    &ha->pdev->dev, DIF_BUNDLING_DMA_POOL_SIZE, 8, 0);
+			if (!ha->dif_bundl_pool) {
+				ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0024,
+				    "%s: failed create dif_bundl_pool\n",
+				    __func__);
+				goto fail_dif_bundl_dma_pool;
+			}
+
+			INIT_LIST_HEAD(&ha->pool.good.head);
+			INIT_LIST_HEAD(&ha->pool.unusable.head);
+			ha->pool.good.count = 0;
+			ha->pool.unusable.count = 0;
+			for (i = 0; i < 128; i++) {
+				dsd = kzalloc(sizeof(*dsd), GFP_ATOMIC);
+				if (!dsd) {
+					ql_dbg_pci(ql_dbg_init, ha->pdev,
+					    0xe0ee, "%s: failed alloc dsd\n",
+					    __func__);
+					return -ENOMEM;
+				}
+				ha->dif_bundle_kallocs++;
+
+				dsd->dsd_addr = dma_pool_alloc(
+				    ha->dif_bundl_pool, GFP_ATOMIC,
+				    &dsd->dsd_list_dma);
+				if (!dsd->dsd_addr) {
+					ql_dbg_pci(ql_dbg_init, ha->pdev,
+					    0xe0ee,
+					    "%s: failed alloc ->dsd_addr\n",
+					    __func__);
+					kfree(dsd);
+					ha->dif_bundle_kallocs--;
+					continue;
+				}
+				ha->dif_bundle_dma_allocs++;
+
+				/*
+				 * if DMA buffer crosses 4G boundary,
+				 * put it on bad list
+				 */
+				if (MSD(dsd->dsd_list_dma) ^
+				    MSD(dsd->dsd_list_dma + bufsize)) {
+					list_add_tail(&dsd->list,
+					    &ha->pool.unusable.head);
+					ha->pool.unusable.count++;
+				} else {
+					list_add_tail(&dsd->list,
+					    &ha->pool.good.head);
+					ha->pool.good.count++;
+				}
+			}
+
+			/* return the good ones back to the pool */
+			list_for_each_entry_safe(dsd, nxt,
+			    &ha->pool.good.head, list) {
+				list_del(&dsd->list);
+				dma_pool_free(ha->dif_bundl_pool,
+				    dsd->dsd_addr, dsd->dsd_list_dma);
+				ha->dif_bundle_dma_allocs--;
+				kfree(dsd);
+				ha->dif_bundle_kallocs--;
+			}
+
+			ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0024,
+			    "%s: dif dma pool (good=%u unusable=%u)\n",
+			    __func__, ha->pool.good.count,
+			    ha->pool.unusable.count);
+		}
+
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0025,
+		    "dl_dma_pool=%p fcp_cmnd_dma_pool=%p dif_bundl_pool=%p.\n",
+		    ha->dl_dma_pool, ha->fcp_cmnd_dma_pool,
+		    ha->dif_bundl_pool);
+	}
+
+	/* Allocate memory for SNS commands */
+	if (IS_QLA2100(ha) || IS_QLA2200(ha)) {
+	/* Get consistent memory allocated for SNS commands */
+		ha->sns_cmd = dma_alloc_coherent(&ha->pdev->dev,
+		sizeof(struct sns_cmd_pkt), &ha->sns_cmd_dma, GFP_KERNEL);
+		if (!ha->sns_cmd)
+			goto fail_dma_pool;
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0026,
+		    "sns_cmd: %p.\n", ha->sns_cmd);
+	} else {
+	/* Get consistent memory allocated for MS IOCB */
+		ha->ms_iocb = dma_pool_alloc(ha->s_dma_pool, GFP_KERNEL,
+			&ha->ms_iocb_dma);
+		if (!ha->ms_iocb)
+			goto fail_dma_pool;
+	/* Get consistent memory allocated for CT SNS commands */
+		ha->ct_sns = dma_alloc_coherent(&ha->pdev->dev,
+			sizeof(struct ct_sns_pkt), &ha->ct_sns_dma, GFP_KERNEL);
+		if (!ha->ct_sns)
+			goto fail_free_ms_iocb;
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0027,
+		    "ms_iocb=%p ct_sns=%p.\n",
+		    ha->ms_iocb, ha->ct_sns);
+	}
+
+	/* Allocate memory for request ring */
+	*req = kzalloc(sizeof(struct req_que), GFP_KERNEL);
+	if (!*req) {
+		ql_log_pci(ql_log_fatal, ha->pdev, 0x0028,
+		    "Failed to allocate memory for req.\n");
+		goto fail_req;
+	}
+	(*req)->length = req_len;
+	(*req)->ring = dma_alloc_coherent(&ha->pdev->dev,
+		((*req)->length + 1) * sizeof(request_t),
+		&(*req)->dma, GFP_KERNEL);
+	if (!(*req)->ring) {
+		ql_log_pci(ql_log_fatal, ha->pdev, 0x0029,
+		    "Failed to allocate memory for req_ring.\n");
+		goto fail_req_ring;
+	}
+	/* Allocate memory for response ring */
+	*rsp = kzalloc(sizeof(struct rsp_que), GFP_KERNEL);
+	if (!*rsp) {
+		ql_log_pci(ql_log_fatal, ha->pdev, 0x002a,
+		    "Failed to allocate memory for rsp.\n");
+		goto fail_rsp;
+	}
+	(*rsp)->hw = ha;
+	(*rsp)->length = rsp_len;
+	(*rsp)->ring = dma_alloc_coherent(&ha->pdev->dev,
+		((*rsp)->length + 1) * sizeof(response_t),
+		&(*rsp)->dma, GFP_KERNEL);
+	if (!(*rsp)->ring) {
+		ql_log_pci(ql_log_fatal, ha->pdev, 0x002b,
+		    "Failed to allocate memory for rsp_ring.\n");
+		goto fail_rsp_ring;
+	}
+	(*req)->rsp = *rsp;
+	(*rsp)->req = *req;
+	ql_dbg_pci(ql_dbg_init, ha->pdev, 0x002c,
+	    "req=%p req->length=%d req->ring=%p rsp=%p "
+	    "rsp->length=%d rsp->ring=%p.\n",
+	    *req, (*req)->length, (*req)->ring, *rsp, (*rsp)->length,
+	    (*rsp)->ring);
+	/* Allocate memory for NVRAM data for vports */
+	if (ha->nvram_npiv_size) {
+		ha->npiv_info = kcalloc(ha->nvram_npiv_size,
+					sizeof(struct qla_npiv_entry),
+					GFP_KERNEL);
+		if (!ha->npiv_info) {
+			ql_log_pci(ql_log_fatal, ha->pdev, 0x002d,
+			    "Failed to allocate memory for npiv_info.\n");
+			goto fail_npiv_info;
+		}
+	} else
+		ha->npiv_info = NULL;
+
+	/* Get consistent memory allocated for EX-INIT-CB. */
+	if (IS_CNA_CAPABLE(ha) || IS_QLA2031(ha) || IS_QLA27XX(ha) ||
+	    IS_QLA28XX(ha)) {
+		ha->ex_init_cb = dma_pool_alloc(ha->s_dma_pool, GFP_KERNEL,
+		    &ha->ex_init_cb_dma);
+		if (!ha->ex_init_cb)
+			goto fail_ex_init_cb;
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x002e,
+		    "ex_init_cb=%p.\n", ha->ex_init_cb);
+	}
+
+	/* Get consistent memory allocated for Special Features-CB. */
+	if (IS_QLA27XX(ha) || IS_QLA28XX(ha)) {
+		ha->sf_init_cb = dma_pool_zalloc(ha->s_dma_pool, GFP_KERNEL,
+						&ha->sf_init_cb_dma);
+		if (!ha->sf_init_cb)
+			goto fail_sf_init_cb;
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0199,
+			   "sf_init_cb=%p.\n", ha->sf_init_cb);
+	}
+
+
+	/* Get consistent memory allocated for Async Port-Database. */
+	if (!IS_FWI2_CAPABLE(ha)) {
+		ha->async_pd = dma_pool_alloc(ha->s_dma_pool, GFP_KERNEL,
+			&ha->async_pd_dma);
+		if (!ha->async_pd)
+			goto fail_async_pd;
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x002f,
+		    "async_pd=%p.\n", ha->async_pd);
+	}
+
+	INIT_LIST_HEAD(&ha->vp_list);
+
+	/* Allocate memory for our loop_id bitmap */
+	ha->loop_id_map = kcalloc(BITS_TO_LONGS(LOOPID_MAP_SIZE),
+				  sizeof(long),
+				  GFP_KERNEL);
+	if (!ha->loop_id_map)
+		goto fail_loop_id_map;
+	else {
+		qla2x00_set_reserved_loop_ids(ha);
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x0123,
+		    "loop_id_map=%p.\n", ha->loop_id_map);
+	}
+
+	ha->sfp_data = dma_alloc_coherent(&ha->pdev->dev,
+	    SFP_DEV_SIZE, &ha->sfp_data_dma, GFP_KERNEL);
+	if (!ha->sfp_data) {
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x011b,
+		    "Unable to allocate memory for SFP read-data.\n");
+		goto fail_sfp_data;
+	}
+
+	ha->flt = dma_alloc_coherent(&ha->pdev->dev,
+	    sizeof(struct qla_flt_header) + FLT_REGIONS_SIZE, &ha->flt_dma,
+	    GFP_KERNEL);
+	if (!ha->flt) {
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x011b,
+		    "Unable to allocate memory for FLT.\n");
+		goto fail_flt_buffer;
+	}
+
+	/* allocate the purex dma pool */
+	ha->purex_dma_pool = dma_pool_create(name, &ha->pdev->dev,
+	    ELS_MAX_PAYLOAD, 8, 0);
+
+	if (!ha->purex_dma_pool) {
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0x011b,
+		    "Unable to allocate purex_dma_pool.\n");
+		goto fail_flt;
+	}
+
+	ha->elsrej.size = sizeof(struct fc_els_ls_rjt) + 16;
+	ha->elsrej.c = dma_alloc_coherent(&ha->pdev->dev,
+					  ha->elsrej.size,
+					  &ha->elsrej.cdma,
+					  GFP_KERNEL);
+	if (!ha->elsrej.c) {
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0xffff,
+		    "Alloc failed for els reject cmd.\n");
+		goto fail_elsrej;
+	}
+	ha->elsrej.c->er_cmd = ELS_LS_RJT;
+	ha->elsrej.c->er_reason = ELS_RJT_LOGIC;
+	ha->elsrej.c->er_explan = ELS_EXPL_UNAB_DATA;
+
+	ha->lsrjt.size = sizeof(struct fcnvme_ls_rjt);
+	ha->lsrjt.c = dma_alloc_coherent(&ha->pdev->dev, ha->lsrjt.size,
+			&ha->lsrjt.cdma, GFP_KERNEL);
+	if (!ha->lsrjt.c) {
+		ql_dbg_pci(ql_dbg_init, ha->pdev, 0xffff,
+			   "Alloc failed for nvme fc reject cmd.\n");
+		goto fail_lsrjt;
+	}
+
+	return 0;
+
+fail_lsrjt:
+	dma_free_coherent(&ha->pdev->dev, ha->elsrej.size,
+			  ha->elsrej.c, ha->elsrej.cdma);
+fail_elsrej:
+	dma_pool_destroy(ha->purex_dma_pool);
+fail_flt:
+	dma_free_coherent(&ha->pdev->dev, SFP_DEV_SIZE,
+	    ha->flt, ha->flt_dma);
+
+fail_flt_buffer:
+	dma_free_coherent(&ha->pdev->dev, SFP_DEV_SIZE,
+	    ha->sfp_data, ha->sfp_data_dma);
+fail_sfp_data:
+	kfree(ha->loop_id_map);
+fail_loop_id_map:
+	dma_pool_free(ha->s_dma_pool, ha->async_pd, ha->async_pd_dma);
+fail_async_pd:
+	dma_pool_free(ha->s_dma_pool, ha->sf_init_cb, ha->sf_init_cb_dma);
+fail_sf_init_cb:
+	dma_pool_free(ha->s_dma_pool, ha->ex_init_cb, ha->ex_init_cb_dma);
+fail_ex_init_cb:
+	kfree(ha->npiv_info);
+fail_npiv_info:
+	dma_free_coherent(&ha->pdev->dev, ((*rsp)->length + 1) *
+		sizeof(response_t), (*rsp)->ring, (*rsp)->dma);
+	(*rsp)->ring = NULL;
+	(*rsp)->dma = 0;
+fail_rsp_ring:
+	kfree(*rsp);
+	*rsp = NULL;
+fail_rsp:
+	dma_free_coherent(&ha->pdev->dev, ((*req)->length + 1) *
+		sizeof(request_t), (*req)->ring, (*req)->dma);
+	(*req)->ring = NULL;
+	(*req)->dma = 0;
+fail_req_ring:
+	kfree(*req);
+	*req = NULL;
+fail_req:
+	dma_free_coherent(&ha->pdev->dev, sizeof(struct ct_sns_pkt),
+		ha->ct_sns, ha->ct_sns_dma);
+	ha->ct_sns = NULL;
+	ha->ct_sns_dma = 0;
+fail_free_ms_iocb:
+	dma_pool_free(ha->s_dma_pool, ha->ms_iocb, ha->ms_iocb_dma);
+	ha->ms_iocb = NULL;
+	ha->ms_iocb_dma = 0;
+
+	if (ha->sns_cmd)
+		dma_free_coherent(&ha->pdev->dev, sizeof(struct sns_cmd_pkt),
+		    ha->sns_cmd, ha->sns_cmd_dma);
+fail_dma_pool:
+	if (ql2xenabledif) {
+		struct dsd_dma *dsd, *nxt;
+
+		list_for_each_entry_safe(dsd, nxt, &ha->pool.unusable.head,
+		    list) {
+			list_del(&dsd->list);
+			dma_pool_free(ha->dif_bundl_pool, dsd->dsd_addr,
+			    dsd->dsd_list_dma);
+			ha->dif_bundle_dma_allocs--;
+			kfree(dsd);
+			ha->dif_bundle_kallocs--;
+			ha->pool.unusable.count--;
+		}
+		dma_pool_destroy(ha->dif_bundl_pool);
+		ha->dif_bundl_pool = NULL;
+	}
+
+fail_dif_bundl_dma_pool:
+	if (IS_QLA82XX(ha) || ql2xenabledif) {
+		dma_pool_destroy(ha->fcp_cmnd_dma_pool);
+		ha->fcp_cmnd_dma_pool = NULL;
+	}
+fail_dl_dma_pool:
+	if (IS_QLA82XX(ha) || ql2xenabledif) {
+		dma_pool_destroy(ha->dl_dma_pool);
+		ha->dl_dma_pool = NULL;
+	}
+fail_s_dma_pool:
+	dma_pool_destroy(ha->s_dma_pool);
+	ha->s_dma_pool = NULL;
+fail_free_nvram:
+	kfree(ha->nvram);
+	ha->nvram = NULL;
+fail_free_ctx_mempool:
+	mempool_destroy(ha->ctx_mempool);
+	ha->ctx_mempool = NULL;
+fail_free_srb_mempool:
+	mempool_destroy(ha->srb_mempool);
+	ha->srb_mempool = NULL;
+fail_free_gid_list:
+	dma_free_coherent(&ha->pdev->dev, qla2x00_gid_list_size(ha),
+	ha->gid_list,
+	ha->gid_list_dma);
+	ha->gid_list = NULL;
+	ha->gid_list_dma = 0;
+fail_free_tgt_mem:
+	qlt_mem_free(ha);
+fail_free_btree:
+	btree_destroy32(&ha->host_map);
+fail_free_init_cb:
+	dma_free_coherent(&ha->pdev->dev, ha->init_cb_size, ha->init_cb,
+	ha->init_cb_dma);
+	ha->init_cb = NULL;
+	ha->init_cb_dma = 0;
+fail_free_vp_map:
+	kfree(ha->vp_map);
+	ha->vp_map = NULL;
+fail:
+	ql_log(ql_log_fatal, NULL, 0x0030,
+	    "Memory allocation failure.\n");
+	return -ENOMEM;
+}

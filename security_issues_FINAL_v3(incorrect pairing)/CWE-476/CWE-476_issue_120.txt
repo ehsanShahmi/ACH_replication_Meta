@@ -1,0 +1,165 @@
+The vulnerable issue:
+ice: Add check for kzalloc
+
+Add the check for the return value of kzalloc in order to avoid
+NULL pointer dereference.
+Moreover, use the goto-label to share the clean code.
+
+Fixes: d6b98c8d242a ("ice: add write functionality for GNSS TTY")
+Signed-off-by: Jiasheng Jiang <jiasheng@iscas.ac.cn>
+Reviewed-by: Jiri Pirko <jiri@nvidia.com>
+Tested-by: Gurucharan G <gurucharanx.g@intel.com> (A Contingent worker at Intel)
+Signed-off-by: Tony Nguyen <anthony.l.nguyen@intel.com>
+
+
+
+The vulnerable function:
+static struct tty_driver *ice_gnss_create_tty_driver(struct ice_pf *pf)
+{
+	struct device *dev = ice_pf_to_dev(pf);
+	const int ICE_TTYDRV_NAME_MAX = 14;
+	struct tty_driver *tty_driver;
+	char *ttydrv_name;
+	unsigned int i;
+	int err;
+
+	tty_driver = tty_alloc_driver(ICE_GNSS_TTY_MINOR_DEVICES,
+				      TTY_DRIVER_REAL_RAW);
+	if (IS_ERR(tty_driver)) {
+		dev_err(dev, "Failed to allocate memory for GNSS TTY\n");
+		return NULL;
+	}
+
+	ttydrv_name = kzalloc(ICE_TTYDRV_NAME_MAX, GFP_KERNEL);
+	if (!ttydrv_name) {
+		tty_driver_kref_put(tty_driver);
+		return NULL;
+	}
+
+	snprintf(ttydrv_name, ICE_TTYDRV_NAME_MAX, "ttyGNSS_%02x%02x_",
+		 (u8)pf->pdev->bus->number, (u8)PCI_SLOT(pf->pdev->devfn));
+
+	/* Initialize the tty driver*/
+	tty_driver->owner = THIS_MODULE;
+	tty_driver->driver_name = dev_driver_string(dev);
+	tty_driver->name = (const char *)ttydrv_name;
+	tty_driver->type = TTY_DRIVER_TYPE_SERIAL;
+	tty_driver->subtype = SERIAL_TYPE_NORMAL;
+	tty_driver->init_termios = tty_std_termios;
+	tty_driver->init_termios.c_iflag &= ~INLCR;
+	tty_driver->init_termios.c_iflag |= IGNCR;
+	tty_driver->init_termios.c_oflag &= ~OPOST;
+	tty_driver->init_termios.c_lflag &= ~ICANON;
+	tty_driver->init_termios.c_cflag &= ~(CSIZE | CBAUD | CBAUDEX);
+	/* baud rate 9600 */
+	tty_termios_encode_baud_rate(&tty_driver->init_termios, 9600, 9600);
+	tty_driver->driver_state = pf;
+	tty_set_operations(tty_driver, &tty_gps_ops);
+
+	for (i = 0; i < ICE_GNSS_TTY_MINOR_DEVICES; i++) {
+		pf->gnss_tty_port[i] = kzalloc(sizeof(*pf->gnss_tty_port[i]),
+					       GFP_KERNEL);
+		pf->gnss_serial[i] = NULL;
+
+		tty_port_init(pf->gnss_tty_port[i]);
+		tty_port_link_device(pf->gnss_tty_port[i], tty_driver, i);
+	}
+
+	err = tty_register_driver(tty_driver);
+	if (err) {
+		dev_err(dev, "Failed to register TTY driver err=%d\n", err);
+
+		for (i = 0; i < ICE_GNSS_TTY_MINOR_DEVICES; i++) {
+			tty_port_destroy(pf->gnss_tty_port[i]);
+			kfree(pf->gnss_tty_port[i]);
+		}
+		kfree(ttydrv_name);
+		tty_driver_kref_put(pf->ice_gnss_tty_driver);
+
+		return NULL;
+	}
+
+	for (i = 0; i < ICE_GNSS_TTY_MINOR_DEVICES; i++)
+		dev_info(dev, "%s%d registered\n", ttydrv_name, i);
+
+	return tty_driver;
+}
+
+
+
+The corrected function:
+static struct tty_driver *ice_gnss_create_tty_driver(struct ice_pf *pf)
+{
+	struct device *dev = ice_pf_to_dev(pf);
+	const int ICE_TTYDRV_NAME_MAX = 14;
+	struct tty_driver *tty_driver;
+	char *ttydrv_name;
+	unsigned int i;
+	int err;
+
+	tty_driver = tty_alloc_driver(ICE_GNSS_TTY_MINOR_DEVICES,
+				      TTY_DRIVER_REAL_RAW);
+	if (IS_ERR(tty_driver)) {
+		dev_err(dev, "Failed to allocate memory for GNSS TTY\n");
+		return NULL;
+	}
+
+	ttydrv_name = kzalloc(ICE_TTYDRV_NAME_MAX, GFP_KERNEL);
+	if (!ttydrv_name) {
+		tty_driver_kref_put(tty_driver);
+		return NULL;
+	}
+
+	snprintf(ttydrv_name, ICE_TTYDRV_NAME_MAX, "ttyGNSS_%02x%02x_",
+		 (u8)pf->pdev->bus->number, (u8)PCI_SLOT(pf->pdev->devfn));
+
+	/* Initialize the tty driver*/
+	tty_driver->owner = THIS_MODULE;
+	tty_driver->driver_name = dev_driver_string(dev);
+	tty_driver->name = (const char *)ttydrv_name;
+	tty_driver->type = TTY_DRIVER_TYPE_SERIAL;
+	tty_driver->subtype = SERIAL_TYPE_NORMAL;
+	tty_driver->init_termios = tty_std_termios;
+	tty_driver->init_termios.c_iflag &= ~INLCR;
+	tty_driver->init_termios.c_iflag |= IGNCR;
+	tty_driver->init_termios.c_oflag &= ~OPOST;
+	tty_driver->init_termios.c_lflag &= ~ICANON;
+	tty_driver->init_termios.c_cflag &= ~(CSIZE | CBAUD | CBAUDEX);
+	/* baud rate 9600 */
+	tty_termios_encode_baud_rate(&tty_driver->init_termios, 9600, 9600);
+	tty_driver->driver_state = pf;
+	tty_set_operations(tty_driver, &tty_gps_ops);
+
+	for (i = 0; i < ICE_GNSS_TTY_MINOR_DEVICES; i++) {
+		pf->gnss_tty_port[i] = kzalloc(sizeof(*pf->gnss_tty_port[i]),
+					       GFP_KERNEL);
+		if (!pf->gnss_tty_port[i])
+			goto err_out;
+
+		pf->gnss_serial[i] = NULL;
+
+		tty_port_init(pf->gnss_tty_port[i]);
+		tty_port_link_device(pf->gnss_tty_port[i], tty_driver, i);
+	}
+
+	err = tty_register_driver(tty_driver);
+	if (err) {
+		dev_err(dev, "Failed to register TTY driver err=%d\n", err);
+		goto err_out;
+	}
+
+	for (i = 0; i < ICE_GNSS_TTY_MINOR_DEVICES; i++)
+		dev_info(dev, "%s%d registered\n", ttydrv_name, i);
+
+	return tty_driver;
+
+err_out:
+	while (i--) {
+		tty_port_destroy(pf->gnss_tty_port[i]);
+		kfree(pf->gnss_tty_port[i]);
+	}
+	kfree(ttydrv_name);
+	tty_driver_kref_put(pf->ice_gnss_tty_driver);
+
+	return NULL;
+}

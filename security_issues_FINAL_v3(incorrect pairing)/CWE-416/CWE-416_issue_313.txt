@@ -1,0 +1,158 @@
+The vulnerable issue:
+tracing: Have format file honor EVENT_FILE_FL_FREED
+
+When eventfs was introduced, special care had to be done to coordinate the
+freeing of the file meta data with the files that are exposed to user
+space. The file meta data would have a ref count that is set when the file
+is created and would be decremented and freed after the last user that
+opened the file closed it. When the file meta data was to be freed, it
+would set a flag (EVENT_FILE_FL_FREED) to denote that the file is freed,
+and any new references made (like new opens or reads) would fail as it is
+marked freed. This allowed other meta data to be freed after this flag was
+set (under the event_mutex).
+
+All the files that were dynamically created in the events directory had a
+pointer to the file meta data and would call event_release() when the last
+reference to the user space file was closed. This would be the time that it
+is safe to free the file meta data.
+
+A shortcut was made for the "format" file. It's i_private would point to
+the "call" entry directly and not point to the file's meta data. This is
+because all format files are the same for the same "call", so it was
+thought there was no reason to differentiate them.  The other files
+maintain state (like the "enable", "trigger", etc). But this meant if the
+file were to disappear, the "format" file would be unaware of it.
+
+This caused a race that could be trigger via the user_events test (that
+would create dynamic events and free them), and running a loop that would
+read the user_events format files:
+
+In one console run:
+
+ # cd tools/testing/selftests/user_events
+ # while true; do ./ftrace_test; done
+
+And in another console run:
+
+ # cd /sys/kernel/tracing/
+ # while true; do cat events/user_events/__test_event/format; done 2>/dev/null
+
+With KASAN memory checking, it would trigger a use-after-free bug report
+(which was a real bug). This was because the format file was not checking
+the file's meta data flag "EVENT_FILE_FL_FREED", so it would access the
+event that the file meta data pointed to after the event was freed.
+
+After inspection, there are other locations that were found to not check
+the EVENT_FILE_FL_FREED flag when accessing the trace_event_file. Add a
+new helper function: event_file_file() that will make sure that the
+event_mutex is held, and will return NULL if the trace_event_file has the
+EVENT_FILE_FL_FREED flag set. Have the first reference of the struct file
+pointer use event_file_file() and check for NULL. Later uses can still use
+the event_file_data() helper function if the event_mutex is still held and
+was not released since the event_file_file() call.
+
+Link: https://lore.kernel.org/all/20240719204701.1605950-1-minipli@grsecurity.net/
+
+Cc: stable@vger.kernel.org
+Cc: Masami Hiramatsu <mhiramat@kernel.org>
+Cc: Mathieu Desnoyers   <mathieu.desnoyers@efficios.com>
+Cc: Ajay Kaher <ajay.kaher@broadcom.com>
+Cc: Ilkka Naulapää    <digirigawa@gmail.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Al   Viro <viro@zeniv.linux.org.uk>
+Cc: Dan Carpenter   <dan.carpenter@linaro.org>
+Cc: Beau Belgrave <beaub@linux.microsoft.com>
+Cc: Florian Fainelli  <florian.fainelli@broadcom.com>
+Cc: Alexey Makhalov    <alexey.makhalov@broadcom.com>
+Cc: Vasavi Sirnapalli    <vasavi.sirnapalli@broadcom.com>
+Link: https://lore.kernel.org/20240730110657.3b69d3c1@gandalf.local.home
+Fixes: b63db58e2fa5d ("eventfs/tracing: Add callback for release of an eventfs_inode")
+Reported-by: Mathias Krause <minipli@grsecurity.net>
+Tested-by: Mathias Krause <minipli@grsecurity.net>
+Signed-off-by: Steven Rostedt (Google) <rostedt@goodmis.org>
+
+
+
+The vulnerable function:
+static ssize_t
+event_inject_write(struct file *filp, const char __user *ubuf, size_t cnt,
+		   loff_t *ppos)
+{
+	struct trace_event_call *call;
+	struct trace_event_file *file;
+	int err = -ENODEV, size;
+	void *entry = NULL;
+	char *buf;
+
+	if (cnt >= PAGE_SIZE)
+		return -EINVAL;
+
+	buf = memdup_user_nul(ubuf, cnt);
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
+	strim(buf);
+
+	mutex_lock(&event_mutex);
+	file = event_file_data(filp);
+	if (file) {
+		call = file->event_call;
+		size = parse_entry(buf, call, &entry);
+		if (size < 0)
+			err = size;
+		else
+			err = trace_inject_entry(file, entry, size);
+	}
+	mutex_unlock(&event_mutex);
+
+	kfree(entry);
+	kfree(buf);
+
+	if (err < 0)
+		return err;
+
+	*ppos += err;
+	return cnt;
+}
+
+
+
+The corrected function:
+static ssize_t
+event_inject_write(struct file *filp, const char __user *ubuf, size_t cnt,
+		   loff_t *ppos)
+{
+	struct trace_event_call *call;
+	struct trace_event_file *file;
+	int err = -ENODEV, size;
+	void *entry = NULL;
+	char *buf;
+
+	if (cnt >= PAGE_SIZE)
+		return -EINVAL;
+
+	buf = memdup_user_nul(ubuf, cnt);
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
+	strim(buf);
+
+	mutex_lock(&event_mutex);
+	file = event_file_file(filp);
+	if (file) {
+		call = file->event_call;
+		size = parse_entry(buf, call, &entry);
+		if (size < 0)
+			err = size;
+		else
+			err = trace_inject_entry(file, entry, size);
+	}
+	mutex_unlock(&event_mutex);
+
+	kfree(entry);
+	kfree(buf);
+
+	if (err < 0)
+		return err;
+
+	*ppos += err;
+	return cnt;
+}

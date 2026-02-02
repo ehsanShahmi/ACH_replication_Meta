@@ -1,0 +1,91 @@
+The vulnerable issue:
+perf: Fix event->ctx locking
+
+There have been a few reported issues wrt. the lack of locking around
+changing event->ctx. This patch tries to address those.
+
+It avoids the whole rwsem thing; and while it appears to work, please
+give it some thought in review.
+
+What I did fail at is sensible runtime checks on the use of
+event->ctx, the RCU use makes it very hard.
+
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Cc: Paul E. McKenney <paulmck@linux.vnet.ibm.com>
+Cc: Jiri Olsa <jolsa@redhat.com>
+Cc: Arnaldo Carvalho de Melo <acme@kernel.org>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Link: http://lkml.kernel.org/r/20150123125834.209535886@infradead.org
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+
+
+The vulnerable function:
+void perf_event_enable(struct perf_event *event)
+{
+	struct perf_event_context *ctx = event->ctx;
+	struct task_struct *task = ctx->task;
+
+	if (!task) {
+		/*
+		 * Enable the event on the cpu that it's on
+		 */
+		cpu_function_call(event->cpu, __perf_event_enable, event);
+		return;
+	}
+
+	raw_spin_lock_irq(&ctx->lock);
+	if (event->state >= PERF_EVENT_STATE_INACTIVE)
+		goto out;
+
+	/*
+	 * If the event is in error state, clear that first.
+	 * That way, if we see the event in error state below, we
+	 * know that it has gone back into error state, as distinct
+	 * from the task having been scheduled away before the
+	 * cross-call arrived.
+	 */
+	if (event->state == PERF_EVENT_STATE_ERROR)
+		event->state = PERF_EVENT_STATE_OFF;
+
+retry:
+	if (!ctx->is_active) {
+		__perf_event_mark_enabled(event);
+		goto out;
+	}
+
+	raw_spin_unlock_irq(&ctx->lock);
+
+	if (!task_function_call(task, __perf_event_enable, event))
+		return;
+
+	raw_spin_lock_irq(&ctx->lock);
+
+	/*
+	 * If the context is active and the event is still off,
+	 * we need to retry the cross-call.
+	 */
+	if (ctx->is_active && event->state == PERF_EVENT_STATE_OFF) {
+		/*
+		 * task could have been flipped by a concurrent
+		 * perf_event_context_sched_out()
+		 */
+		task = ctx->task;
+		goto retry;
+	}
+
+out:
+	raw_spin_unlock_irq(&ctx->lock);
+}
+
+
+
+The corrected function:
+void perf_event_enable(struct perf_event *event)
+{
+	struct perf_event_context *ctx;
+
+	ctx = perf_event_ctx_lock(event);
+	_perf_event_enable(event);
+	perf_event_ctx_unlock(event, ctx);
+}

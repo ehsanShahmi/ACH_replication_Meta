@@ -1,0 +1,78 @@
+The vulnerable issue:
+netlink: limit recursion depth in policy validation
+
+Now that we have nested policies, we can theoretically
+recurse forever parsing attributes if a (sub-)policy
+refers back to a higher level one. This is a situation
+that has happened in nl80211, and we've avoided it there
+by not linking it.
+
+Add some code to netlink parsing to limit recursion depth.
+
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static int nla_validate_array(const struct nlattr *head, int len, int maxtype,
+			      const struct nla_policy *policy,
+			      struct netlink_ext_ack *extack,
+			      unsigned int validate)
+{
+	const struct nlattr *entry;
+	int rem;
+
+	nla_for_each_attr(entry, head, len, rem) {
+		int ret;
+
+		if (nla_len(entry) == 0)
+			continue;
+
+		if (nla_len(entry) < NLA_HDRLEN) {
+			NL_SET_ERR_MSG_ATTR(extack, entry,
+					    "Array element too short");
+			return -ERANGE;
+		}
+
+		ret = __nla_validate(nla_data(entry), nla_len(entry),
+				     maxtype, policy, validate, extack);
+		if (ret < 0)
+			return ret;
+	}
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int nla_validate_array(const struct nlattr *head, int len, int maxtype,
+			      const struct nla_policy *policy,
+			      struct netlink_ext_ack *extack,
+			      unsigned int validate, unsigned int depth)
+{
+	const struct nlattr *entry;
+	int rem;
+
+	nla_for_each_attr(entry, head, len, rem) {
+		int ret;
+
+		if (nla_len(entry) == 0)
+			continue;
+
+		if (nla_len(entry) < NLA_HDRLEN) {
+			NL_SET_ERR_MSG_ATTR(extack, entry,
+					    "Array element too short");
+			return -ERANGE;
+		}
+
+		ret = __nla_validate_parse(nla_data(entry), nla_len(entry),
+					   maxtype, policy, validate, extack,
+					   NULL, depth + 1);
+		if (ret < 0)
+			return ret;
+	}
+
+	return 0;
+}

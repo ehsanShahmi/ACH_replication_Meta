@@ -1,0 +1,36 @@
+The vulnerable issue:
+HID: fix a couple of off-by-ones
+
+There are a few very theoretical off-by-one bugs in report descriptor size
+checking when performing a pre-parsing fixup. Fix those.
+
+Cc: stable@vger.kernel.org
+Reported-by: Ben Hawkes <hawkes@google.com>
+Reviewed-by: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+
+
+The vulnerable function:
+static __u8 *mr_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+		unsigned int *rsize)
+{
+	if (*rsize >= 30 && rdesc[29] == 0x05 && rdesc[30] == 0x09) {
+		hid_info(hdev, "fixing up button/consumer in HID report descriptor\n");
+		rdesc[30] = 0x0c;
+	}
+	return rdesc;
+}
+
+
+
+The corrected function:
+static __u8 *mr_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+		unsigned int *rsize)
+{
+	if (*rsize >= 31 && rdesc[29] == 0x05 && rdesc[30] == 0x09) {
+		hid_info(hdev, "fixing up button/consumer in HID report descriptor\n");
+		rdesc[30] = 0x0c;
+	}
+	return rdesc;
+}

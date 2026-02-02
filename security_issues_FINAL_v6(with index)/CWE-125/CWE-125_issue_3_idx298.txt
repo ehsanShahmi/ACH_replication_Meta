@@ -1,0 +1,134 @@
+This issue file has CWE-125. Your task is to create this CWE-125 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+ksmbd: fix global-out-of-bounds in smb2_find_context_vals
+
+Add tag_len argument in smb2_find_context_vals() to avoid out-of-bound
+read when create_context's name_len is larger than tag length.
+
+[    7.995411] ==================================================================
+[    7.995866] BUG: KASAN: global-out-of-bounds in memcmp+0x83/0xa0
+[    7.996248] Read of size 8 at addr ffffffff8258d940 by task kworker/0:0/7
+...
+[    7.998191] Call Trace:
+[    7.998358]  <TASK>
+[    7.998503]  dump_stack_lvl+0x33/0x50
+[    7.998743]  print_report+0xcc/0x620
+[    7.999458]  kasan_report+0xae/0xe0
+[    7.999895]  kasan_check_range+0x35/0x1b0
+[    8.000152]  memcmp+0x83/0xa0
+[    8.000347]  smb2_find_context_vals+0xf7/0x1e0
+[    8.000635]  smb2_open+0x1df2/0x43a0
+[    8.006398]  handle_ksmbd_work+0x274/0x810
+[    8.006666]  process_one_work+0x419/0x760
+[    8.006922]  worker_thread+0x2a2/0x6f0
+[    8.007429]  kthread+0x160/0x190
+[    8.007946]  ret_from_fork+0x1f/0x30
+[    8.008181]  </TASK>
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Chih-Yen Chang <cc85nod@gmail.com>
+Acked-by: Namjae Jeon <linkinjeon@kernel.org>
+Signed-off-by: Steve French <stfrench@microsoft.com>
+
+
+
+The vulnerable function:
+struct create_context *smb2_find_context_vals(void *open_req, const char *tag)
+{
+	struct create_context *cc;
+	unsigned int next = 0;
+	char *name;
+	struct smb2_create_req *req = (struct smb2_create_req *)open_req;
+	unsigned int remain_len, name_off, name_len, value_off, value_len,
+		     cc_len;
+
+	/*
+	 * CreateContextsOffset and CreateContextsLength are guaranteed to
+	 * be valid because of ksmbd_smb2_check_message().
+	 */
+	cc = (struct create_context *)((char *)req +
+				       le32_to_cpu(req->CreateContextsOffset));
+	remain_len = le32_to_cpu(req->CreateContextsLength);
+	do {
+		cc = (struct create_context *)((char *)cc + next);
+		if (remain_len < offsetof(struct create_context, Buffer))
+			return ERR_PTR(-EINVAL);
+
+		next = le32_to_cpu(cc->Next);
+		name_off = le16_to_cpu(cc->NameOffset);
+		name_len = le16_to_cpu(cc->NameLength);
+		value_off = le16_to_cpu(cc->DataOffset);
+		value_len = le32_to_cpu(cc->DataLength);
+		cc_len = next ? next : remain_len;
+
+		if ((next & 0x7) != 0 ||
+		    next > remain_len ||
+		    name_off != offsetof(struct create_context, Buffer) ||
+		    name_len < 4 ||
+		    name_off + name_len > cc_len ||
+		    (value_off & 0x7) != 0 ||
+		    (value_off && (value_off < name_off + name_len)) ||
+		    ((u64)value_off + value_len > cc_len))
+			return ERR_PTR(-EINVAL);
+
+		name = (char *)cc + name_off;
+		if (memcmp(name, tag, name_len) == 0)
+			return cc;
+
+		remain_len -= next;
+	} while (next != 0);
+
+	return NULL;
+}
+
+
+
+The corrected function:
+struct create_context *smb2_find_context_vals(void *open_req, const char *tag, int tag_len)
+{
+	struct create_context *cc;
+	unsigned int next = 0;
+	char *name;
+	struct smb2_create_req *req = (struct smb2_create_req *)open_req;
+	unsigned int remain_len, name_off, name_len, value_off, value_len,
+		     cc_len;
+
+	/*
+	 * CreateContextsOffset and CreateContextsLength are guaranteed to
+	 * be valid because of ksmbd_smb2_check_message().
+	 */
+	cc = (struct create_context *)((char *)req +
+				       le32_to_cpu(req->CreateContextsOffset));
+	remain_len = le32_to_cpu(req->CreateContextsLength);
+	do {
+		cc = (struct create_context *)((char *)cc + next);
+		if (remain_len < offsetof(struct create_context, Buffer))
+			return ERR_PTR(-EINVAL);
+
+		next = le32_to_cpu(cc->Next);
+		name_off = le16_to_cpu(cc->NameOffset);
+		name_len = le16_to_cpu(cc->NameLength);
+		value_off = le16_to_cpu(cc->DataOffset);
+		value_len = le32_to_cpu(cc->DataLength);
+		cc_len = next ? next : remain_len;
+
+		if ((next & 0x7) != 0 ||
+		    next > remain_len ||
+		    name_off != offsetof(struct create_context, Buffer) ||
+		    name_len < 4 ||
+		    name_off + name_len > cc_len ||
+		    (value_off & 0x7) != 0 ||
+		    (value_off && (value_off < name_off + name_len)) ||
+		    ((u64)value_off + value_len > cc_len))
+			return ERR_PTR(-EINVAL);
+
+		name = (char *)cc + name_off;
+		if (name_len == tag_len && !memcmp(name, tag, name_len))
+			return cc;
+
+		remain_len -= next;
+	} while (next != 0);
+
+	return NULL;
+}

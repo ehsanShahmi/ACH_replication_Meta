@@ -1,0 +1,96 @@
+This issue file has CWE-362. Your task is to create this CWE-362 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+scsi: mptfusion: Fix double fetch bug in ioctl
+
+Tom Hatskevich reported that we look up "iocp" then, in the called
+functions we do a second copy_from_user() and look it up again.
+The problem that could cause is:
+
+drivers/message/fusion/mptctl.c
+   674          /* All of these commands require an interrupt or
+   675           * are unknown/illegal.
+   676           */
+   677          if ((ret = mptctl_syscall_down(iocp, nonblock)) != 0)
+                                               ^^^^
+We take this lock.
+
+   678                  return ret;
+   679
+   680          if (cmd == MPTFWDOWNLOAD)
+   681                  ret = mptctl_fw_download(arg);
+                                                 ^^^
+Then the user memory changes and we look up "iocp" again but a different
+one so now we are holding the incorrect lock and have a race condition.
+
+   682          else if (cmd == MPTCOMMAND)
+   683                  ret = mptctl_mpt_command(arg);
+
+The security impact of this bug is not as bad as it could have been
+because these operations are all privileged and root already has
+enormous destructive power.  But it's still worth fixing.
+
+This patch passes the "iocp" pointer to the functions to avoid the
+second lookup.  That deletes 100 lines of code from the driver so
+it's a nice clean up as well.
+
+Link: https://lore.kernel.org/r/20200114123414.GA7957@kadam
+Reported-by: Tom Hatskevich <tom2001tom.23@gmail.com>
+Reviewed-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Dan Carpenter <dan.carpenter@oracle.com>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+
+
+The vulnerable function:
+static int
+mptctl_mpt_command (unsigned long arg)
+{
+	struct mpt_ioctl_command __user *uarg = (void __user *) arg;
+	struct mpt_ioctl_command  karg;
+	MPT_ADAPTER	*ioc;
+	int		iocnum;
+	int		rc;
+
+
+	if (copy_from_user(&karg, uarg, sizeof(struct mpt_ioctl_command))) {
+		printk(KERN_ERR MYNAM "%s@%d::mptctl_mpt_command - "
+			"Unable to read in mpt_ioctl_command struct @ %p\n",
+				__FILE__, __LINE__, uarg);
+		return -EFAULT;
+	}
+
+	if (((iocnum = mpt_verify_adapter(karg.hdr.iocnum, &ioc)) < 0) ||
+	    (ioc == NULL)) {
+		printk(KERN_DEBUG MYNAM "%s::mptctl_mpt_command() @%d - ioc%d not found!\n",
+				__FILE__, __LINE__, iocnum);
+		return -ENODEV;
+	}
+
+	rc = mptctl_do_mpt_command (karg, &uarg->MF);
+
+	return rc;
+}
+
+
+
+The corrected function:
+static int
+mptctl_mpt_command (MPT_ADAPTER *ioc, unsigned long arg)
+{
+	struct mpt_ioctl_command __user *uarg = (void __user *) arg;
+	struct mpt_ioctl_command  karg;
+	int		rc;
+
+
+	if (copy_from_user(&karg, uarg, sizeof(struct mpt_ioctl_command))) {
+		printk(KERN_ERR MYNAM "%s@%d::mptctl_mpt_command - "
+			"Unable to read in mpt_ioctl_command struct @ %p\n",
+				__FILE__, __LINE__, uarg);
+		return -EFAULT;
+	}
+
+	rc = mptctl_do_mpt_command (ioc, karg, &uarg->MF);
+
+	return rc;
+}

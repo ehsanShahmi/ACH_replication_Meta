@@ -1,0 +1,73 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+f2fs: support swap file w/ DIO
+
+Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+
+
+The vulnerable function:
+static int f2fs_set_data_page_dirty(struct page *page)
+{
+	struct address_space *mapping = page->mapping;
+	struct inode *inode = mapping->host;
+
+	trace_f2fs_set_page_dirty(page, DATA);
+
+	if (!PageUptodate(page))
+		SetPageUptodate(page);
+
+	if (f2fs_is_atomic_file(inode) && !f2fs_is_commit_atomic_write(inode)) {
+		if (!IS_ATOMIC_WRITTEN_PAGE(page)) {
+			f2fs_register_inmem_page(inode, page);
+			return 1;
+		}
+		/*
+		 * Previously, this page has been registered, we just
+		 * return here.
+		 */
+		return 0;
+	}
+
+	if (!PageDirty(page)) {
+		__set_page_dirty_nobuffers(page);
+		f2fs_update_dirty_page(inode, page);
+		return 1;
+	}
+	return 0;
+}
+
+
+
+The corrected function:
+static int f2fs_set_data_page_dirty(struct page *page)
+{
+	struct inode *inode = page_file_mapping(page)->host;
+
+	trace_f2fs_set_page_dirty(page, DATA);
+
+	if (!PageUptodate(page))
+		SetPageUptodate(page);
+	if (PageSwapCache(page))
+		return __set_page_dirty_nobuffers(page);
+
+	if (f2fs_is_atomic_file(inode) && !f2fs_is_commit_atomic_write(inode)) {
+		if (!IS_ATOMIC_WRITTEN_PAGE(page)) {
+			f2fs_register_inmem_page(inode, page);
+			return 1;
+		}
+		/*
+		 * Previously, this page has been registered, we just
+		 * return here.
+		 */
+		return 0;
+	}
+
+	if (!PageDirty(page)) {
+		__set_page_dirty_nobuffers(page);
+		f2fs_update_dirty_page(inode, page);
+		return 1;
+	}
+	return 0;
+}

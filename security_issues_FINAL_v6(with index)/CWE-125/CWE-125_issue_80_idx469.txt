@@ -1,0 +1,300 @@
+This issue file has CWE-125. Your task is to create this CWE-125 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+wifi: wilc1000: validate pairwise and authentication suite offsets
+
+There is no validation of 'offset' which can trigger an out-of-bounds
+read when extracting RSN capabilities.
+
+Signed-off-by: Phil Turnbull <philipturnbull@github.com>
+Tested-by: Ajay Kathat <ajay.kathat@microchip.com>
+Acked-by: Ajay Kathat <ajay.kathat@microchip.com>
+Signed-off-by: Kalle Valo <kvalo@kernel.org>
+Link: https://lore.kernel.org/r/20221123153543.8568-2-philipturnbull@github.com
+
+
+
+The vulnerable function:
+void *wilc_parse_join_bss_param(struct cfg80211_bss *bss,
+				struct cfg80211_crypto_settings *crypto)
+{
+	struct wilc_join_bss_param *param;
+	struct ieee80211_p2p_noa_attr noa_attr;
+	u8 rates_len = 0;
+	const u8 *tim_elm, *ssid_elm, *rates_ie, *supp_rates_ie;
+	const u8 *ht_ie, *wpa_ie, *wmm_ie, *rsn_ie;
+	int ret;
+	const struct cfg80211_bss_ies *ies = rcu_dereference(bss->ies);
+
+	param = kzalloc(sizeof(*param), GFP_KERNEL);
+	if (!param)
+		return NULL;
+
+	param->beacon_period = cpu_to_le16(bss->beacon_interval);
+	param->cap_info = cpu_to_le16(bss->capability);
+	param->bss_type = WILC_FW_BSS_TYPE_INFRA;
+	param->ch = ieee80211_frequency_to_channel(bss->channel->center_freq);
+	ether_addr_copy(param->bssid, bss->bssid);
+
+	ssid_elm = cfg80211_find_ie(WLAN_EID_SSID, ies->data, ies->len);
+	if (ssid_elm) {
+		if (ssid_elm[1] <= IEEE80211_MAX_SSID_LEN)
+			memcpy(param->ssid, ssid_elm + 2, ssid_elm[1]);
+	}
+
+	tim_elm = cfg80211_find_ie(WLAN_EID_TIM, ies->data, ies->len);
+	if (tim_elm && tim_elm[1] >= 2)
+		param->dtim_period = tim_elm[3];
+
+	memset(param->p_suites, 0xFF, 3);
+	memset(param->akm_suites, 0xFF, 3);
+
+	rates_ie = cfg80211_find_ie(WLAN_EID_SUPP_RATES, ies->data, ies->len);
+	if (rates_ie) {
+		rates_len = rates_ie[1];
+		if (rates_len > WILC_MAX_RATES_SUPPORTED)
+			rates_len = WILC_MAX_RATES_SUPPORTED;
+		param->supp_rates[0] = rates_len;
+		memcpy(&param->supp_rates[1], rates_ie + 2, rates_len);
+	}
+
+	if (rates_len < WILC_MAX_RATES_SUPPORTED) {
+		supp_rates_ie = cfg80211_find_ie(WLAN_EID_EXT_SUPP_RATES,
+						 ies->data, ies->len);
+		if (supp_rates_ie) {
+			u8 ext_rates = supp_rates_ie[1];
+
+			if (ext_rates > (WILC_MAX_RATES_SUPPORTED - rates_len))
+				param->supp_rates[0] = WILC_MAX_RATES_SUPPORTED;
+			else
+				param->supp_rates[0] += ext_rates;
+
+			memcpy(&param->supp_rates[rates_len + 1],
+			       supp_rates_ie + 2,
+			       (param->supp_rates[0] - rates_len));
+		}
+	}
+
+	ht_ie = cfg80211_find_ie(WLAN_EID_HT_CAPABILITY, ies->data, ies->len);
+	if (ht_ie)
+		param->ht_capable = true;
+
+	ret = cfg80211_get_p2p_attr(ies->data, ies->len,
+				    IEEE80211_P2P_ATTR_ABSENCE_NOTICE,
+				    (u8 *)&noa_attr, sizeof(noa_attr));
+	if (ret > 0) {
+		param->tsf_lo = cpu_to_le32(ies->tsf);
+		param->noa_enabled = 1;
+		param->idx = noa_attr.index;
+		if (noa_attr.oppps_ctwindow & IEEE80211_P2P_OPPPS_ENABLE_BIT) {
+			param->opp_enabled = 1;
+			param->opp_en.ct_window = noa_attr.oppps_ctwindow;
+			param->opp_en.cnt = noa_attr.desc[0].count;
+			param->opp_en.duration = noa_attr.desc[0].duration;
+			param->opp_en.interval = noa_attr.desc[0].interval;
+			param->opp_en.start_time = noa_attr.desc[0].start_time;
+		} else {
+			param->opp_enabled = 0;
+			param->opp_dis.cnt = noa_attr.desc[0].count;
+			param->opp_dis.duration = noa_attr.desc[0].duration;
+			param->opp_dis.interval = noa_attr.desc[0].interval;
+			param->opp_dis.start_time = noa_attr.desc[0].start_time;
+		}
+	}
+	wmm_ie = cfg80211_find_vendor_ie(WLAN_OUI_MICROSOFT,
+					 WLAN_OUI_TYPE_MICROSOFT_WMM,
+					 ies->data, ies->len);
+	if (wmm_ie) {
+		struct ieee80211_wmm_param_ie *ie;
+
+		ie = (struct ieee80211_wmm_param_ie *)wmm_ie;
+		if ((ie->oui_subtype == 0 || ie->oui_subtype == 1) &&
+		    ie->version == 1) {
+			param->wmm_cap = true;
+			if (ie->qos_info & BIT(7))
+				param->uapsd_cap = true;
+		}
+	}
+
+	wpa_ie = cfg80211_find_vendor_ie(WLAN_OUI_MICROSOFT,
+					 WLAN_OUI_TYPE_MICROSOFT_WPA,
+					 ies->data, ies->len);
+	if (wpa_ie) {
+		param->mode_802_11i = 1;
+		param->rsn_found = true;
+	}
+
+	rsn_ie = cfg80211_find_ie(WLAN_EID_RSN, ies->data, ies->len);
+	if (rsn_ie) {
+		int offset = 8;
+
+		param->mode_802_11i = 2;
+		param->rsn_found = true;
+		/* extract RSN capabilities */
+		offset += (rsn_ie[offset] * 4) + 2;
+		offset += (rsn_ie[offset] * 4) + 2;
+		memcpy(param->rsn_cap, &rsn_ie[offset], 2);
+	}
+
+	if (param->rsn_found) {
+		int i;
+
+		param->rsn_grp_policy = crypto->cipher_group & 0xFF;
+		for (i = 0; i < crypto->n_ciphers_pairwise && i < 3; i++)
+			param->p_suites[i] = crypto->ciphers_pairwise[i] & 0xFF;
+
+		for (i = 0; i < crypto->n_akm_suites && i < 3; i++)
+			param->akm_suites[i] = crypto->akm_suites[i] & 0xFF;
+	}
+
+	return (void *)param;
+}
+
+
+
+The corrected function:
+void *wilc_parse_join_bss_param(struct cfg80211_bss *bss,
+				struct cfg80211_crypto_settings *crypto)
+{
+	struct wilc_join_bss_param *param;
+	struct ieee80211_p2p_noa_attr noa_attr;
+	u8 rates_len = 0;
+	const u8 *tim_elm, *ssid_elm, *rates_ie, *supp_rates_ie;
+	const u8 *ht_ie, *wpa_ie, *wmm_ie, *rsn_ie;
+	int ret;
+	const struct cfg80211_bss_ies *ies = rcu_dereference(bss->ies);
+
+	param = kzalloc(sizeof(*param), GFP_KERNEL);
+	if (!param)
+		return NULL;
+
+	param->beacon_period = cpu_to_le16(bss->beacon_interval);
+	param->cap_info = cpu_to_le16(bss->capability);
+	param->bss_type = WILC_FW_BSS_TYPE_INFRA;
+	param->ch = ieee80211_frequency_to_channel(bss->channel->center_freq);
+	ether_addr_copy(param->bssid, bss->bssid);
+
+	ssid_elm = cfg80211_find_ie(WLAN_EID_SSID, ies->data, ies->len);
+	if (ssid_elm) {
+		if (ssid_elm[1] <= IEEE80211_MAX_SSID_LEN)
+			memcpy(param->ssid, ssid_elm + 2, ssid_elm[1]);
+	}
+
+	tim_elm = cfg80211_find_ie(WLAN_EID_TIM, ies->data, ies->len);
+	if (tim_elm && tim_elm[1] >= 2)
+		param->dtim_period = tim_elm[3];
+
+	memset(param->p_suites, 0xFF, 3);
+	memset(param->akm_suites, 0xFF, 3);
+
+	rates_ie = cfg80211_find_ie(WLAN_EID_SUPP_RATES, ies->data, ies->len);
+	if (rates_ie) {
+		rates_len = rates_ie[1];
+		if (rates_len > WILC_MAX_RATES_SUPPORTED)
+			rates_len = WILC_MAX_RATES_SUPPORTED;
+		param->supp_rates[0] = rates_len;
+		memcpy(&param->supp_rates[1], rates_ie + 2, rates_len);
+	}
+
+	if (rates_len < WILC_MAX_RATES_SUPPORTED) {
+		supp_rates_ie = cfg80211_find_ie(WLAN_EID_EXT_SUPP_RATES,
+						 ies->data, ies->len);
+		if (supp_rates_ie) {
+			u8 ext_rates = supp_rates_ie[1];
+
+			if (ext_rates > (WILC_MAX_RATES_SUPPORTED - rates_len))
+				param->supp_rates[0] = WILC_MAX_RATES_SUPPORTED;
+			else
+				param->supp_rates[0] += ext_rates;
+
+			memcpy(&param->supp_rates[rates_len + 1],
+			       supp_rates_ie + 2,
+			       (param->supp_rates[0] - rates_len));
+		}
+	}
+
+	ht_ie = cfg80211_find_ie(WLAN_EID_HT_CAPABILITY, ies->data, ies->len);
+	if (ht_ie)
+		param->ht_capable = true;
+
+	ret = cfg80211_get_p2p_attr(ies->data, ies->len,
+				    IEEE80211_P2P_ATTR_ABSENCE_NOTICE,
+				    (u8 *)&noa_attr, sizeof(noa_attr));
+	if (ret > 0) {
+		param->tsf_lo = cpu_to_le32(ies->tsf);
+		param->noa_enabled = 1;
+		param->idx = noa_attr.index;
+		if (noa_attr.oppps_ctwindow & IEEE80211_P2P_OPPPS_ENABLE_BIT) {
+			param->opp_enabled = 1;
+			param->opp_en.ct_window = noa_attr.oppps_ctwindow;
+			param->opp_en.cnt = noa_attr.desc[0].count;
+			param->opp_en.duration = noa_attr.desc[0].duration;
+			param->opp_en.interval = noa_attr.desc[0].interval;
+			param->opp_en.start_time = noa_attr.desc[0].start_time;
+		} else {
+			param->opp_enabled = 0;
+			param->opp_dis.cnt = noa_attr.desc[0].count;
+			param->opp_dis.duration = noa_attr.desc[0].duration;
+			param->opp_dis.interval = noa_attr.desc[0].interval;
+			param->opp_dis.start_time = noa_attr.desc[0].start_time;
+		}
+	}
+	wmm_ie = cfg80211_find_vendor_ie(WLAN_OUI_MICROSOFT,
+					 WLAN_OUI_TYPE_MICROSOFT_WMM,
+					 ies->data, ies->len);
+	if (wmm_ie) {
+		struct ieee80211_wmm_param_ie *ie;
+
+		ie = (struct ieee80211_wmm_param_ie *)wmm_ie;
+		if ((ie->oui_subtype == 0 || ie->oui_subtype == 1) &&
+		    ie->version == 1) {
+			param->wmm_cap = true;
+			if (ie->qos_info & BIT(7))
+				param->uapsd_cap = true;
+		}
+	}
+
+	wpa_ie = cfg80211_find_vendor_ie(WLAN_OUI_MICROSOFT,
+					 WLAN_OUI_TYPE_MICROSOFT_WPA,
+					 ies->data, ies->len);
+	if (wpa_ie) {
+		param->mode_802_11i = 1;
+		param->rsn_found = true;
+	}
+
+	rsn_ie = cfg80211_find_ie(WLAN_EID_RSN, ies->data, ies->len);
+	if (rsn_ie) {
+		int rsn_ie_len = sizeof(struct element) + rsn_ie[1];
+		int offset = 8;
+
+		/* extract RSN capabilities */
+		if (offset < rsn_ie_len) {
+			/* skip over pairwise suites */
+			offset += (rsn_ie[offset] * 4) + 2;
+
+			if (offset < rsn_ie_len) {
+				/* skip over authentication suites */
+				offset += (rsn_ie[offset] * 4) + 2;
+
+				if (offset + 1 < rsn_ie_len) {
+					param->mode_802_11i = 2;
+					param->rsn_found = true;
+					memcpy(param->rsn_cap, &rsn_ie[offset], 2);
+				}
+			}
+		}
+	}
+
+	if (param->rsn_found) {
+		int i;
+
+		param->rsn_grp_policy = crypto->cipher_group & 0xFF;
+		for (i = 0; i < crypto->n_ciphers_pairwise && i < 3; i++)
+			param->p_suites[i] = crypto->ciphers_pairwise[i] & 0xFF;
+
+		for (i = 0; i < crypto->n_akm_suites && i < 3; i++)
+			param->akm_suites[i] = crypto->akm_suites[i] & 0xFF;
+	}
+
+	return (void *)param;
+}

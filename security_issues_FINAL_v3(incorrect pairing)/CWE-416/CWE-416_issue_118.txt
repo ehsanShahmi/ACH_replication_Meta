@@ -1,0 +1,100 @@
+The vulnerable issue:
+idpf: fix UAFs when destroying the queues
+
+The second tagged commit started sometimes (very rarely, but possible)
+throwing WARNs from
+net/core/page_pool.c:page_pool_disable_direct_recycling().
+Turned out idpf frees interrupt vectors with embedded NAPIs *before*
+freeing the queues making page_pools' NAPI pointers lead to freed
+memory before these pools are destroyed by libeth.
+It's not clear whether there are other accesses to the freed vectors
+when destroying the queues, but anyway, we usually free queue/interrupt
+vectors only when the queues are destroyed and the NAPIs are guaranteed
+to not be referenced anywhere.
+
+Invert the allocation and freeing logic making queue/interrupt vectors
+be allocated first and freed last. Vectors don't require queues to be
+present, so this is safe. Additionally, this change allows to remove
+that useless queue->q_vector pointer cleanup, as vectors are still
+valid when freeing the queues (+ both are freed within one function,
+so it's not clear why nullify the pointers at all).
+
+Fixes: 1c325aac10a8 ("idpf: configure resources for TX queues")
+Fixes: 90912f9f4f2d ("idpf: convert header split mode to libeth + napi_build_skb()")
+Reported-by: Michal Kubiak <michal.kubiak@intel.com>
+Signed-off-by: Alexander Lobakin <aleksander.lobakin@intel.com>
+Reviewed-by: Simon Horman <horms@kernel.org>
+Tested-by: Krishneil Singh <krishneil.k.singh@intel.com>
+Signed-off-by: Tony Nguyen <anthony.l.nguyen@intel.com>
+Link: https://patch.msgid.link/20240806220923.3359860-4-anthony.l.nguyen@intel.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+
+
+The vulnerable function:
+void idpf_vport_intr_rel(struct idpf_vport *vport)
+{
+	int i, j, v_idx;
+
+	for (v_idx = 0; v_idx < vport->num_q_vectors; v_idx++) {
+		struct idpf_q_vector *q_vector = &vport->q_vectors[v_idx];
+
+		kfree(q_vector->complq);
+		q_vector->complq = NULL;
+		kfree(q_vector->bufq);
+		q_vector->bufq = NULL;
+		kfree(q_vector->tx);
+		q_vector->tx = NULL;
+		kfree(q_vector->rx);
+		q_vector->rx = NULL;
+
+		free_cpumask_var(q_vector->affinity_mask);
+	}
+
+	/* Clean up the mapping of queues to vectors */
+	for (i = 0; i < vport->num_rxq_grp; i++) {
+		struct idpf_rxq_group *rx_qgrp = &vport->rxq_grps[i];
+
+		if (idpf_is_queue_model_split(vport->rxq_model))
+			for (j = 0; j < rx_qgrp->splitq.num_rxq_sets; j++)
+				rx_qgrp->splitq.rxq_sets[j]->rxq.q_vector = NULL;
+		else
+			for (j = 0; j < rx_qgrp->singleq.num_rxq; j++)
+				rx_qgrp->singleq.rxqs[j]->q_vector = NULL;
+	}
+
+	if (idpf_is_queue_model_split(vport->txq_model))
+		for (i = 0; i < vport->num_txq_grp; i++)
+			vport->txq_grps[i].complq->q_vector = NULL;
+	else
+		for (i = 0; i < vport->num_txq_grp; i++)
+			for (j = 0; j < vport->txq_grps[i].num_txq; j++)
+				vport->txq_grps[i].txqs[j]->q_vector = NULL;
+
+	kfree(vport->q_vectors);
+	vport->q_vectors = NULL;
+}
+
+
+
+The corrected function:
+void idpf_vport_intr_rel(struct idpf_vport *vport)
+{
+	for (u32 v_idx = 0; v_idx < vport->num_q_vectors; v_idx++) {
+		struct idpf_q_vector *q_vector = &vport->q_vectors[v_idx];
+
+		kfree(q_vector->complq);
+		q_vector->complq = NULL;
+		kfree(q_vector->bufq);
+		q_vector->bufq = NULL;
+		kfree(q_vector->tx);
+		q_vector->tx = NULL;
+		kfree(q_vector->rx);
+		q_vector->rx = NULL;
+
+		free_cpumask_var(q_vector->affinity_mask);
+	}
+
+	kfree(vport->q_vectors);
+	vport->q_vectors = NULL;
+}

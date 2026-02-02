@@ -1,0 +1,115 @@
+The vulnerable issue:
+netfilter: nf_tables: skip immediate deactivate in _PREPARE_ERROR
+
+On error when building the rule, the immediate expression unbinds the
+chain, hence objects can be deactivated by the transaction records.
+
+Otherwise, it is possible to trigger the following warning:
+
+ WARNING: CPU: 3 PID: 915 at net/netfilter/nf_tables_api.c:2013 nf_tables_chain_destroy+0x1f7/0x210 [nf_tables]
+ CPU: 3 PID: 915 Comm: chain-bind-err- Not tainted 6.1.39 #1
+ RIP: 0010:nf_tables_chain_destroy+0x1f7/0x210 [nf_tables]
+
+Fixes: 4bedf9eee016 ("netfilter: nf_tables: fix chain binding transaction logic")
+Reported-by: Kevin Rich <kevinrich1337@gmail.com>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+Signed-off-by: Florian Westphal <fw@strlen.de>
+
+
+
+The vulnerable function:
+static void nft_immediate_deactivate(const struct nft_ctx *ctx,
+				     const struct nft_expr *expr,
+				     enum nft_trans_phase phase)
+{
+	const struct nft_immediate_expr *priv = nft_expr_priv(expr);
+	const struct nft_data *data = &priv->data;
+	struct nft_ctx chain_ctx;
+	struct nft_chain *chain;
+	struct nft_rule *rule;
+
+	if (priv->dreg == NFT_REG_VERDICT) {
+		switch (data->verdict.code) {
+		case NFT_JUMP:
+		case NFT_GOTO:
+			chain = data->verdict.chain;
+			if (!nft_chain_binding(chain))
+				break;
+
+			chain_ctx = *ctx;
+			chain_ctx.chain = chain;
+
+			list_for_each_entry(rule, &chain->rules, list)
+				nft_rule_expr_deactivate(&chain_ctx, rule, phase);
+
+			switch (phase) {
+			case NFT_TRANS_PREPARE_ERROR:
+				nf_tables_unbind_chain(ctx, chain);
+				fallthrough;
+			case NFT_TRANS_PREPARE:
+				nft_deactivate_next(ctx->net, chain);
+				break;
+			default:
+				nft_chain_del(chain);
+				chain->bound = false;
+				nft_use_dec(&chain->table->use);
+				break;
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (phase == NFT_TRANS_COMMIT)
+		return;
+
+	return nft_data_release(&priv->data, nft_dreg_to_type(priv->dreg));
+}
+
+
+
+The corrected function:
+static void nft_immediate_deactivate(const struct nft_ctx *ctx,
+				     const struct nft_expr *expr,
+				     enum nft_trans_phase phase)
+{
+	const struct nft_immediate_expr *priv = nft_expr_priv(expr);
+	const struct nft_data *data = &priv->data;
+	struct nft_chain *chain;
+
+	if (priv->dreg == NFT_REG_VERDICT) {
+		switch (data->verdict.code) {
+		case NFT_JUMP:
+		case NFT_GOTO:
+			chain = data->verdict.chain;
+			if (!nft_chain_binding(chain))
+				break;
+
+			switch (phase) {
+			case NFT_TRANS_PREPARE_ERROR:
+				nf_tables_unbind_chain(ctx, chain);
+				nft_deactivate_next(ctx->net, chain);
+				break;
+			case NFT_TRANS_PREPARE:
+				nft_immediate_chain_deactivate(ctx, chain, phase);
+				nft_deactivate_next(ctx->net, chain);
+				break;
+			default:
+				nft_immediate_chain_deactivate(ctx, chain, phase);
+				nft_chain_del(chain);
+				chain->bound = false;
+				nft_use_dec(&chain->table->use);
+				break;
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (phase == NFT_TRANS_COMMIT)
+		return;
+
+	return nft_data_release(&priv->data, nft_dreg_to_type(priv->dreg));
+}

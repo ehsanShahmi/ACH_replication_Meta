@@ -1,0 +1,75 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+sg_write()/bsg_write() is not fit to be called under KERNEL_DS
+
+Both damn things interpret userland pointers embedded into the payload;
+worse, they are actually traversing those.  Leaving aside the bad
+API design, this is very much _not_ safe to call with KERNEL_DS.
+Bail out early if that happens.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+
+
+The vulnerable function:
+static ssize_t
+bsg_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+	struct bsg_device *bd = file->private_data;
+	ssize_t bytes_written;
+	int ret;
+
+	dprintk("%s: write %Zd bytes\n", bd->name, count);
+
+	bsg_set_block(bd, file);
+
+	bytes_written = 0;
+	ret = __bsg_write(bd, buf, count, &bytes_written,
+			  file->f_mode & FMODE_WRITE);
+
+	*ppos = bytes_written;
+
+	/*
+	 * return bytes written on non-fatal errors
+	 */
+	if (!bytes_written || err_block_err(ret))
+		bytes_written = ret;
+
+	dprintk("%s: returning %Zd\n", bd->name, bytes_written);
+	return bytes_written;
+}
+
+
+
+The corrected function:
+static ssize_t
+bsg_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+	struct bsg_device *bd = file->private_data;
+	ssize_t bytes_written;
+	int ret;
+
+	dprintk("%s: write %Zd bytes\n", bd->name, count);
+
+	if (unlikely(segment_eq(get_fs(), KERNEL_DS)))
+		return -EINVAL;
+
+	bsg_set_block(bd, file);
+
+	bytes_written = 0;
+	ret = __bsg_write(bd, buf, count, &bytes_written,
+			  file->f_mode & FMODE_WRITE);
+
+	*ppos = bytes_written;
+
+	/*
+	 * return bytes written on non-fatal errors
+	 */
+	if (!bytes_written || err_block_err(ret))
+		bytes_written = ret;
+
+	dprintk("%s: returning %Zd\n", bd->name, bytes_written);
+	return bytes_written;
+}

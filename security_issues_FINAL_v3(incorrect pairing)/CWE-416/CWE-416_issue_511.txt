@@ -1,0 +1,108 @@
+The vulnerable issue:
+Merge branch 'page-refs' (page ref overflow)
+
+Merge page ref overflow branch.
+
+Jann Horn reported that he can overflow the page ref count with
+sufficient memory (and a filesystem that is intentionally extremely
+slow).
+
+Admittedly it's not exactly easy.  To have more than four billion
+references to a page requires a minimum of 32GB of kernel memory just
+for the pointers to the pages, much less any metadata to keep track of
+those pointers.  Jann needed a total of 140GB of memory and a specially
+crafted filesystem that leaves all reads pending (in order to not ever
+free the page references and just keep adding more).
+
+Still, we have a fairly straightforward way to limit the two obvious
+user-controllable sources of page references: direct-IO like page
+references gotten through get_user_pages(), and the splice pipe page
+duplication.  So let's just do that.
+
+* branch page-refs:
+  fs: prevent page refcount overflow in pipe_buf_get
+  mm: prevent get_user_pages() from overflowing page refcount
+  mm: add 'try_get_page()' helper function
+  mm: make page ref count overflow check tighter and more explicit
+
+
+
+The vulnerable function:
+static int gup_huge_pmd(pmd_t orig, pmd_t *pmdp, unsigned long addr,
+		unsigned long end, int write, struct page **pages, int *nr)
+{
+	struct page *head, *page;
+	int refs;
+
+	if (!pmd_access_permitted(orig, write))
+		return 0;
+
+	if (pmd_devmap(orig))
+		return __gup_device_huge_pmd(orig, pmdp, addr, end, pages, nr);
+
+	refs = 0;
+	page = pmd_page(orig) + ((addr & ~PMD_MASK) >> PAGE_SHIFT);
+	do {
+		pages[*nr] = page;
+		(*nr)++;
+		page++;
+ 		refs++;
+ 	} while (addr += PAGE_SIZE, addr != end);
+ 
+	head = compound_head(pmd_page(orig));
+	if (!page_cache_add_speculative(head, refs)) {
+ 		*nr -= refs;
+ 		return 0;
+ 	}
+
+	if (unlikely(pmd_val(orig) != pmd_val(*pmdp))) {
+		*nr -= refs;
+		while (refs--)
+			put_page(head);
+		return 0;
+	}
+
+	SetPageReferenced(head);
+	return 1;
+}
+
+
+
+The corrected function:
+static int gup_huge_pud(pud_t orig, pud_t *pudp, unsigned long addr,
+		unsigned long end, int write, struct page **pages, int *nr)
+{
+	struct page *head, *page;
+	int refs;
+
+	if (!pud_access_permitted(orig, write))
+		return 0;
+
+	if (pud_devmap(orig))
+		return __gup_device_huge_pud(orig, pudp, addr, end, pages, nr);
+
+	refs = 0;
+	page = pud_page(orig) + ((addr & ~PUD_MASK) >> PAGE_SHIFT);
+	do {
+		pages[*nr] = page;
+		(*nr)++;
+		page++;
+ 		refs++;
+ 	} while (addr += PAGE_SIZE, addr != end);
+ 
+	head = compound_head(pud_page(orig));
+	if (!page_cache_add_speculative(head, refs)) {
+ 		*nr -= refs;
+ 		return 0;
+ 	}
+
+	if (unlikely(pud_val(orig) != pud_val(*pudp))) {
+		*nr -= refs;
+		while (refs--)
+			put_page(head);
+		return 0;
+	}
+
+	SetPageReferenced(head);
+	return 1;
+}

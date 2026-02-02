@@ -1,0 +1,159 @@
+The vulnerable issue:
+tty: serial: ma35d1: Add a NULL check for of_node
+
+The pdev->dev.of_node can be NULL if the "serial" node is absent.
+Add a NULL check to return an error in such cases.
+
+Fixes: 930cbf92db01 ("tty: serial: Add Nuvoton ma35d1 serial driver support")
+Reported-by: Dan Carpenter <dan.carpenter@linaro.org>
+Closes: https://lore.kernel.org/all/8df7ce45-fd58-4235-88f7-43fe7cd67e8f@moroto.mountain/
+Signed-off-by: Jacky Huang <ychuang3@nuvoton.com>
+Reviewed-by: Dan Carpenter <dan.carpenter@linaro.org>
+Cc: stable <stable@kernel.org>
+Link: https://lore.kernel.org/r/20240625064128.127-1-ychuang570808@gmail.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+
+
+The vulnerable function:
+static int ma35d1serial_probe(struct platform_device *pdev)
+{
+	struct resource *res_mem;
+	struct uart_ma35d1_port *up;
+	int ret = 0;
+
+	if (pdev->dev.of_node) {
+		ret = of_alias_get_id(pdev->dev.of_node, "serial");
+		if (ret < 0) {
+			dev_err(&pdev->dev, "failed to get alias/pdev id, errno %d\n", ret);
+			return ret;
+		}
+	}
+	up = &ma35d1serial_ports[ret];
+	up->port.line = ret;
+	res_mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res_mem)
+		return -ENODEV;
+
+	up->port.iobase = res_mem->start;
+	up->port.membase = ioremap(up->port.iobase, MA35_UART_REG_SIZE);
+	if (!up->port.membase)
+		return -ENOMEM;
+
+	up->port.ops = &ma35d1serial_ops;
+
+	spin_lock_init(&up->port.lock);
+
+	up->clk = of_clk_get(pdev->dev.of_node, 0);
+	if (IS_ERR(up->clk)) {
+		ret = PTR_ERR(up->clk);
+		dev_err(&pdev->dev, "failed to get core clk: %d\n", ret);
+		goto err_iounmap;
+	}
+
+	ret = clk_prepare_enable(up->clk);
+	if (ret)
+		goto err_iounmap;
+
+	if (up->port.line != 0)
+		up->port.uartclk = clk_get_rate(up->clk);
+
+	ret = platform_get_irq(pdev, 0);
+	if (ret < 0)
+		goto err_clk_disable;
+
+	up->port.irq = ret;
+	up->port.dev = &pdev->dev;
+	up->port.flags = UPF_BOOT_AUTOCONF;
+
+	platform_set_drvdata(pdev, up);
+
+	ret = uart_add_one_port(&ma35d1serial_reg, &up->port);
+	if (ret < 0)
+		goto err_free_irq;
+
+	return 0;
+
+err_free_irq:
+	free_irq(up->port.irq, &up->port);
+
+err_clk_disable:
+	clk_disable_unprepare(up->clk);
+
+err_iounmap:
+	iounmap(up->port.membase);
+	return ret;
+}
+
+
+
+The corrected function:
+static int ma35d1serial_probe(struct platform_device *pdev)
+{
+	struct resource *res_mem;
+	struct uart_ma35d1_port *up;
+	int ret = 0;
+
+	if (!pdev->dev.of_node)
+		return -ENODEV;
+
+	ret = of_alias_get_id(pdev->dev.of_node, "serial");
+	if (ret < 0) {
+		dev_err(&pdev->dev, "failed to get alias/pdev id, errno %d\n", ret);
+		return ret;
+	}
+	up = &ma35d1serial_ports[ret];
+	up->port.line = ret;
+	res_mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res_mem)
+		return -ENODEV;
+
+	up->port.iobase = res_mem->start;
+	up->port.membase = ioremap(up->port.iobase, MA35_UART_REG_SIZE);
+	if (!up->port.membase)
+		return -ENOMEM;
+
+	up->port.ops = &ma35d1serial_ops;
+
+	spin_lock_init(&up->port.lock);
+
+	up->clk = of_clk_get(pdev->dev.of_node, 0);
+	if (IS_ERR(up->clk)) {
+		ret = PTR_ERR(up->clk);
+		dev_err(&pdev->dev, "failed to get core clk: %d\n", ret);
+		goto err_iounmap;
+	}
+
+	ret = clk_prepare_enable(up->clk);
+	if (ret)
+		goto err_iounmap;
+
+	if (up->port.line != 0)
+		up->port.uartclk = clk_get_rate(up->clk);
+
+	ret = platform_get_irq(pdev, 0);
+	if (ret < 0)
+		goto err_clk_disable;
+
+	up->port.irq = ret;
+	up->port.dev = &pdev->dev;
+	up->port.flags = UPF_BOOT_AUTOCONF;
+
+	platform_set_drvdata(pdev, up);
+
+	ret = uart_add_one_port(&ma35d1serial_reg, &up->port);
+	if (ret < 0)
+		goto err_free_irq;
+
+	return 0;
+
+err_free_irq:
+	free_irq(up->port.irq, &up->port);
+
+err_clk_disable:
+	clk_disable_unprepare(up->clk);
+
+err_iounmap:
+	iounmap(up->port.membase);
+	return ret;
+}

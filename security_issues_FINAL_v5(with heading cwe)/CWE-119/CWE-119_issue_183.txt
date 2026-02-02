@@ -1,0 +1,247 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+netfilter: x_tables: fix unconditional helper
+
+Ben Hawkes says:
+
+ In the mark_source_chains function (net/ipv4/netfilter/ip_tables.c) it
+ is possible for a user-supplied ipt_entry structure to have a large
+ next_offset field. This field is not bounds checked prior to writing a
+ counter value at the supplied offset.
+
+Problem is that mark_source_chains should not have been called --
+the rule doesn't have a next entry, so its supposed to return
+an absolute verdict of either ACCEPT or DROP.
+
+However, the function conditional() doesn't work as the name implies.
+It only checks that the rule is using wildcard address matching.
+
+However, an unconditional rule must also not be using any matches
+(no -m args).
+
+The underflow validator only checked the addresses, therefore
+passing the 'unconditional absolute verdict' test, while
+mark_source_chains also tested for presence of matches, and thus
+proceeeded to the next (not-existent) rule.
+
+Unify this so that all the callers have same idea of 'unconditional rule'.
+
+Reported-by: Ben Hawkes <hawkes@google.com>
+Signed-off-by: Florian Westphal <fw@strlen.de>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+
+
+
+The vulnerable function:
+static int mark_source_chains(const struct xt_table_info *newinfo,
+			      unsigned int valid_hooks, void *entry0)
+{
+	unsigned int hook;
+
+	/* No recursion; use packet counter to save back ptrs (reset
+	 * to 0 as we leave), and comefrom to save source hook bitmask.
+	 */
+	for (hook = 0; hook < NF_ARP_NUMHOOKS; hook++) {
+		unsigned int pos = newinfo->hook_entry[hook];
+		struct arpt_entry *e
+			= (struct arpt_entry *)(entry0 + pos);
+
+		if (!(valid_hooks & (1 << hook)))
+			continue;
+
+		/* Set initial back pointer. */
+		e->counters.pcnt = pos;
+
+		for (;;) {
+			const struct xt_standard_target *t
+				= (void *)arpt_get_target_c(e);
+			int visited = e->comefrom & (1 << hook);
+
+			if (e->comefrom & (1 << NF_ARP_NUMHOOKS)) {
+				pr_notice("arptables: loop hook %u pos %u %08X.\n",
+				       hook, pos, e->comefrom);
+				return 0;
+			}
+			e->comefrom
+				|= ((1 << hook) | (1 << NF_ARP_NUMHOOKS));
+
+			/* Unconditional return/END. */
+			if ((e->target_offset == sizeof(struct arpt_entry) &&
+			     (strcmp(t->target.u.user.name,
+				     XT_STANDARD_TARGET) == 0) &&
+			     t->verdict < 0 && unconditional(&e->arp)) ||
+			    visited) {
+				unsigned int oldpos, size;
+
+				if ((strcmp(t->target.u.user.name,
+					    XT_STANDARD_TARGET) == 0) &&
+				    t->verdict < -NF_MAX_VERDICT - 1) {
+					duprintf("mark_source_chains: bad "
+						"negative verdict (%i)\n",
+								t->verdict);
+					return 0;
+				}
+
+				/* Return: backtrack through the last
+				 * big jump.
+				 */
+				do {
+					e->comefrom ^= (1<<NF_ARP_NUMHOOKS);
+					oldpos = pos;
+					pos = e->counters.pcnt;
+					e->counters.pcnt = 0;
+
+					/* We're at the start. */
+					if (pos == oldpos)
+						goto next;
+
+					e = (struct arpt_entry *)
+						(entry0 + pos);
+				} while (oldpos == pos + e->next_offset);
+
+				/* Move along one */
+				size = e->next_offset;
+				e = (struct arpt_entry *)
+					(entry0 + pos + size);
+				e->counters.pcnt = pos;
+				pos += size;
+			} else {
+				int newpos = t->verdict;
+
+				if (strcmp(t->target.u.user.name,
+					   XT_STANDARD_TARGET) == 0 &&
+				    newpos >= 0) {
+					if (newpos > newinfo->size -
+						sizeof(struct arpt_entry)) {
+						duprintf("mark_source_chains: "
+							"bad verdict (%i)\n",
+								newpos);
+						return 0;
+					}
+
+					/* This a jump; chase it. */
+					duprintf("Jump rule %u -> %u\n",
+						 pos, newpos);
+				} else {
+					/* ... this is a fallthru */
+					newpos = pos + e->next_offset;
+				}
+				e = (struct arpt_entry *)
+					(entry0 + newpos);
+				e->counters.pcnt = pos;
+				pos = newpos;
+			}
+		}
+next:
+		duprintf("Finished chain %u\n", hook);
+	}
+	return 1;
+}
+
+
+
+The corrected function:
+static int mark_source_chains(const struct xt_table_info *newinfo,
+			      unsigned int valid_hooks, void *entry0)
+{
+	unsigned int hook;
+
+	/* No recursion; use packet counter to save back ptrs (reset
+	 * to 0 as we leave), and comefrom to save source hook bitmask.
+	 */
+	for (hook = 0; hook < NF_ARP_NUMHOOKS; hook++) {
+		unsigned int pos = newinfo->hook_entry[hook];
+		struct arpt_entry *e
+			= (struct arpt_entry *)(entry0 + pos);
+
+		if (!(valid_hooks & (1 << hook)))
+			continue;
+
+		/* Set initial back pointer. */
+		e->counters.pcnt = pos;
+
+		for (;;) {
+			const struct xt_standard_target *t
+				= (void *)arpt_get_target_c(e);
+			int visited = e->comefrom & (1 << hook);
+
+			if (e->comefrom & (1 << NF_ARP_NUMHOOKS)) {
+				pr_notice("arptables: loop hook %u pos %u %08X.\n",
+				       hook, pos, e->comefrom);
+				return 0;
+			}
+			e->comefrom
+				|= ((1 << hook) | (1 << NF_ARP_NUMHOOKS));
+
+			/* Unconditional return/END. */
+			if ((unconditional(e) &&
+			     (strcmp(t->target.u.user.name,
+				     XT_STANDARD_TARGET) == 0) &&
+			     t->verdict < 0) || visited) {
+				unsigned int oldpos, size;
+
+				if ((strcmp(t->target.u.user.name,
+					    XT_STANDARD_TARGET) == 0) &&
+				    t->verdict < -NF_MAX_VERDICT - 1) {
+					duprintf("mark_source_chains: bad "
+						"negative verdict (%i)\n",
+								t->verdict);
+					return 0;
+				}
+
+				/* Return: backtrack through the last
+				 * big jump.
+				 */
+				do {
+					e->comefrom ^= (1<<NF_ARP_NUMHOOKS);
+					oldpos = pos;
+					pos = e->counters.pcnt;
+					e->counters.pcnt = 0;
+
+					/* We're at the start. */
+					if (pos == oldpos)
+						goto next;
+
+					e = (struct arpt_entry *)
+						(entry0 + pos);
+				} while (oldpos == pos + e->next_offset);
+
+				/* Move along one */
+				size = e->next_offset;
+				e = (struct arpt_entry *)
+					(entry0 + pos + size);
+				e->counters.pcnt = pos;
+				pos += size;
+			} else {
+				int newpos = t->verdict;
+
+				if (strcmp(t->target.u.user.name,
+					   XT_STANDARD_TARGET) == 0 &&
+				    newpos >= 0) {
+					if (newpos > newinfo->size -
+						sizeof(struct arpt_entry)) {
+						duprintf("mark_source_chains: "
+							"bad verdict (%i)\n",
+								newpos);
+						return 0;
+					}
+
+					/* This a jump; chase it. */
+					duprintf("Jump rule %u -> %u\n",
+						 pos, newpos);
+				} else {
+					/* ... this is a fallthru */
+					newpos = pos + e->next_offset;
+				}
+				e = (struct arpt_entry *)
+					(entry0 + newpos);
+				e->counters.pcnt = pos;
+				pos = newpos;
+			}
+		}
+next:
+		duprintf("Finished chain %u\n", hook);
+	}
+	return 1;
+}

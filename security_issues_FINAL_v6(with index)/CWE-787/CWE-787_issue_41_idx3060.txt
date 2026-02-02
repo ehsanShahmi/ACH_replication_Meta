@@ -1,0 +1,413 @@
+This issue file has CWE-787. Your task is to create this CWE-787 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+net: amd-xgbe: Fix skb data length underflow
+
+There will be BUG_ON() triggered in include/linux/skbuff.h leading to
+intermittent kernel panic, when the skb length underflow is detected.
+
+Fix this by dropping the packet if such length underflows are seen
+because of inconsistencies in the hardware descriptors.
+
+Fixes: 622c36f143fc ("amd-xgbe: Fix jumbo MTU processing on newer hardware")
+Suggested-by: Tom Lendacky <thomas.lendacky@amd.com>
+Signed-off-by: Shyam Sundar S K <Shyam-sundar.S-k@amd.com>
+Acked-by: Tom Lendacky <thomas.lendacky@amd.com>
+Link: https://lore.kernel.org/r/20220127092003.2812745-1-Shyam-sundar.S-k@amd.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+
+
+The vulnerable function:
+static int xgbe_rx_poll(struct xgbe_channel *channel, int budget)
+{
+	struct xgbe_prv_data *pdata = channel->pdata;
+	struct xgbe_hw_if *hw_if = &pdata->hw_if;
+	struct xgbe_ring *ring = channel->rx_ring;
+	struct xgbe_ring_data *rdata;
+	struct xgbe_packet_data *packet;
+	struct net_device *netdev = pdata->netdev;
+	struct napi_struct *napi;
+	struct sk_buff *skb;
+	struct skb_shared_hwtstamps *hwtstamps;
+	unsigned int last, error, context_next, context;
+	unsigned int len, buf1_len, buf2_len, max_len;
+	unsigned int received = 0;
+	int packet_count = 0;
+
+	DBGPR("-->xgbe_rx_poll: budget=%d\n", budget);
+
+	/* Nothing to do if there isn't a Rx ring for this channel */
+	if (!ring)
+		return 0;
+
+	last = 0;
+	context_next = 0;
+
+	napi = (pdata->per_channel_irq) ? &channel->napi : &pdata->napi;
+
+	rdata = XGBE_GET_DESC_DATA(ring, ring->cur);
+	packet = &ring->packet_data;
+	while (packet_count < budget) {
+		DBGPR("  cur = %d\n", ring->cur);
+
+		/* First time in loop see if we need to restore state */
+		if (!received && rdata->state_saved) {
+			skb = rdata->state.skb;
+			error = rdata->state.error;
+			len = rdata->state.len;
+		} else {
+			memset(packet, 0, sizeof(*packet));
+			skb = NULL;
+			error = 0;
+			len = 0;
+		}
+
+read_again:
+		rdata = XGBE_GET_DESC_DATA(ring, ring->cur);
+
+		if (xgbe_rx_dirty_desc(ring) > (XGBE_RX_DESC_CNT >> 3))
+			xgbe_rx_refresh(channel);
+
+		if (hw_if->dev_read(channel))
+			break;
+
+		received++;
+		ring->cur++;
+
+		last = XGMAC_GET_BITS(packet->attributes, RX_PACKET_ATTRIBUTES,
+				      LAST);
+		context_next = XGMAC_GET_BITS(packet->attributes,
+					      RX_PACKET_ATTRIBUTES,
+					      CONTEXT_NEXT);
+		context = XGMAC_GET_BITS(packet->attributes,
+					 RX_PACKET_ATTRIBUTES,
+					 CONTEXT);
+
+		/* Earlier error, just drain the remaining data */
+		if ((!last || context_next) && error)
+			goto read_again;
+
+		if (error || packet->errors) {
+			if (packet->errors)
+				netif_err(pdata, rx_err, netdev,
+					  "error in received packet\n");
+			dev_kfree_skb(skb);
+			goto next_packet;
+		}
+
+		if (!context) {
+			/* Get the data length in the descriptor buffers */
+			buf1_len = xgbe_rx_buf1_len(rdata, packet);
+			len += buf1_len;
+			buf2_len = xgbe_rx_buf2_len(rdata, packet, len);
+			len += buf2_len;
+
+			if (!skb) {
+				skb = xgbe_create_skb(pdata, napi, rdata,
+						      buf1_len);
+				if (!skb) {
+					error = 1;
+					goto skip_data;
+				}
+			}
+
+			if (buf2_len) {
+				dma_sync_single_range_for_cpu(pdata->dev,
+							rdata->rx.buf.dma_base,
+							rdata->rx.buf.dma_off,
+							rdata->rx.buf.dma_len,
+							DMA_FROM_DEVICE);
+
+				skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags,
+						rdata->rx.buf.pa.pages,
+						rdata->rx.buf.pa.pages_offset,
+						buf2_len,
+						rdata->rx.buf.dma_len);
+				rdata->rx.buf.pa.pages = NULL;
+			}
+		}
+
+skip_data:
+		if (!last || context_next)
+			goto read_again;
+
+		if (!skb)
+			goto next_packet;
+
+		/* Be sure we don't exceed the configured MTU */
+		max_len = netdev->mtu + ETH_HLEN;
+		if (!(netdev->features & NETIF_F_HW_VLAN_CTAG_RX) &&
+		    (skb->protocol == htons(ETH_P_8021Q)))
+			max_len += VLAN_HLEN;
+
+		if (skb->len > max_len) {
+			netif_err(pdata, rx_err, netdev,
+				  "packet length exceeds configured MTU\n");
+			dev_kfree_skb(skb);
+			goto next_packet;
+		}
+
+		if (netif_msg_pktdata(pdata))
+			xgbe_print_pkt(netdev, skb, false);
+
+		skb_checksum_none_assert(skb);
+		if (XGMAC_GET_BITS(packet->attributes,
+				   RX_PACKET_ATTRIBUTES, CSUM_DONE))
+			skb->ip_summed = CHECKSUM_UNNECESSARY;
+
+		if (XGMAC_GET_BITS(packet->attributes,
+				   RX_PACKET_ATTRIBUTES, TNP)) {
+			skb->encapsulation = 1;
+
+			if (XGMAC_GET_BITS(packet->attributes,
+					   RX_PACKET_ATTRIBUTES, TNPCSUM_DONE))
+				skb->csum_level = 1;
+		}
+
+		if (XGMAC_GET_BITS(packet->attributes,
+				   RX_PACKET_ATTRIBUTES, VLAN_CTAG))
+			__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q),
+					       packet->vlan_ctag);
+
+		if (XGMAC_GET_BITS(packet->attributes,
+				   RX_PACKET_ATTRIBUTES, RX_TSTAMP)) {
+			u64 nsec;
+
+			nsec = timecounter_cyc2time(&pdata->tstamp_tc,
+						    packet->rx_tstamp);
+			hwtstamps = skb_hwtstamps(skb);
+			hwtstamps->hwtstamp = ns_to_ktime(nsec);
+		}
+
+		if (XGMAC_GET_BITS(packet->attributes,
+				   RX_PACKET_ATTRIBUTES, RSS_HASH))
+			skb_set_hash(skb, packet->rss_hash,
+				     packet->rss_hash_type);
+
+		skb->dev = netdev;
+		skb->protocol = eth_type_trans(skb, netdev);
+		skb_record_rx_queue(skb, channel->queue_index);
+
+		napi_gro_receive(napi, skb);
+
+next_packet:
+		packet_count++;
+	}
+
+	/* Check if we need to save state before leaving */
+	if (received && (!last || context_next)) {
+		rdata = XGBE_GET_DESC_DATA(ring, ring->cur);
+		rdata->state_saved = 1;
+		rdata->state.skb = skb;
+		rdata->state.len = len;
+		rdata->state.error = error;
+	}
+
+	DBGPR("<--xgbe_rx_poll: packet_count = %d\n", packet_count);
+
+	return packet_count;
+}
+
+
+
+The corrected function:
+static int xgbe_rx_poll(struct xgbe_channel *channel, int budget)
+{
+	struct xgbe_prv_data *pdata = channel->pdata;
+	struct xgbe_hw_if *hw_if = &pdata->hw_if;
+	struct xgbe_ring *ring = channel->rx_ring;
+	struct xgbe_ring_data *rdata;
+	struct xgbe_packet_data *packet;
+	struct net_device *netdev = pdata->netdev;
+	struct napi_struct *napi;
+	struct sk_buff *skb;
+	struct skb_shared_hwtstamps *hwtstamps;
+	unsigned int last, error, context_next, context;
+	unsigned int len, buf1_len, buf2_len, max_len;
+	unsigned int received = 0;
+	int packet_count = 0;
+
+	DBGPR("-->xgbe_rx_poll: budget=%d\n", budget);
+
+	/* Nothing to do if there isn't a Rx ring for this channel */
+	if (!ring)
+		return 0;
+
+	last = 0;
+	context_next = 0;
+
+	napi = (pdata->per_channel_irq) ? &channel->napi : &pdata->napi;
+
+	rdata = XGBE_GET_DESC_DATA(ring, ring->cur);
+	packet = &ring->packet_data;
+	while (packet_count < budget) {
+		DBGPR("  cur = %d\n", ring->cur);
+
+		/* First time in loop see if we need to restore state */
+		if (!received && rdata->state_saved) {
+			skb = rdata->state.skb;
+			error = rdata->state.error;
+			len = rdata->state.len;
+		} else {
+			memset(packet, 0, sizeof(*packet));
+			skb = NULL;
+			error = 0;
+			len = 0;
+		}
+
+read_again:
+		rdata = XGBE_GET_DESC_DATA(ring, ring->cur);
+
+		if (xgbe_rx_dirty_desc(ring) > (XGBE_RX_DESC_CNT >> 3))
+			xgbe_rx_refresh(channel);
+
+		if (hw_if->dev_read(channel))
+			break;
+
+		received++;
+		ring->cur++;
+
+		last = XGMAC_GET_BITS(packet->attributes, RX_PACKET_ATTRIBUTES,
+				      LAST);
+		context_next = XGMAC_GET_BITS(packet->attributes,
+					      RX_PACKET_ATTRIBUTES,
+					      CONTEXT_NEXT);
+		context = XGMAC_GET_BITS(packet->attributes,
+					 RX_PACKET_ATTRIBUTES,
+					 CONTEXT);
+
+		/* Earlier error, just drain the remaining data */
+		if ((!last || context_next) && error)
+			goto read_again;
+
+		if (error || packet->errors) {
+			if (packet->errors)
+				netif_err(pdata, rx_err, netdev,
+					  "error in received packet\n");
+			dev_kfree_skb(skb);
+			goto next_packet;
+		}
+
+		if (!context) {
+			/* Get the data length in the descriptor buffers */
+			buf1_len = xgbe_rx_buf1_len(rdata, packet);
+			len += buf1_len;
+			buf2_len = xgbe_rx_buf2_len(rdata, packet, len);
+			len += buf2_len;
+
+			if (buf2_len > rdata->rx.buf.dma_len) {
+				/* Hardware inconsistency within the descriptors
+				 * that has resulted in a length underflow.
+				 */
+				error = 1;
+				goto skip_data;
+			}
+
+			if (!skb) {
+				skb = xgbe_create_skb(pdata, napi, rdata,
+						      buf1_len);
+				if (!skb) {
+					error = 1;
+					goto skip_data;
+				}
+			}
+
+			if (buf2_len) {
+				dma_sync_single_range_for_cpu(pdata->dev,
+							rdata->rx.buf.dma_base,
+							rdata->rx.buf.dma_off,
+							rdata->rx.buf.dma_len,
+							DMA_FROM_DEVICE);
+
+				skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags,
+						rdata->rx.buf.pa.pages,
+						rdata->rx.buf.pa.pages_offset,
+						buf2_len,
+						rdata->rx.buf.dma_len);
+				rdata->rx.buf.pa.pages = NULL;
+			}
+		}
+
+skip_data:
+		if (!last || context_next)
+			goto read_again;
+
+		if (!skb || error) {
+			dev_kfree_skb(skb);
+			goto next_packet;
+		}
+
+		/* Be sure we don't exceed the configured MTU */
+		max_len = netdev->mtu + ETH_HLEN;
+		if (!(netdev->features & NETIF_F_HW_VLAN_CTAG_RX) &&
+		    (skb->protocol == htons(ETH_P_8021Q)))
+			max_len += VLAN_HLEN;
+
+		if (skb->len > max_len) {
+			netif_err(pdata, rx_err, netdev,
+				  "packet length exceeds configured MTU\n");
+			dev_kfree_skb(skb);
+			goto next_packet;
+		}
+
+		if (netif_msg_pktdata(pdata))
+			xgbe_print_pkt(netdev, skb, false);
+
+		skb_checksum_none_assert(skb);
+		if (XGMAC_GET_BITS(packet->attributes,
+				   RX_PACKET_ATTRIBUTES, CSUM_DONE))
+			skb->ip_summed = CHECKSUM_UNNECESSARY;
+
+		if (XGMAC_GET_BITS(packet->attributes,
+				   RX_PACKET_ATTRIBUTES, TNP)) {
+			skb->encapsulation = 1;
+
+			if (XGMAC_GET_BITS(packet->attributes,
+					   RX_PACKET_ATTRIBUTES, TNPCSUM_DONE))
+				skb->csum_level = 1;
+		}
+
+		if (XGMAC_GET_BITS(packet->attributes,
+				   RX_PACKET_ATTRIBUTES, VLAN_CTAG))
+			__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q),
+					       packet->vlan_ctag);
+
+		if (XGMAC_GET_BITS(packet->attributes,
+				   RX_PACKET_ATTRIBUTES, RX_TSTAMP)) {
+			u64 nsec;
+
+			nsec = timecounter_cyc2time(&pdata->tstamp_tc,
+						    packet->rx_tstamp);
+			hwtstamps = skb_hwtstamps(skb);
+			hwtstamps->hwtstamp = ns_to_ktime(nsec);
+		}
+
+		if (XGMAC_GET_BITS(packet->attributes,
+				   RX_PACKET_ATTRIBUTES, RSS_HASH))
+			skb_set_hash(skb, packet->rss_hash,
+				     packet->rss_hash_type);
+
+		skb->dev = netdev;
+		skb->protocol = eth_type_trans(skb, netdev);
+		skb_record_rx_queue(skb, channel->queue_index);
+
+		napi_gro_receive(napi, skb);
+
+next_packet:
+		packet_count++;
+	}
+
+	/* Check if we need to save state before leaving */
+	if (received && (!last || context_next)) {
+		rdata = XGBE_GET_DESC_DATA(ring, ring->cur);
+		rdata->state_saved = 1;
+		rdata->state.skb = skb;
+		rdata->state.len = len;
+		rdata->state.error = error;
+	}
+
+	DBGPR("<--xgbe_rx_poll: packet_count = %d\n", packet_count);
+
+	return packet_count;
+}

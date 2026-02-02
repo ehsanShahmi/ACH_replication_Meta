@@ -1,0 +1,28 @@
+The vulnerable issue:
+ext4: convert to mbcache2
+
+The conversion is generally straightforward. The only tricky part is
+that xattr block corresponding to found mbcache entry can get freed
+before we get buffer lock for that block. So we have to check whether
+the entry is still valid after getting buffer lock.
+
+Signed-off-by: Jan Kara <jack@suse.cz>
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+
+
+
+The vulnerable function:
+void ext4_xattr_destroy_cache(struct mb_cache *cache)
+{
+	if (cache)
+		mb_cache_destroy(cache);
+}
+
+
+
+The corrected function:
+void ext4_xattr_destroy_cache(struct mb2_cache *cache)
+{
+	if (cache)
+		mb2_cache_destroy(cache);
+}

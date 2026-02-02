@@ -1,0 +1,84 @@
+This issue file has CWE-787. Your task is to create this CWE-787 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+igb: cope with large MAX_SKB_FRAGS
+
+Sabrina reports that the igb driver does not cope well with large
+MAX_SKB_FRAG values: setting MAX_SKB_FRAG to 45 causes payload
+corruption on TX.
+
+An easy reproducer is to run ssh to connect to the machine.  With
+MAX_SKB_FRAGS=17 it works, with MAX_SKB_FRAGS=45 it fails.  This has
+been reported originally in
+https://bugzilla.redhat.com/show_bug.cgi?id=2265320
+
+The root cause of the issue is that the driver does not take into
+account properly the (possibly large) shared info size when selecting
+the ring layout, and will try to fit two packets inside the same 4K
+page even when the 1st fraglist will trump over the 2nd head.
+
+Address the issue by checking if 2K buffers are insufficient.
+
+Fixes: 3948b05950fd ("net: introduce a config option to tweak MAX_SKB_FRAGS")
+Reported-by: Jan Tluka <jtluka@redhat.com>
+Reported-by: Jirka Hladky <jhladky@redhat.com>
+Reported-by: Sabrina Dubroca <sd@queasysnail.net>
+Tested-by: Sabrina Dubroca <sd@queasysnail.net>
+Tested-by: Corinna Vinschen <vinschen@redhat.com>
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+Signed-off-by: Corinna Vinschen <vinschen@redhat.com>
+Link: https://patch.msgid.link/20240816152034.1453285-1-vinschen@redhat.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+
+
+The vulnerable function:
+static void igb_set_rx_buffer_len(struct igb_adapter *adapter,
+				  struct igb_ring *rx_ring)
+{
+// #if (PAGE_SIZE < 8192)
+	struct e1000_hw *hw = &adapter->hw;
+#endif
+
+	/* set build_skb and buffer size flags */
+	clear_ring_build_skb_enabled(rx_ring);
+	clear_ring_uses_large_buffer(rx_ring);
+
+	if (adapter->flags & IGB_FLAG_RX_LEGACY)
+		return;
+
+	set_ring_build_skb_enabled(rx_ring);
+
+// #if (PAGE_SIZE < 8192)
+	if (adapter->max_frame_size > IGB_MAX_FRAME_BUILD_SKB ||
+	    rd32(E1000_RCTL) & E1000_RCTL_SBP)
+		set_ring_uses_large_buffer(rx_ring);
+#endif
+}
+
+
+
+The corrected function:
+static void igb_set_rx_buffer_len(struct igb_adapter *adapter,
+				  struct igb_ring *rx_ring)
+{
+// #if (PAGE_SIZE < 8192)
+	struct e1000_hw *hw = &adapter->hw;
+#endif
+
+	/* set build_skb and buffer size flags */
+	clear_ring_build_skb_enabled(rx_ring);
+	clear_ring_uses_large_buffer(rx_ring);
+
+	if (adapter->flags & IGB_FLAG_RX_LEGACY)
+		return;
+
+	set_ring_build_skb_enabled(rx_ring);
+
+// #if (PAGE_SIZE < 8192)
+	if (adapter->max_frame_size > IGB_MAX_FRAME_BUILD_SKB ||
+	    IGB_2K_TOO_SMALL_WITH_PADDING ||
+	    rd32(E1000_RCTL) & E1000_RCTL_SBP)
+		set_ring_uses_large_buffer(rx_ring);
+#endif
+}

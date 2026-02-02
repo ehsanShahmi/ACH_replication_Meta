@@ -1,0 +1,85 @@
+The vulnerable issue:
+drm/amd/display: Add missing NULL pointer check within dpcd_extend_address_range
+
+[Why & How]
+ASSERT if return NULL from kcalloc.
+
+Reviewed-by: Alex Hung <alex.hung@amd.com>
+Reviewed-by: Rodrigo Siqueira <rodrigo.siqueira@amd.com>
+Acked-by: Tom Chung <chiahsuan.chung@amd.com>
+Signed-off-by: Hersen Wu <hersenxs.wu@amd.com>
+Tested-by: Daniel Wheeler <daniel.wheeler@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+
+
+
+The vulnerable function:
+static void dpcd_extend_address_range(
+		const uint32_t in_address,
+		uint8_t * const in_data,
+		const uint32_t in_size,
+		uint32_t *out_address,
+		uint8_t **out_data,
+		uint32_t *out_size)
+{
+	const uint32_t end_address = END_ADDRESS(in_address, in_size);
+	const struct dpcd_address_range *addr_range;
+	struct dpcd_address_range new_addr_range;
+	uint32_t i;
+
+	new_addr_range.start = in_address;
+	new_addr_range.end = end_address;
+	for (i = 0; i < ARRAY_SIZE(mandatory_dpcd_blocks); i++) {
+		addr_range = &mandatory_dpcd_blocks[i];
+		if (addr_range->start <= in_address && addr_range->end >= in_address)
+			new_addr_range.start = addr_range->start;
+
+		if (addr_range->start <= end_address && addr_range->end >= end_address)
+			new_addr_range.end = addr_range->end;
+	}
+	*out_address = in_address;
+	*out_size = in_size;
+	*out_data = in_data;
+	if (new_addr_range.start != in_address || new_addr_range.end != end_address) {
+		*out_address = new_addr_range.start;
+		*out_size = ADDRESS_RANGE_SIZE(new_addr_range.start, new_addr_range.end);
+		*out_data = kcalloc(*out_size, sizeof(**out_data), GFP_KERNEL);
+	}
+}
+
+
+
+The corrected function:
+static void dpcd_extend_address_range(
+		const uint32_t in_address,
+		uint8_t * const in_data,
+		const uint32_t in_size,
+		uint32_t *out_address,
+		uint8_t **out_data,
+		uint32_t *out_size)
+{
+	const uint32_t end_address = END_ADDRESS(in_address, in_size);
+	const struct dpcd_address_range *addr_range;
+	struct dpcd_address_range new_addr_range;
+	uint32_t i;
+
+	new_addr_range.start = in_address;
+	new_addr_range.end = end_address;
+	for (i = 0; i < ARRAY_SIZE(mandatory_dpcd_blocks); i++) {
+		addr_range = &mandatory_dpcd_blocks[i];
+		if (addr_range->start <= in_address && addr_range->end >= in_address)
+			new_addr_range.start = addr_range->start;
+
+		if (addr_range->start <= end_address && addr_range->end >= end_address)
+			new_addr_range.end = addr_range->end;
+	}
+	*out_address = in_address;
+	*out_size = in_size;
+	*out_data = in_data;
+	if (new_addr_range.start != in_address || new_addr_range.end != end_address) {
+		*out_address = new_addr_range.start;
+		*out_size = ADDRESS_RANGE_SIZE(new_addr_range.start, new_addr_range.end);
+		*out_data = kcalloc(*out_size, sizeof(**out_data), GFP_KERNEL);
+		ASSERT(*out_data);
+	}
+}

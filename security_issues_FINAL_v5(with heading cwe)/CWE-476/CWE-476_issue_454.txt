@@ -1,0 +1,36 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+crypto: algif_skcipher - Require setkey before accept(2)
+
+Some cipher implementations will crash if you try to use them
+without calling setkey first.  This patch adds a check so that
+the accept(2) call will fail with -ENOKEY if setkey hasn't been
+done on the socket yet.
+
+Cc: stable@vger.kernel.org
+Reported-by: Dmitry Vyukov <dvyukov@google.com>
+Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+Tested-by: Dmitry Vyukov <dvyukov@google.com>
+
+
+
+The vulnerable function:
+static int skcipher_setkey(void *private, const u8 *key, unsigned int keylen)
+{
+	return crypto_skcipher_setkey(private, key, keylen);
+}
+
+
+
+The corrected function:
+static int skcipher_setkey(void *private, const u8 *key, unsigned int keylen)
+{
+	struct skcipher_tfm *tfm = private;
+	int err;
+
+	err = crypto_skcipher_setkey(tfm->skcipher, key, keylen);
+	tfm->has_key = !err;
+
+	return err;
+}

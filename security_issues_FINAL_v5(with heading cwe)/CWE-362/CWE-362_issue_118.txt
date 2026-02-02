@@ -1,0 +1,65 @@
+This issue file has CWE-362. Your task is to create this CWE-362 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+floppy: fix lock_fdc() signal handling
+
+floppy_revalidate() doesn't perform any error handling on lock_fdc()
+result. lock_fdc() might actually be interrupted by a signal (it waits for
+fdc becoming non-busy interruptibly). In such case, floppy_revalidate()
+proceeds as if it had claimed the lock, but it fact it doesn't.
+
+In case of multiple threads trying to open("/dev/fdX"), this leads to
+serious corruptions all over the place, because all of a sudden there is
+no critical section protection (that'd otherwise be guaranteed by locked
+fd) whatsoever.
+
+While at this, fix the fact that the 'interruptible' parameter to
+lock_fdc() doesn't make any sense whatsoever, because we always wait
+interruptibly anyway.
+
+Most of the lock_fdc() callsites do properly handle error (and propagate
+EINTR), but floppy_revalidate() and floppy_check_events() don't. Fix this.
+
+Spotted by 'syzkaller' tool.
+
+Reported-by: Dmitry Vyukov <dvyukov@google.com>
+Tested-by: Dmitry Vyukov <dvyukov@google.com>
+Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+
+
+The vulnerable function:
+static int lock_fdc(int drive, bool interruptible)
+{
+	if (WARN(atomic_read(&usage_count) == 0,
+		 "Trying to lock fdc while usage count=0\n"))
+		return -1;
+
+	if (wait_event_interruptible(fdc_wait, !test_and_set_bit(0, &fdc_busy)))
+		return -EINTR;
+
+	command_status = FD_COMMAND_NONE;
+
+	reschedule_timeout(drive, "lock fdc");
+	set_fdc(drive);
+	return 0;
+}
+
+
+
+The corrected function:
+static int lock_fdc(int drive)
+{
+	if (WARN(atomic_read(&usage_count) == 0,
+		 "Trying to lock fdc while usage count=0\n"))
+		return -1;
+
+	if (wait_event_interruptible(fdc_wait, !test_and_set_bit(0, &fdc_busy)))
+		return -EINTR;
+
+	command_status = FD_COMMAND_NONE;
+
+	reschedule_timeout(drive, "lock fdc");
+	set_fdc(drive);
+	return 0;
+}

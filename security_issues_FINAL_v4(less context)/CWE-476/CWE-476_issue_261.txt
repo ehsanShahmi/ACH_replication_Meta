@@ -1,0 +1,128 @@
+The vulnerable issue:
+drm/amd/display: Add NULL pointer check for kzalloc
+
+[Why & How]
+Check return pointer of kzalloc before using it.
+
+Reviewed-by: Alex Hung <alex.hung@amd.com>
+Acked-by: Wayne Lin <wayne.lin@amd.com>
+Signed-off-by: Hersen Wu <hersenxs.wu@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+
+
+
+The vulnerable function:
+void dcn3_clk_mgr_construct(
+		struct dc_context *ctx,
+		struct clk_mgr_internal *clk_mgr,
+		struct pp_smu_funcs *pp_smu,
+		struct dccg *dccg)
+{
+	struct clk_state_registers_and_bypass s = { 0 };
+
+	clk_mgr->base.ctx = ctx;
+	clk_mgr->base.funcs = &dcn3_funcs;
+	clk_mgr->regs = &clk_mgr_regs;
+	clk_mgr->clk_mgr_shift = &clk_mgr_shift;
+	clk_mgr->clk_mgr_mask = &clk_mgr_mask;
+
+	clk_mgr->dccg = dccg;
+	clk_mgr->dfs_bypass_disp_clk = 0;
+
+	clk_mgr->dprefclk_ss_percentage = 0;
+	clk_mgr->dprefclk_ss_divider = 1000;
+	clk_mgr->ss_on_dprefclk = false;
+	clk_mgr->dfs_ref_freq_khz = 100000;
+
+	clk_mgr->base.dprefclk_khz = 730000; // 700 MHz planned if VCO is 3.85 GHz, will be retrieved
+
+	/* integer part is now VCO frequency in kHz */
+	clk_mgr->base.dentist_vco_freq_khz = dcn30_get_vco_frequency_from_reg(clk_mgr);
+
+	/* in case we don't get a value from the register, use default */
+	if (clk_mgr->base.dentist_vco_freq_khz == 0)
+		clk_mgr->base.dentist_vco_freq_khz = 3650000;
+	/* Convert dprefclk units from MHz to KHz */
+	/* Value already divided by 10, some resolution lost */
+
+	/*TODO: uncomment assert once dcn3_dump_clk_registers is implemented */
+	//ASSERT(s.dprefclk != 0);
+	if (s.dprefclk != 0)
+		clk_mgr->base.dprefclk_khz = s.dprefclk * 1000;
+
+	clk_mgr->dfs_bypass_enabled = false;
+
+	clk_mgr->smu_present = false;
+
+	dce_clock_read_ss_info(clk_mgr);
+
+	clk_mgr->base.bw_params = kzalloc(sizeof(*clk_mgr->base.bw_params), GFP_KERNEL);
+
+	/* need physical address of table to give to PMFW */
+	clk_mgr->wm_range_table = dm_helpers_allocate_gpu_mem(clk_mgr->base.ctx,
+			DC_MEM_ALLOC_TYPE_GART, sizeof(WatermarksExternal_t),
+			&clk_mgr->wm_range_table_addr);
+}
+
+
+
+The corrected function:
+void dcn3_clk_mgr_construct(
+		struct dc_context *ctx,
+		struct clk_mgr_internal *clk_mgr,
+		struct pp_smu_funcs *pp_smu,
+		struct dccg *dccg)
+{
+	struct clk_state_registers_and_bypass s = { 0 };
+
+	clk_mgr->base.ctx = ctx;
+	clk_mgr->base.funcs = &dcn3_funcs;
+	clk_mgr->regs = &clk_mgr_regs;
+	clk_mgr->clk_mgr_shift = &clk_mgr_shift;
+	clk_mgr->clk_mgr_mask = &clk_mgr_mask;
+
+	clk_mgr->dccg = dccg;
+	clk_mgr->dfs_bypass_disp_clk = 0;
+
+	clk_mgr->dprefclk_ss_percentage = 0;
+	clk_mgr->dprefclk_ss_divider = 1000;
+	clk_mgr->ss_on_dprefclk = false;
+	clk_mgr->dfs_ref_freq_khz = 100000;
+
+	clk_mgr->base.dprefclk_khz = 730000; // 700 MHz planned if VCO is 3.85 GHz, will be retrieved
+
+	/* integer part is now VCO frequency in kHz */
+	clk_mgr->base.dentist_vco_freq_khz = dcn30_get_vco_frequency_from_reg(clk_mgr);
+
+	/* in case we don't get a value from the register, use default */
+	if (clk_mgr->base.dentist_vco_freq_khz == 0)
+		clk_mgr->base.dentist_vco_freq_khz = 3650000;
+	/* Convert dprefclk units from MHz to KHz */
+	/* Value already divided by 10, some resolution lost */
+
+	/*TODO: uncomment assert once dcn3_dump_clk_registers is implemented */
+	//ASSERT(s.dprefclk != 0);
+	if (s.dprefclk != 0)
+		clk_mgr->base.dprefclk_khz = s.dprefclk * 1000;
+
+	clk_mgr->dfs_bypass_enabled = false;
+
+	clk_mgr->smu_present = false;
+
+	dce_clock_read_ss_info(clk_mgr);
+
+	clk_mgr->base.bw_params = kzalloc(sizeof(*clk_mgr->base.bw_params), GFP_KERNEL);
+	if (!clk_mgr->base.bw_params) {
+		BREAK_TO_DEBUGGER();
+		return;
+	}
+
+	/* need physical address of table to give to PMFW */
+	clk_mgr->wm_range_table = dm_helpers_allocate_gpu_mem(clk_mgr->base.ctx,
+			DC_MEM_ALLOC_TYPE_GART, sizeof(WatermarksExternal_t),
+			&clk_mgr->wm_range_table_addr);
+	if (!clk_mgr->wm_range_table) {
+		BREAK_TO_DEBUGGER();
+		return;
+	}
+}

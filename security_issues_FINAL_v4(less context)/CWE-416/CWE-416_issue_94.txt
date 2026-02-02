@@ -1,0 +1,102 @@
+The vulnerable issue:
+dm btree remove: fix use after free in rebalance_children()
+
+Move dm_tm_unlock() after dm_tm_dec().
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Joe Thornber <ejt@redhat.com>
+Signed-off-by: Mike Snitzer <snitzer@redhat.com>
+
+
+
+The vulnerable function:
+static int rebalance_children(struct shadow_spine *s,
+			      struct dm_btree_info *info,
+			      struct dm_btree_value_type *vt, uint64_t key)
+{
+	int i, r, has_left_sibling, has_right_sibling;
+	struct btree_node *n;
+
+	n = dm_block_data(shadow_current(s));
+
+	if (le32_to_cpu(n->header.nr_entries) == 1) {
+		struct dm_block *child;
+		dm_block_t b = value64(n, 0);
+
+		r = dm_tm_read_lock(info->tm, b, &btree_node_validator, &child);
+		if (r)
+			return r;
+
+		memcpy(n, dm_block_data(child),
+		       dm_bm_block_size(dm_tm_get_bm(info->tm)));
+		dm_tm_unlock(info->tm, child);
+
+		dm_tm_dec(info->tm, dm_block_location(child));
+		return 0;
+	}
+
+	i = lower_bound(n, key);
+	if (i < 0)
+		return -ENODATA;
+
+	has_left_sibling = i > 0;
+	has_right_sibling = i < (le32_to_cpu(n->header.nr_entries) - 1);
+
+	if (!has_left_sibling)
+		r = rebalance2(s, info, vt, i);
+
+	else if (!has_right_sibling)
+		r = rebalance2(s, info, vt, i - 1);
+
+	else
+		r = rebalance3(s, info, vt, i - 1);
+
+	return r;
+}
+
+
+
+The corrected function:
+static int rebalance_children(struct shadow_spine *s,
+			      struct dm_btree_info *info,
+			      struct dm_btree_value_type *vt, uint64_t key)
+{
+	int i, r, has_left_sibling, has_right_sibling;
+	struct btree_node *n;
+
+	n = dm_block_data(shadow_current(s));
+
+	if (le32_to_cpu(n->header.nr_entries) == 1) {
+		struct dm_block *child;
+		dm_block_t b = value64(n, 0);
+
+		r = dm_tm_read_lock(info->tm, b, &btree_node_validator, &child);
+		if (r)
+			return r;
+
+		memcpy(n, dm_block_data(child),
+		       dm_bm_block_size(dm_tm_get_bm(info->tm)));
+
+		dm_tm_dec(info->tm, dm_block_location(child));
+		dm_tm_unlock(info->tm, child);
+		return 0;
+	}
+
+	i = lower_bound(n, key);
+	if (i < 0)
+		return -ENODATA;
+
+	has_left_sibling = i > 0;
+	has_right_sibling = i < (le32_to_cpu(n->header.nr_entries) - 1);
+
+	if (!has_left_sibling)
+		r = rebalance2(s, info, vt, i);
+
+	else if (!has_right_sibling)
+		r = rebalance2(s, info, vt, i - 1);
+
+	else
+		r = rebalance3(s, info, vt, i - 1);
+
+	return r;
+}

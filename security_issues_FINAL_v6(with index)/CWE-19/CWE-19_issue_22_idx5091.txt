@@ -1,0 +1,54 @@
+This issue file has CWE-19. Your task is to create this CWE-19 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+ext2: convert to mbcache2
+
+The conversion is generally straightforward. We convert filesystem from
+a global cache to per-fs one. Similarly to ext4 the tricky part is that
+xattr block corresponding to found mbcache entry can get freed before we
+get buffer lock for that block. So we have to check whether the entry is
+still valid after getting the buffer lock.
+
+Signed-off-by: Jan Kara <jack@suse.cz>
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+
+
+
+The vulnerable function:
+static int __init init_ext2_fs(void)
+{
+	int err = init_ext2_xattr();
+	if (err)
+		return err;
+	err = init_inodecache();
+	if (err)
+		goto out1;
+        err = register_filesystem(&ext2_fs_type);
+	if (err)
+		goto out;
+	return 0;
+out:
+	destroy_inodecache();
+out1:
+	exit_ext2_xattr();
+	return err;
+}
+
+
+
+The corrected function:
+static int __init init_ext2_fs(void)
+{
+	int err;
+
+	err = init_inodecache();
+	if (err)
+		return err;
+        err = register_filesystem(&ext2_fs_type);
+	if (err)
+		goto out;
+	return 0;
+out:
+	destroy_inodecache();
+	return err;
+}

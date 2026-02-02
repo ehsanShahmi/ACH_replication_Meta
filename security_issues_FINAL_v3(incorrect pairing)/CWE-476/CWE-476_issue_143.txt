@@ -1,0 +1,305 @@
+The vulnerable issue:
+smb/server: fix potential null-ptr-deref of lease_ctx_info in smb2_open()
+
+null-ptr-deref will occur when (req_op_level == SMB2_OPLOCK_LEVEL_LEASE)
+and parse_lease_state() return NULL.
+
+Fix this by check if 'lease_ctx_info' is NULL.
+
+Additionally, remove the redundant parentheses in
+parse_durable_handle_context().
+
+Signed-off-by: ChenXiaoSong <chenxiaosong@kylinos.cn>
+Signed-off-by: Steve French <stfrench@microsoft.com>
+
+
+
+The vulnerable function:
+static int parse_durable_handle_context(struct ksmbd_work *work,
+					struct smb2_create_req *req,
+					struct lease_ctx_info *lc,
+					struct durable_info *dh_info)
+{
+	struct ksmbd_conn *conn = work->conn;
+	struct create_context *context;
+	int dh_idx, err = 0;
+	u64 persistent_id = 0;
+	int req_op_level;
+	static const char * const durable_arr[] = {"DH2C", "DHnC", "DH2Q", "DHnQ"};
+
+	req_op_level = req->RequestedOplockLevel;
+	for (dh_idx = DURABLE_RECONN_V2; dh_idx <= ARRAY_SIZE(durable_arr);
+	     dh_idx++) {
+		context = smb2_find_context_vals(req, durable_arr[dh_idx - 1], 4);
+		if (IS_ERR(context)) {
+			err = PTR_ERR(context);
+			goto out;
+		}
+		if (!context)
+			continue;
+
+		switch (dh_idx) {
+		case DURABLE_RECONN_V2:
+		{
+			struct create_durable_reconn_v2_req *recon_v2;
+
+			if (dh_info->type == DURABLE_RECONN ||
+			    dh_info->type == DURABLE_REQ_V2) {
+				err = -EINVAL;
+				goto out;
+			}
+
+			recon_v2 = (struct create_durable_reconn_v2_req *)context;
+			persistent_id = recon_v2->Fid.PersistentFileId;
+			dh_info->fp = ksmbd_lookup_durable_fd(persistent_id);
+			if (!dh_info->fp) {
+				ksmbd_debug(SMB, "Failed to get durable handle state\n");
+				err = -EBADF;
+				goto out;
+			}
+
+			if (memcmp(dh_info->fp->create_guid, recon_v2->CreateGuid,
+				   SMB2_CREATE_GUID_SIZE)) {
+				err = -EBADF;
+				ksmbd_put_durable_fd(dh_info->fp);
+				goto out;
+			}
+
+			dh_info->type = dh_idx;
+			dh_info->reconnected = true;
+			ksmbd_debug(SMB,
+				"reconnect v2 Persistent-id from reconnect = %llu\n",
+					persistent_id);
+			break;
+		}
+		case DURABLE_RECONN:
+		{
+			struct create_durable_reconn_req *recon;
+
+			if (dh_info->type == DURABLE_RECONN_V2 ||
+			    dh_info->type == DURABLE_REQ_V2) {
+				err = -EINVAL;
+				goto out;
+			}
+
+			recon = (struct create_durable_reconn_req *)context;
+			persistent_id = recon->Data.Fid.PersistentFileId;
+			dh_info->fp = ksmbd_lookup_durable_fd(persistent_id);
+			if (!dh_info->fp) {
+				ksmbd_debug(SMB, "Failed to get durable handle state\n");
+				err = -EBADF;
+				goto out;
+			}
+
+			dh_info->type = dh_idx;
+			dh_info->reconnected = true;
+			ksmbd_debug(SMB, "reconnect Persistent-id from reconnect = %llu\n",
+				    persistent_id);
+			break;
+		}
+		case DURABLE_REQ_V2:
+		{
+			struct create_durable_req_v2 *durable_v2_blob;
+
+			if (dh_info->type == DURABLE_RECONN ||
+			    dh_info->type == DURABLE_RECONN_V2) {
+				err = -EINVAL;
+				goto out;
+			}
+
+			durable_v2_blob =
+				(struct create_durable_req_v2 *)context;
+			ksmbd_debug(SMB, "Request for durable v2 open\n");
+			dh_info->fp = ksmbd_lookup_fd_cguid(durable_v2_blob->CreateGuid);
+			if (dh_info->fp) {
+				if (!memcmp(conn->ClientGUID, dh_info->fp->client_guid,
+					    SMB2_CLIENT_GUID_SIZE)) {
+					if (!(req->hdr.Flags & SMB2_FLAGS_REPLAY_OPERATION)) {
+						err = -ENOEXEC;
+						goto out;
+					}
+
+					dh_info->fp->conn = conn;
+					dh_info->reconnected = true;
+					goto out;
+				}
+			}
+
+			if (((lc && (lc->req_state & SMB2_LEASE_HANDLE_CACHING_LE)) ||
+			     req_op_level == SMB2_OPLOCK_LEVEL_BATCH)) {
+				dh_info->CreateGuid =
+					durable_v2_blob->CreateGuid;
+				dh_info->persistent =
+					le32_to_cpu(durable_v2_blob->Flags);
+				dh_info->timeout =
+					le32_to_cpu(durable_v2_blob->Timeout);
+				dh_info->type = dh_idx;
+			}
+			break;
+		}
+		case DURABLE_REQ:
+			if (dh_info->type == DURABLE_RECONN)
+				goto out;
+			if (dh_info->type == DURABLE_RECONN_V2 ||
+			    dh_info->type == DURABLE_REQ_V2) {
+				err = -EINVAL;
+				goto out;
+			}
+
+			if (((lc && (lc->req_state & SMB2_LEASE_HANDLE_CACHING_LE)) ||
+			     req_op_level == SMB2_OPLOCK_LEVEL_BATCH)) {
+				ksmbd_debug(SMB, "Request for durable open\n");
+				dh_info->type = dh_idx;
+			}
+		}
+	}
+
+out:
+	return err;
+}
+
+
+
+The corrected function:
+static int parse_durable_handle_context(struct ksmbd_work *work,
+					struct smb2_create_req *req,
+					struct lease_ctx_info *lc,
+					struct durable_info *dh_info)
+{
+	struct ksmbd_conn *conn = work->conn;
+	struct create_context *context;
+	int dh_idx, err = 0;
+	u64 persistent_id = 0;
+	int req_op_level;
+	static const char * const durable_arr[] = {"DH2C", "DHnC", "DH2Q", "DHnQ"};
+
+	req_op_level = req->RequestedOplockLevel;
+	for (dh_idx = DURABLE_RECONN_V2; dh_idx <= ARRAY_SIZE(durable_arr);
+	     dh_idx++) {
+		context = smb2_find_context_vals(req, durable_arr[dh_idx - 1], 4);
+		if (IS_ERR(context)) {
+			err = PTR_ERR(context);
+			goto out;
+		}
+		if (!context)
+			continue;
+
+		switch (dh_idx) {
+		case DURABLE_RECONN_V2:
+		{
+			struct create_durable_reconn_v2_req *recon_v2;
+
+			if (dh_info->type == DURABLE_RECONN ||
+			    dh_info->type == DURABLE_REQ_V2) {
+				err = -EINVAL;
+				goto out;
+			}
+
+			recon_v2 = (struct create_durable_reconn_v2_req *)context;
+			persistent_id = recon_v2->Fid.PersistentFileId;
+			dh_info->fp = ksmbd_lookup_durable_fd(persistent_id);
+			if (!dh_info->fp) {
+				ksmbd_debug(SMB, "Failed to get durable handle state\n");
+				err = -EBADF;
+				goto out;
+			}
+
+			if (memcmp(dh_info->fp->create_guid, recon_v2->CreateGuid,
+				   SMB2_CREATE_GUID_SIZE)) {
+				err = -EBADF;
+				ksmbd_put_durable_fd(dh_info->fp);
+				goto out;
+			}
+
+			dh_info->type = dh_idx;
+			dh_info->reconnected = true;
+			ksmbd_debug(SMB,
+				"reconnect v2 Persistent-id from reconnect = %llu\n",
+					persistent_id);
+			break;
+		}
+		case DURABLE_RECONN:
+		{
+			struct create_durable_reconn_req *recon;
+
+			if (dh_info->type == DURABLE_RECONN_V2 ||
+			    dh_info->type == DURABLE_REQ_V2) {
+				err = -EINVAL;
+				goto out;
+			}
+
+			recon = (struct create_durable_reconn_req *)context;
+			persistent_id = recon->Data.Fid.PersistentFileId;
+			dh_info->fp = ksmbd_lookup_durable_fd(persistent_id);
+			if (!dh_info->fp) {
+				ksmbd_debug(SMB, "Failed to get durable handle state\n");
+				err = -EBADF;
+				goto out;
+			}
+
+			dh_info->type = dh_idx;
+			dh_info->reconnected = true;
+			ksmbd_debug(SMB, "reconnect Persistent-id from reconnect = %llu\n",
+				    persistent_id);
+			break;
+		}
+		case DURABLE_REQ_V2:
+		{
+			struct create_durable_req_v2 *durable_v2_blob;
+
+			if (dh_info->type == DURABLE_RECONN ||
+			    dh_info->type == DURABLE_RECONN_V2) {
+				err = -EINVAL;
+				goto out;
+			}
+
+			durable_v2_blob =
+				(struct create_durable_req_v2 *)context;
+			ksmbd_debug(SMB, "Request for durable v2 open\n");
+			dh_info->fp = ksmbd_lookup_fd_cguid(durable_v2_blob->CreateGuid);
+			if (dh_info->fp) {
+				if (!memcmp(conn->ClientGUID, dh_info->fp->client_guid,
+					    SMB2_CLIENT_GUID_SIZE)) {
+					if (!(req->hdr.Flags & SMB2_FLAGS_REPLAY_OPERATION)) {
+						err = -ENOEXEC;
+						goto out;
+					}
+
+					dh_info->fp->conn = conn;
+					dh_info->reconnected = true;
+					goto out;
+				}
+			}
+
+			if ((lc && (lc->req_state & SMB2_LEASE_HANDLE_CACHING_LE)) ||
+			    req_op_level == SMB2_OPLOCK_LEVEL_BATCH) {
+				dh_info->CreateGuid =
+					durable_v2_blob->CreateGuid;
+				dh_info->persistent =
+					le32_to_cpu(durable_v2_blob->Flags);
+				dh_info->timeout =
+					le32_to_cpu(durable_v2_blob->Timeout);
+				dh_info->type = dh_idx;
+			}
+			break;
+		}
+		case DURABLE_REQ:
+			if (dh_info->type == DURABLE_RECONN)
+				goto out;
+			if (dh_info->type == DURABLE_RECONN_V2 ||
+			    dh_info->type == DURABLE_REQ_V2) {
+				err = -EINVAL;
+				goto out;
+			}
+
+			if ((lc && (lc->req_state & SMB2_LEASE_HANDLE_CACHING_LE)) ||
+			    req_op_level == SMB2_OPLOCK_LEVEL_BATCH) {
+				ksmbd_debug(SMB, "Request for durable open\n");
+				dh_info->type = dh_idx;
+			}
+		}
+	}
+
+out:
+	return err;
+}

@@ -1,0 +1,42 @@
+The vulnerable issue:
+KVM: Don't accept obviously wrong gsi values via KVM_IRQFD
+
+We cannot add routes for gsi values >= KVM_MAX_IRQ_ROUTES -- see
+kvm_set_irq_routing(). Hence, there is no sense in accepting them
+via KVM_IRQFD. Prevent them from entering the system in the first
+place.
+
+Signed-off-by: Jan H. Schönherr <jschoenh@amazon.de>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+
+
+The vulnerable function:
+int
+kvm_irqfd(struct kvm *kvm, struct kvm_irqfd *args)
+{
+	if (args->flags & ~(KVM_IRQFD_FLAG_DEASSIGN | KVM_IRQFD_FLAG_RESAMPLE))
+		return -EINVAL;
+
+	if (args->flags & KVM_IRQFD_FLAG_DEASSIGN)
+		return kvm_irqfd_deassign(kvm, args);
+
+	return kvm_irqfd_assign(kvm, args);
+}
+
+
+
+The corrected function:
+int
+kvm_irqfd(struct kvm *kvm, struct kvm_irqfd *args)
+{
+	if (args->flags & ~(KVM_IRQFD_FLAG_DEASSIGN | KVM_IRQFD_FLAG_RESAMPLE))
+		return -EINVAL;
+	if (args->gsi >= KVM_MAX_IRQ_ROUTES)
+		return -EINVAL;
+
+	if (args->flags & KVM_IRQFD_FLAG_DEASSIGN)
+		return kvm_irqfd_deassign(kvm, args);
+
+	return kvm_irqfd_assign(kvm, args);
+}

@@ -1,0 +1,63 @@
+The vulnerable issue:
+phy: tegra: xusb: Fix return value of tegra_xusb_find_port_node function
+
+callers of tegra_xusb_find_port_node() function only do NULL checking for
+the return value. return NULL instead of ERR_PTR(-ENOMEM) to keep
+consistent.
+
+Signed-off-by: Miaoqian Lin <linmq006@gmail.com>
+Acked-by: Thierry Reding <treding@nvidia.com>
+Link: https://lore.kernel.org/r/20211213020507.1458-1-linmq006@gmail.com
+Signed-off-by: Vinod Koul <vkoul@kernel.org>
+
+
+
+The vulnerable function:
+static struct device_node *
+tegra_xusb_find_port_node(struct tegra_xusb_padctl *padctl, const char *type,
+			  unsigned int index)
+{
+	struct device_node *ports, *np;
+	char *name;
+
+	ports = of_get_child_by_name(padctl->dev->of_node, "ports");
+	if (!ports)
+		return NULL;
+
+	name = kasprintf(GFP_KERNEL, "%s-%u", type, index);
+	if (!name) {
+		of_node_put(ports);
+		return ERR_PTR(-ENOMEM);
+	}
+	np = of_get_child_by_name(ports, name);
+	kfree(name);
+	of_node_put(ports);
+
+	return np;
+}
+
+
+
+The corrected function:
+static struct device_node *
+tegra_xusb_find_port_node(struct tegra_xusb_padctl *padctl, const char *type,
+			  unsigned int index)
+{
+	struct device_node *ports, *np;
+	char *name;
+
+	ports = of_get_child_by_name(padctl->dev->of_node, "ports");
+	if (!ports)
+		return NULL;
+
+	name = kasprintf(GFP_KERNEL, "%s-%u", type, index);
+	if (!name) {
+		of_node_put(ports);
+		return NULL;
+	}
+	np = of_get_child_by_name(ports, name);
+	kfree(name);
+	of_node_put(ports);
+
+	return np;
+}

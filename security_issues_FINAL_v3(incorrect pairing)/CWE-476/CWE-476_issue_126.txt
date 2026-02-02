@@ -1,0 +1,177 @@
+The vulnerable issue:
+mm: migrate dirty page without clear_page_dirty_for_io etc
+
+clear_page_dirty_for_io() has accumulated writeback and memcg subtleties
+since v2.6.16 first introduced page migration; and the set_page_dirty()
+which completed its migration of PageDirty, later had to be moderated to
+__set_page_dirty_nobuffers(); then PageSwapBacked had to skip that too.
+
+No actual problems seen with this procedure recently, but if you look into
+what the clear_page_dirty_for_io(page)+set_page_dirty(newpage) is actually
+achieving, it turns out to be nothing more than moving the PageDirty flag,
+and its NR_FILE_DIRTY stat from one zone to another.
+
+It would be good to avoid a pile of irrelevant decrementations and
+incrementations, and improper event counting, and unnecessary descent of
+the radix_tree under tree_lock (to set the PAGECACHE_TAG_DIRTY which
+radix_tree_replace_slot() left in place anyway).
+
+Do the NR_FILE_DIRTY movement, like the other stats movements, while
+interrupts still disabled in migrate_page_move_mapping(); and don't even
+bother if the zone is the same.  Do the PageDirty movement there under
+tree_lock too, where old page is frozen and newpage not yet visible:
+bearing in mind that as soon as newpage becomes visible in radix_tree, an
+un-page-locked set_page_dirty() might interfere (or perhaps that's just
+not possible: anything doing so should already hold an additional
+reference to the old page, preventing its migration; but play safe).
+
+But we do still need to transfer PageDirty in migrate_page_copy(), for
+those who don't go the mapping route through migrate_page_move_mapping().
+
+Signed-off-by: Hugh Dickins <hughd@google.com>
+Cc: Christoph Lameter <cl@linux.com>
+Cc: "Kirill A. Shutemov" <kirill.shutemov@linux.intel.com>
+Cc: Rik van Riel <riel@redhat.com>
+Cc: Vlastimil Babka <vbabka@suse.cz>
+Cc: Davidlohr Bueso <dave@stgolabs.net>
+Cc: Oleg Nesterov <oleg@redhat.com>
+Cc: Sasha Levin <sasha.levin@oracle.com>
+Cc: Dmitry Vyukov <dvyukov@google.com>
+Cc: KOSAKI Motohiro <kosaki.motohiro@jp.fujitsu.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+void migrate_page_copy(struct page *newpage, struct page *page)
+{
+	int cpupid;
+
+	if (PageHuge(page) || PageTransHuge(page))
+		copy_huge_page(newpage, page);
+	else
+		copy_highpage(newpage, page);
+
+	if (PageError(page))
+		SetPageError(newpage);
+	if (PageReferenced(page))
+		SetPageReferenced(newpage);
+	if (PageUptodate(page))
+		SetPageUptodate(newpage);
+	if (TestClearPageActive(page)) {
+		VM_BUG_ON_PAGE(PageUnevictable(page), page);
+		SetPageActive(newpage);
+	} else if (TestClearPageUnevictable(page))
+		SetPageUnevictable(newpage);
+	if (PageChecked(page))
+		SetPageChecked(newpage);
+	if (PageMappedToDisk(page))
+		SetPageMappedToDisk(newpage);
+
+	if (PageDirty(page)) {
+		clear_page_dirty_for_io(page);
+		/*
+		 * Want to mark the page and the radix tree as dirty, and
+		 * redo the accounting that clear_page_dirty_for_io undid,
+		 * but we can't use set_page_dirty because that function
+		 * is actually a signal that all of the page has become dirty.
+		 * Whereas only part of our page may be dirty.
+		 */
+		if (PageSwapBacked(page))
+			SetPageDirty(newpage);
+		else
+			__set_page_dirty_nobuffers(newpage);
+ 	}
+
+	if (page_is_young(page))
+		set_page_young(newpage);
+	if (page_is_idle(page))
+		set_page_idle(newpage);
+
+	/*
+	 * Copy NUMA information to the new page, to prevent over-eager
+	 * future migrations of this same page.
+	 */
+	cpupid = page_cpupid_xchg_last(page, -1);
+	page_cpupid_xchg_last(newpage, cpupid);
+
+	ksm_migrate_page(newpage, page);
+	/*
+	 * Please do not reorder this without considering how mm/ksm.c's
+	 * get_ksm_page() depends upon ksm_migrate_page() and PageSwapCache().
+	 */
+	if (PageSwapCache(page))
+		ClearPageSwapCache(page);
+	ClearPagePrivate(page);
+	set_page_private(page, 0);
+
+	/*
+	 * If any waiters have accumulated on the new page then
+	 * wake them up.
+	 */
+	if (PageWriteback(newpage))
+		end_page_writeback(newpage);
+}
+
+
+
+The corrected function:
+void migrate_page_copy(struct page *newpage, struct page *page)
+{
+	int cpupid;
+
+	if (PageHuge(page) || PageTransHuge(page))
+		copy_huge_page(newpage, page);
+	else
+		copy_highpage(newpage, page);
+
+	if (PageError(page))
+		SetPageError(newpage);
+	if (PageReferenced(page))
+		SetPageReferenced(newpage);
+	if (PageUptodate(page))
+		SetPageUptodate(newpage);
+	if (TestClearPageActive(page)) {
+		VM_BUG_ON_PAGE(PageUnevictable(page), page);
+		SetPageActive(newpage);
+	} else if (TestClearPageUnevictable(page))
+		SetPageUnevictable(newpage);
+	if (PageChecked(page))
+		SetPageChecked(newpage);
+	if (PageMappedToDisk(page))
+		SetPageMappedToDisk(newpage);
+
+	/* Move dirty on pages not done by migrate_page_move_mapping() */
+	if (PageDirty(page))
+		SetPageDirty(newpage);
+
+	if (page_is_young(page))
+		set_page_young(newpage);
+	if (page_is_idle(page))
+		set_page_idle(newpage);
+
+	/*
+	 * Copy NUMA information to the new page, to prevent over-eager
+	 * future migrations of this same page.
+	 */
+	cpupid = page_cpupid_xchg_last(page, -1);
+	page_cpupid_xchg_last(newpage, cpupid);
+
+	ksm_migrate_page(newpage, page);
+	/*
+	 * Please do not reorder this without considering how mm/ksm.c's
+	 * get_ksm_page() depends upon ksm_migrate_page() and PageSwapCache().
+	 */
+	if (PageSwapCache(page))
+		ClearPageSwapCache(page);
+	ClearPagePrivate(page);
+	set_page_private(page, 0);
+
+	/*
+	 * If any waiters have accumulated on the new page then
+	 * wake them up.
+	 */
+	if (PageWriteback(newpage))
+		end_page_writeback(newpage);
+}

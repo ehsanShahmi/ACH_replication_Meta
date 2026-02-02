@@ -1,0 +1,53 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+Input: sunkbd - avoid use-after-free in teardown paths
+
+We need to make sure we cancel the reinit work before we tear down the
+driver structures.
+
+Reported-by: Bodong Zhao <nopitydays@gmail.com>
+Tested-by: Bodong Zhao <nopitydays@gmail.com>
+Cc: stable@vger.kernel.org
+Signed-off-by: Dmitry Torokhov <dmitry.torokhov@gmail.com>
+
+
+
+The vulnerable function:
+static void sunkbd_reinit(struct work_struct *work)
+{
+	struct sunkbd *sunkbd = container_of(work, struct sunkbd, tq);
+
+	wait_event_interruptible_timeout(sunkbd->wait, sunkbd->reset >= 0, HZ);
+
+	serio_write(sunkbd->serio, SUNKBD_CMD_SETLED);
+	serio_write(sunkbd->serio,
+		(!!test_bit(LED_CAPSL,   sunkbd->dev->led) << 3) |
+		(!!test_bit(LED_SCROLLL, sunkbd->dev->led) << 2) |
+		(!!test_bit(LED_COMPOSE, sunkbd->dev->led) << 1) |
+		 !!test_bit(LED_NUML,    sunkbd->dev->led));
+	serio_write(sunkbd->serio,
+		SUNKBD_CMD_NOCLICK - !!test_bit(SND_CLICK, sunkbd->dev->snd));
+	serio_write(sunkbd->serio,
+		SUNKBD_CMD_BELLOFF - !!test_bit(SND_BELL, sunkbd->dev->snd));
+}
+
+
+
+The corrected function:
+static void sunkbd_reinit(struct work_struct *work)
+{
+	struct sunkbd *sunkbd = container_of(work, struct sunkbd, tq);
+
+	/*
+	 * It is OK that we check sunkbd->enabled without pausing serio,
+	 * as we only want to catch true->false transition that will
+	 * happen once and we will be woken up for it.
+	 */
+	wait_event_interruptible_timeout(sunkbd->wait,
+					 sunkbd->reset >= 0 || !sunkbd->enabled,
+					 HZ);
+
+	if (sunkbd->reset >= 0 && sunkbd->enabled)
+		sunkbd_set_leds_beeps(sunkbd);
+}

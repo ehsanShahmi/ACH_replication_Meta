@@ -1,0 +1,87 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+nvmem: brcm_nvram: Add check for kzalloc
+
+Add the check for the return value of kzalloc in order to avoid
+NULL pointer dereference.
+
+Fixes: 6e977eaa8280 ("nvmem: brcm_nvram: parse NVRAM content into NVMEM cells")
+Cc: stable@vger.kernel.org
+Signed-off-by: Jiasheng Jiang <jiasheng@iscas.ac.cn>
+Signed-off-by: Srinivas Kandagatla <srinivas.kandagatla@linaro.org>
+Link: https://lore.kernel.org/r/20230127104015.23839-2-srinivas.kandagatla@linaro.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+
+
+The vulnerable function:
+static int brcm_nvram_parse(struct brcm_nvram *priv)
+{
+	struct device *dev = priv->dev;
+	struct brcm_nvram_header header;
+	uint8_t *data;
+	size_t len;
+	int err;
+
+	memcpy_fromio(&header, priv->base, sizeof(header));
+
+	if (memcmp(header.magic, NVRAM_MAGIC, 4)) {
+		dev_err(dev, "Invalid NVRAM magic\n");
+		return -EINVAL;
+	}
+
+	len = le32_to_cpu(header.len);
+
+	data = kzalloc(len, GFP_KERNEL);
+	memcpy_fromio(data, priv->base, len);
+	data[len - 1] = '\0';
+
+	err = brcm_nvram_add_cells(priv, data, len);
+	if (err) {
+		dev_err(dev, "Failed to add cells: %d\n", err);
+		return err;
+	}
+
+	kfree(data);
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int brcm_nvram_parse(struct brcm_nvram *priv)
+{
+	struct device *dev = priv->dev;
+	struct brcm_nvram_header header;
+	uint8_t *data;
+	size_t len;
+	int err;
+
+	memcpy_fromio(&header, priv->base, sizeof(header));
+
+	if (memcmp(header.magic, NVRAM_MAGIC, 4)) {
+		dev_err(dev, "Invalid NVRAM magic\n");
+		return -EINVAL;
+	}
+
+	len = le32_to_cpu(header.len);
+
+	data = kzalloc(len, GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	memcpy_fromio(data, priv->base, len);
+	data[len - 1] = '\0';
+
+	err = brcm_nvram_add_cells(priv, data, len);
+	if (err) {
+		dev_err(dev, "Failed to add cells: %d\n", err);
+		return err;
+	}
+
+	kfree(data);
+
+	return 0;
+}

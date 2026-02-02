@@ -1,0 +1,39 @@
+The vulnerable issue:
+drm/vrr: Set VRR capable prop only if it is attached to connector
+
+VRR capable property is not attached by default to the connector
+It is attached only if VRR is supported.
+So if the driver tries to call drm core set prop function without
+it being attached that causes NULL dereference.
+
+Cc: Jani Nikula <jani.nikula@intel.com>
+Cc: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Cc: dri-devel@lists.freedesktop.org
+Signed-off-by: Manasi Navare <manasi.d.navare@intel.com>
+Reviewed-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20220225013055.9282-1-manasi.d.navare@intel.com
+
+
+
+The vulnerable function:
+void drm_connector_set_vrr_capable_property(
+		struct drm_connector *connector, bool capable)
+{
+	drm_object_property_set_value(&connector->base,
+				      connector->vrr_capable_property,
+				      capable);
+}
+
+
+
+The corrected function:
+void drm_connector_set_vrr_capable_property(
+		struct drm_connector *connector, bool capable)
+{
+	if (!connector->vrr_capable_property)
+		return;
+
+	drm_object_property_set_value(&connector->base,
+				      connector->vrr_capable_property,
+				      capable);
+}

@@ -1,0 +1,107 @@
+The vulnerable issue:
+drm/amdgpu/pm: Fix the null pointer dereference in apply_state_adjust_rules
+
+Check the pointer value to fix potential null pointer
+dereference
+
+Acked-by: Yang Wang<kevinyang.wang@amd.com>
+Signed-off-by: Ma Jun <Jun.Ma2@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+
+
+
+The vulnerable function:
+static int smu8_apply_state_adjust_rules(struct pp_hwmgr *hwmgr,
+				struct pp_power_state  *prequest_ps,
+			const struct pp_power_state *pcurrent_ps)
+{
+	struct smu8_power_state *smu8_ps =
+				cast_smu8_power_state(&prequest_ps->hardware);
+
+	const struct smu8_power_state *smu8_current_ps =
+				cast_const_smu8_power_state(&pcurrent_ps->hardware);
+
+	struct smu8_hwmgr *data = hwmgr->backend;
+	struct PP_Clocks clocks = {0, 0, 0, 0};
+	bool force_high;
+
+	smu8_ps->need_dfs_bypass = true;
+
+	data->battery_state = (PP_StateUILabel_Battery == prequest_ps->classification.ui_label);
+
+	clocks.memoryClock = hwmgr->display_config->min_mem_set_clock != 0 ?
+				hwmgr->display_config->min_mem_set_clock :
+				data->sys_info.nbp_memory_clock[1];
+
+
+	if (phm_cap_enabled(hwmgr->platform_descriptor.platformCaps, PHM_PlatformCaps_StablePState))
+		clocks.memoryClock = hwmgr->dyn_state.max_clock_voltage_on_ac.mclk;
+
+	force_high = (clocks.memoryClock > data->sys_info.nbp_memory_clock[SMU8_NUM_NBPMEMORYCLOCK - 1])
+			|| (hwmgr->display_config->num_display >= 3);
+
+	smu8_ps->action = smu8_current_ps->action;
+
+	if (hwmgr->request_dpm_level == AMD_DPM_FORCED_LEVEL_PROFILE_PEAK)
+		smu8_nbdpm_pstate_enable_disable(hwmgr, false, false);
+	else if (hwmgr->request_dpm_level == AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD)
+		smu8_nbdpm_pstate_enable_disable(hwmgr, false, true);
+	else if (!force_high && (smu8_ps->action == FORCE_HIGH))
+		smu8_ps->action = CANCEL_FORCE_HIGH;
+	else if (force_high && (smu8_ps->action != FORCE_HIGH))
+		smu8_ps->action = FORCE_HIGH;
+	else
+		smu8_ps->action = DO_NOTHING;
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int smu8_apply_state_adjust_rules(struct pp_hwmgr *hwmgr,
+				struct pp_power_state  *prequest_ps,
+			const struct pp_power_state *pcurrent_ps)
+{
+	struct smu8_power_state *smu8_ps;
+	const struct smu8_power_state *smu8_current_ps;
+	struct smu8_hwmgr *data = hwmgr->backend;
+	struct PP_Clocks clocks = {0, 0, 0, 0};
+	bool force_high;
+
+	smu8_ps = cast_smu8_power_state(&prequest_ps->hardware);
+	smu8_current_ps = cast_const_smu8_power_state(&pcurrent_ps->hardware);
+
+	if (!smu8_ps || !smu8_current_ps)
+		return -EINVAL;
+
+	smu8_ps->need_dfs_bypass = true;
+
+	data->battery_state = (PP_StateUILabel_Battery == prequest_ps->classification.ui_label);
+
+	clocks.memoryClock = hwmgr->display_config->min_mem_set_clock != 0 ?
+				hwmgr->display_config->min_mem_set_clock :
+				data->sys_info.nbp_memory_clock[1];
+
+
+	if (phm_cap_enabled(hwmgr->platform_descriptor.platformCaps, PHM_PlatformCaps_StablePState))
+		clocks.memoryClock = hwmgr->dyn_state.max_clock_voltage_on_ac.mclk;
+
+	force_high = (clocks.memoryClock > data->sys_info.nbp_memory_clock[SMU8_NUM_NBPMEMORYCLOCK - 1])
+			|| (hwmgr->display_config->num_display >= 3);
+
+	smu8_ps->action = smu8_current_ps->action;
+
+	if (hwmgr->request_dpm_level == AMD_DPM_FORCED_LEVEL_PROFILE_PEAK)
+		smu8_nbdpm_pstate_enable_disable(hwmgr, false, false);
+	else if (hwmgr->request_dpm_level == AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD)
+		smu8_nbdpm_pstate_enable_disable(hwmgr, false, true);
+	else if (!force_high && (smu8_ps->action == FORCE_HIGH))
+		smu8_ps->action = CANCEL_FORCE_HIGH;
+	else if (force_high && (smu8_ps->action != FORCE_HIGH))
+		smu8_ps->action = FORCE_HIGH;
+	else
+		smu8_ps->action = DO_NOTHING;
+
+	return 0;
+}

@@ -1,0 +1,118 @@
+The vulnerable issue:
+ALSA: timer: Fix race among timer ioctls
+
+ALSA timer ioctls have an open race and this may lead to a
+use-after-free of timer instance object.  A simplistic fix is to make
+each ioctl exclusive.  We have already tread_sem for controlling the
+tread, and extend this as a global mutex to be applied to each ioctl.
+
+The downside is, of course, the worse concurrency.  But these ioctls
+aren't to be parallel accessible, in anyway, so it should be fine to
+serialize there.
+
+Reported-by: Dmitry Vyukov <dvyukov@google.com>
+Tested-by: Dmitry Vyukov <dvyukov@google.com>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+
+
+The vulnerable function:
+static int snd_timer_user_tselect(struct file *file,
+				  struct snd_timer_select __user *_tselect)
+{
+	struct snd_timer_user *tu;
+	struct snd_timer_select tselect;
+	char str[32];
+	int err = 0;
+
+	tu = file->private_data;
+	mutex_lock(&tu->tread_sem);
+	if (tu->timeri) {
+		snd_timer_close(tu->timeri);
+		tu->timeri = NULL;
+	}
+	if (copy_from_user(&tselect, _tselect, sizeof(tselect))) {
+		err = -EFAULT;
+		goto __err;
+	}
+	sprintf(str, "application %i", current->pid);
+	if (tselect.id.dev_class != SNDRV_TIMER_CLASS_SLAVE)
+		tselect.id.dev_sclass = SNDRV_TIMER_SCLASS_APPLICATION;
+	err = snd_timer_open(&tu->timeri, str, &tselect.id, current->pid);
+	if (err < 0)
+		goto __err;
+
+	kfree(tu->queue);
+	tu->queue = NULL;
+	kfree(tu->tqueue);
+	tu->tqueue = NULL;
+	if (tu->tread) {
+		tu->tqueue = kmalloc(tu->queue_size * sizeof(struct snd_timer_tread),
+				     GFP_KERNEL);
+		if (tu->tqueue == NULL)
+			err = -ENOMEM;
+	} else {
+		tu->queue = kmalloc(tu->queue_size * sizeof(struct snd_timer_read),
+				    GFP_KERNEL);
+		if (tu->queue == NULL)
+			err = -ENOMEM;
+	}
+
+      	if (err < 0) {
+		snd_timer_close(tu->timeri);
+      		tu->timeri = NULL;
+      	} else {
+		tu->timeri->flags |= SNDRV_TIMER_IFLG_FAST;
+		tu->timeri->callback = tu->tread
+			? snd_timer_user_tinterrupt : snd_timer_user_interrupt;
+		tu->timeri->ccallback = snd_timer_user_ccallback;
+		tu->timeri->callback_data = (void *)tu;
+	}
+
+      __err:
+      	mutex_unlock(&tu->tread_sem);
+	return err;
+}
+
+
+
+The corrected function:
+static int skcipher_accept_parent(void *private, struct sock *sk)
+{
+	struct skcipher_ctx *ctx;
+	struct alg_sock *ask = alg_sk(sk);
+	unsigned int len = sizeof(*ctx) + crypto_skcipher_reqsize(private);
+
+	ctx = sock_kmalloc(sk, len, GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+
+	ctx->iv = sock_kmalloc(sk, crypto_skcipher_ivsize(private),
+			       GFP_KERNEL);
+	if (!ctx->iv) {
+		sock_kfree_s(sk, ctx, len);
+		return -ENOMEM;
+	}
+
+	memset(ctx->iv, 0, crypto_skcipher_ivsize(private));
+
+	INIT_LIST_HEAD(&ctx->tsgl);
+	ctx->len = len;
+	ctx->used = 0;
+	ctx->more = 0;
+	ctx->merge = 0;
+	ctx->enc = 0;
+	atomic_set(&ctx->inflight, 0);
+	af_alg_init_completion(&ctx->completion);
+
+	ask->private = ctx;
+
+	skcipher_request_set_tfm(&ctx->req, private);
+	skcipher_request_set_callback(&ctx->req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+				      af_alg_complete, &ctx->completion);
+
+	sk->sk_destruct = skcipher_sock_destruct;
+
+	return 0;
+}

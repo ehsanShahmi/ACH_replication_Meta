@@ -1,0 +1,88 @@
+This issue file has CWE-190. Your task is to create this CWE-190 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+padata: use integer wrap around to prevent deadlock on seq_nr overflow
+
+When submitting more than 2^32 padata objects to padata_do_serial, the
+current sorting implementation incorrectly sorts padata objects with
+overflowed seq_nr, causing them to be placed before existing objects in
+the reorder list. This leads to a deadlock in the serialization process
+as padata_find_next cannot match padata->seq_nr and pd->processed
+because the padata instance with overflowed seq_nr will be selected
+next.
+
+To fix this, we use an unsigned integer wrap around to correctly sort
+padata objects in scenarios with integer overflow.
+
+Fixes: bfde23ce200e ("padata: unbind parallel jobs from specific CPUs")
+Cc: <stable@vger.kernel.org>
+Co-developed-by: Christian Gafert <christian.gafert@rohde-schwarz.com>
+Signed-off-by: Christian Gafert <christian.gafert@rohde-schwarz.com>
+Co-developed-by: Max Ferger <max.ferger@rohde-schwarz.com>
+Signed-off-by: Max Ferger <max.ferger@rohde-schwarz.com>
+Signed-off-by: Van Giang Nguyen <vangiang.nguyen@rohde-schwarz.com>
+Acked-by: Daniel Jordan <daniel.m.jordan@oracle.com>
+Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+
+
+The vulnerable function:
+void padata_do_serial(struct padata_priv *padata)
+{
+	struct parallel_data *pd = padata->pd;
+	int hashed_cpu = padata_cpu_hash(pd, padata->seq_nr);
+	struct padata_list *reorder = per_cpu_ptr(pd->reorder_list, hashed_cpu);
+	struct padata_priv *cur;
+	struct list_head *pos;
+
+	spin_lock(&reorder->lock);
+	/* Sort in ascending order of sequence number. */
+	list_for_each_prev(pos, &reorder->list) {
+		cur = list_entry(pos, struct padata_priv, list);
+		if (cur->seq_nr < padata->seq_nr)
+			break;
+	}
+	list_add(&padata->list, pos);
+	spin_unlock(&reorder->lock);
+
+	/*
+	 * Ensure the addition to the reorder list is ordered correctly
+	 * with the trylock of pd->lock in padata_reorder.  Pairs with smp_mb
+	 * in padata_reorder.
+	 */
+	smp_mb();
+
+	padata_reorder(pd);
+}
+
+
+
+The corrected function:
+void padata_do_serial(struct padata_priv *padata)
+{
+	struct parallel_data *pd = padata->pd;
+	int hashed_cpu = padata_cpu_hash(pd, padata->seq_nr);
+	struct padata_list *reorder = per_cpu_ptr(pd->reorder_list, hashed_cpu);
+	struct padata_priv *cur;
+	struct list_head *pos;
+
+	spin_lock(&reorder->lock);
+	/* Sort in ascending order of sequence number. */
+	list_for_each_prev(pos, &reorder->list) {
+		cur = list_entry(pos, struct padata_priv, list);
+		/* Compare by difference to consider integer wrap around */
+		if ((signed int)(cur->seq_nr - padata->seq_nr) < 0)
+			break;
+	}
+	list_add(&padata->list, pos);
+	spin_unlock(&reorder->lock);
+
+	/*
+	 * Ensure the addition to the reorder list is ordered correctly
+	 * with the trylock of pd->lock in padata_reorder.  Pairs with smp_mb
+	 * in padata_reorder.
+	 */
+	smp_mb();
+
+	padata_reorder(pd);
+}

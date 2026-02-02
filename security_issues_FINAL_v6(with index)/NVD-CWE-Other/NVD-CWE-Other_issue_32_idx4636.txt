@@ -1,0 +1,56 @@
+This issue file has NVD-CWE-Other. Your task is to create this NVD-CWE-Other type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+ALSA: compress: fix an integer overflow check
+
+I previously added an integer overflow check here but looking at it now,
+it's still buggy.
+
+The bug happens in snd_compr_allocate_buffer().  We multiply
+".fragments" and ".fragment_size" and that doesn't overflow but then we
+save it in an unsigned int so it truncates the high bits away and we
+allocate a smaller than expected size.
+
+Fixes: b35cc8225845 ('ALSA: compress_core: integer overflow in snd_compr_allocate_buffer()')
+Signed-off-by: Dan Carpenter <dan.carpenter@oracle.com>
+Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+
+
+The vulnerable function:
+static int snd_compress_check_input(struct snd_compr_params *params)
+{
+	/* first let's check the buffer parameter's */
+	if (params->buffer.fragment_size == 0 ||
+			params->buffer.fragments > SIZE_MAX / params->buffer.fragment_size)
+		return -EINVAL;
+
+	/* now codec parameters */
+	if (params->codec.id == 0 || params->codec.id > SND_AUDIOCODEC_MAX)
+		return -EINVAL;
+
+	if (params->codec.ch_in == 0 || params->codec.ch_out == 0)
+		return -EINVAL;
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int snd_compress_check_input(struct snd_compr_params *params)
+{
+	/* first let's check the buffer parameter's */
+	if (params->buffer.fragment_size == 0 ||
+	    params->buffer.fragments > INT_MAX / params->buffer.fragment_size)
+		return -EINVAL;
+
+	/* now codec parameters */
+	if (params->codec.id == 0 || params->codec.id > SND_AUDIOCODEC_MAX)
+		return -EINVAL;
+
+	if (params->codec.ch_in == 0 || params->codec.ch_out == 0)
+		return -EINVAL;
+
+	return 0;
+}

@@ -1,0 +1,60 @@
+This issue file has CWE-399. Your task is to create this CWE-399 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+Fix order of arguments to compat_put_time[spec|val]
+
+Commit 644595f89620 ("compat: Handle COMPAT_USE_64BIT_TIME in
+net/socket.c") introduced a bug where the helper functions to take
+either a 64-bit or compat time[spec|val] got the arguments in the wrong
+order, passing the kernel stack pointer off as a user pointer (and vice
+versa).
+
+Because of the user address range check, that in turn then causes an
+EFAULT due to the user pointer range checking failing for the kernel
+address.  Incorrectly resuling in a failed system call for 32-bit
+processes with a 64-bit kernel.
+
+On odder architectures like HP-PA (with separate user/kernel address
+spaces), it can be used read kernel memory.
+
+Signed-off-by: Mikulas Patocka <mpatocka@redhat.com>
+Cc: stable@vger.kernel.org
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+static int do_siocgstamp(struct net *net, struct socket *sock,
+			 unsigned int cmd, void __user *up)
+{
+	mm_segment_t old_fs = get_fs();
+	struct timeval ktv;
+	int err;
+
+	set_fs(KERNEL_DS);
+	err = sock_do_ioctl(net, sock, cmd, (unsigned long)&ktv);
+	set_fs(old_fs);
+	if (!err)
+		err = compat_put_timeval(up, &ktv);
+
+	return err;
+}
+
+
+
+The corrected function:
+static int do_siocgstamp(struct net *net, struct socket *sock,
+			 unsigned int cmd, void __user *up)
+{
+	mm_segment_t old_fs = get_fs();
+	struct timeval ktv;
+	int err;
+
+	set_fs(KERNEL_DS);
+	err = sock_do_ioctl(net, sock, cmd, (unsigned long)&ktv);
+	set_fs(old_fs);
+	if (!err)
+		err = compat_put_timeval(&ktv, up);
+
+	return err;
+}

@@ -1,0 +1,67 @@
+The vulnerable issue:
+rsi: add fix for crash during assertions
+
+Observed crash in some scenarios when assertion has occurred,
+this is because hw structure is freed and is tried to get
+accessed in some functions where null check is already
+present. So, avoided the crash by making the hw to NULL after
+freeing.
+
+Signed-off-by: Sanjay Konduri <sanjay.konduri@redpinesignals.com>
+Signed-off-by: Sushant Kumar Mishra <sushant.mishra@redpinesignals.com>
+Signed-off-by: Kalle Valo <kvalo@codeaurora.org>
+
+
+
+The vulnerable function:
+void rsi_mac80211_detach(struct rsi_hw *adapter)
+{
+	struct ieee80211_hw *hw = adapter->hw;
+	enum nl80211_band band;
+
+	if (hw) {
+		ieee80211_stop_queues(hw);
+		ieee80211_unregister_hw(hw);
+		ieee80211_free_hw(hw);
+	}
+
+	for (band = 0; band < NUM_NL80211_BANDS; band++) {
+		struct ieee80211_supported_band *sband =
+					&adapter->sbands[band];
+
+		kfree(sband->channels);
+	}
+
+// #ifdef CONFIG_RSI_DEBUGFS
+	rsi_remove_dbgfs(adapter);
+	kfree(adapter->dfsentry);
+#endif
+}
+
+
+
+The corrected function:
+void rsi_mac80211_detach(struct rsi_hw *adapter)
+{
+	struct ieee80211_hw *hw = adapter->hw;
+	enum nl80211_band band;
+
+	if (hw) {
+		ieee80211_stop_queues(hw);
+		ieee80211_unregister_hw(hw);
+		ieee80211_free_hw(hw);
+		adapter->hw = NULL;
+	}
+
+	for (band = 0; band < NUM_NL80211_BANDS; band++) {
+		struct ieee80211_supported_band *sband =
+					&adapter->sbands[band];
+
+		kfree(sband->channels);
+	}
+
+// #ifdef CONFIG_RSI_DEBUGFS
+	rsi_remove_dbgfs(adapter);
+	kfree(adapter->dfsentry);
+#endif
+}

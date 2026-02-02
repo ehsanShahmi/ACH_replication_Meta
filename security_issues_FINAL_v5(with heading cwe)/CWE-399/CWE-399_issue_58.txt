@@ -1,0 +1,91 @@
+This issue file has CWE-399. Your task is to create this CWE-399 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+pipe: limit the per-user amount of pages allocated in pipes
+
+On no-so-small systems, it is possible for a single process to cause an
+OOM condition by filling large pipes with data that are never read. A
+typical process filling 4000 pipes with 1 MB of data will use 4 GB of
+memory. On small systems it may be tricky to set the pipe max size to
+prevent this from happening.
+
+This patch makes it possible to enforce a per-user soft limit above
+which new pipes will be limited to a single page, effectively limiting
+them to 4 kB each, as well as a hard limit above which no new pipes may
+be created for this user. This has the effect of protecting the system
+against memory abuse without hurting other users, and still allowing
+pipes to work correctly though with less data at once.
+
+The limit are controlled by two new sysctls : pipe-user-pages-soft, and
+pipe-user-pages-hard. Both may be disabled by setting them to zero. The
+default soft limit allows the default number of FDs per process (1024)
+to create pipes of the default size (64kB), thus reaching a limit of 64MB
+before starting to create only smaller pipes. With 256 processes limited
+to 1024 FDs each, this results in 1024*64kB + (256*1024 - 1024) * 4kB =
+1084 MB of memory allocated for a user. The hard limit is disabled by
+default to avoid breaking existing applications that make intensive use
+of pipes (eg: for splicing).
+
+Reported-by: socketpair@gmail.com
+Reported-by: Tetsuo Handa <penguin-kernel@I-love.SAKURA.ne.jp>
+Mitigates: CVE-2013-4312 (Linux 2.0+)
+Suggested-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Willy Tarreau <w@1wt.eu>
+Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+
+
+The vulnerable function:
+struct pipe_inode_info *alloc_pipe_info(void)
+{
+	struct pipe_inode_info *pipe;
+
+	pipe = kzalloc(sizeof(struct pipe_inode_info), GFP_KERNEL);
+	if (pipe) {
+		pipe->bufs = kzalloc(sizeof(struct pipe_buffer) * PIPE_DEF_BUFFERS, GFP_KERNEL);
+		if (pipe->bufs) {
+			init_waitqueue_head(&pipe->wait);
+			pipe->r_counter = pipe->w_counter = 1;
+			pipe->buffers = PIPE_DEF_BUFFERS;
+			mutex_init(&pipe->mutex);
+			return pipe;
+		}
+		kfree(pipe);
+	}
+
+	return NULL;
+}
+
+
+
+The corrected function:
+struct pipe_inode_info *alloc_pipe_info(void)
+{
+	struct pipe_inode_info *pipe;
+
+	pipe = kzalloc(sizeof(struct pipe_inode_info), GFP_KERNEL);
+	if (pipe) {
+		unsigned long pipe_bufs = PIPE_DEF_BUFFERS;
+		struct user_struct *user = get_current_user();
+
+		if (!too_many_pipe_buffers_hard(user)) {
+			if (too_many_pipe_buffers_soft(user))
+				pipe_bufs = 1;
+			pipe->bufs = kzalloc(sizeof(struct pipe_buffer) * pipe_bufs, GFP_KERNEL);
+		}
+
+		if (pipe->bufs) {
+			init_waitqueue_head(&pipe->wait);
+			pipe->r_counter = pipe->w_counter = 1;
+			pipe->buffers = pipe_bufs;
+			pipe->user = user;
+			account_pipe_buffers(pipe, 0, pipe_bufs);
+			mutex_init(&pipe->mutex);
+			return pipe;
+		}
+		free_uid(user);
+		kfree(pipe);
+	}
+
+	return NULL;
+}

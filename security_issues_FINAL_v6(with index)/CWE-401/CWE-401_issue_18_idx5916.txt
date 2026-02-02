@@ -1,0 +1,64 @@
+This issue file has CWE-401. Your task is to create this CWE-401 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+mwifiex: pcie: Fix memory leak in mwifiex_pcie_alloc_cmdrsp_buf
+
+In mwifiex_pcie_alloc_cmdrsp_buf, a new skb is allocated which should be
+released if mwifiex_map_pci_memory() fails. The release is added.
+
+Fixes: fc3314609047 ("mwifiex: use pci_alloc/free_consistent APIs for PCIe")
+Signed-off-by: Navid Emamdoost <navid.emamdoost@gmail.com>
+Acked-by: Ganapathi Bhat <gbhat@marvell.com>
+Signed-off-by: Kalle Valo <kvalo@codeaurora.org>
+
+
+
+The vulnerable function:
+static int mwifiex_pcie_alloc_cmdrsp_buf(struct mwifiex_adapter *adapter)
+{
+	struct pcie_service_card *card = adapter->card;
+	struct sk_buff *skb;
+
+	/* Allocate memory for receiving command response data */
+	skb = dev_alloc_skb(MWIFIEX_UPLD_SIZE);
+	if (!skb) {
+		mwifiex_dbg(adapter, ERROR,
+			    "Unable to allocate skb for command response data.\n");
+		return -ENOMEM;
+	}
+	skb_put(skb, MWIFIEX_UPLD_SIZE);
+	if (mwifiex_map_pci_memory(adapter, skb, MWIFIEX_UPLD_SIZE,
+				   PCI_DMA_FROMDEVICE))
+		return -1;
+
+	card->cmdrsp_buf = skb;
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int mwifiex_pcie_alloc_cmdrsp_buf(struct mwifiex_adapter *adapter)
+{
+	struct pcie_service_card *card = adapter->card;
+	struct sk_buff *skb;
+
+	/* Allocate memory for receiving command response data */
+	skb = dev_alloc_skb(MWIFIEX_UPLD_SIZE);
+	if (!skb) {
+		mwifiex_dbg(adapter, ERROR,
+			    "Unable to allocate skb for command response data.\n");
+		return -ENOMEM;
+	}
+	skb_put(skb, MWIFIEX_UPLD_SIZE);
+	if (mwifiex_map_pci_memory(adapter, skb, MWIFIEX_UPLD_SIZE,
+				   PCI_DMA_FROMDEVICE)) {
+		kfree_skb(skb);
+		return -1;
+	}
+
+	card->cmdrsp_buf = skb;
+
+	return 0;
+}

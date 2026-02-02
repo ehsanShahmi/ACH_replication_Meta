@@ -1,0 +1,74 @@
+This issue file has CWE-284. Your task is to create this CWE-284 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+mnt: Honor MNT_LOCKED when detaching mounts
+
+Modify umount(MNT_DETACH) to keep mounts in the hash table that are
+locked to their parent mounts, when the parent is lazily unmounted.
+
+In mntput_no_expire detach the children from the hash table, depending
+on mnt_pin_kill in cleanup_mnt to decrement the mnt_count of the children.
+
+In __detach_mounts if there are any mounts that have been unmounted
+but still are on the list of mounts of a mountpoint, remove their
+children from the mount hash table and those children to the unmounted
+list so they won't linger potentially indefinitely waiting for their
+final mntput, now that the mounts serve no purpose.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: "Eric W. Biederman" <ebiederm@xmission.com>
+
+
+
+The vulnerable function:
+void __detach_mounts(struct dentry *dentry)
+{
+	struct mountpoint *mp;
+	struct mount *mnt;
+
+	namespace_lock();
+	mp = lookup_mountpoint(dentry);
+	if (!mp)
+		goto out_unlock;
+
+	lock_mount_hash();
+	while (!hlist_empty(&mp->m_list)) {
+		mnt = hlist_entry(mp->m_list.first, struct mount, mnt_mp_list);
+		umount_tree(mnt, 0);
+	}
+	unlock_mount_hash();
+	put_mountpoint(mp);
+out_unlock:
+	namespace_unlock();
+}
+
+
+
+The corrected function:
+void __detach_mounts(struct dentry *dentry)
+{
+	struct mountpoint *mp;
+	struct mount *mnt;
+
+	namespace_lock();
+	mp = lookup_mountpoint(dentry);
+	if (!mp)
+		goto out_unlock;
+
+	lock_mount_hash();
+	while (!hlist_empty(&mp->m_list)) {
+		mnt = hlist_entry(mp->m_list.first, struct mount, mnt_mp_list);
+		if (mnt->mnt.mnt_flags & MNT_UMOUNT) {
+			struct mount *p, *tmp;
+			list_for_each_entry_safe(p, tmp, &mnt->mnt_mounts,  mnt_child) {
+				hlist_add_head(&p->mnt_umount.s_list, &unmounted);
+				umount_mnt(p);
+			}
+		}
+		else umount_tree(mnt, 0);
+	}
+	unlock_mount_hash();
+	put_mountpoint(mp);
+out_unlock:
+	namespace_unlock();
+}

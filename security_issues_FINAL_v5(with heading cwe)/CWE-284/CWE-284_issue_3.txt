@@ -1,0 +1,41 @@
+This issue file has CWE-284. Your task is to create this CWE-284 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+vfs: add vfs_select_inode() helper
+
+Signed-off-by: Miklos Szeredi <mszeredi@redhat.com>
+Cc: <stable@vger.kernel.org> # v4.2+
+
+
+
+The vulnerable function:
+int vfs_open(const struct path *path, struct file *file,
+	     const struct cred *cred)
+{
+	struct dentry *dentry = path->dentry;
+	struct inode *inode = dentry->d_inode;
+
+	file->f_path = *path;
+	if (dentry->d_flags & DCACHE_OP_SELECT_INODE) {
+		inode = dentry->d_op->d_select_inode(dentry, file->f_flags);
+		if (IS_ERR(inode))
+			return PTR_ERR(inode);
+	}
+
+	return do_dentry_open(file, inode, NULL, cred);
+}
+
+
+
+The corrected function:
+int vfs_open(const struct path *path, struct file *file,
+	     const struct cred *cred)
+{
+	struct inode *inode = vfs_select_inode(path->dentry, file->f_flags);
+
+	if (IS_ERR(inode))
+		return PTR_ERR(inode);
+
+	file->f_path = *path;
+	return do_dentry_open(file, inode, NULL, cred);
+}

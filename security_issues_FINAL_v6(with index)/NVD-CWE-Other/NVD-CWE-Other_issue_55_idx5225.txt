@@ -1,0 +1,40 @@
+This issue file has NVD-CWE-Other. Your task is to create this NVD-CWE-Other type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+bpf: fix refcnt overflow
+
+On a system with >32Gbyte of phyiscal memory and infinite RLIMIT_MEMLOCK,
+the malicious application may overflow 32-bit bpf program refcnt.
+It's also possible to overflow map refcnt on 1Tb system.
+Impose 32k hard limit which means that the same bpf program or
+map cannot be shared by more than 32k processes.
+
+Fixes: 1be7f75d1668 ("bpf: enable non-root eBPF programs")
+Reported-by: Jann Horn <jannh@google.com>
+Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+Acked-by: Daniel Borkmann <daniel@iogearbox.net>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+void bpf_map_inc(struct bpf_map *map, bool uref)
+{
+	atomic_inc(&map->refcnt);
+	if (uref)
+		atomic_inc(&map->usercnt);
+}
+
+
+
+The corrected function:
+struct bpf_map *bpf_map_inc(struct bpf_map *map, bool uref)
+{
+	if (atomic_inc_return(&map->refcnt) > BPF_MAX_REFCNT) {
+		atomic_dec(&map->refcnt);
+		return ERR_PTR(-EBUSY);
+	}
+	if (uref)
+		atomic_inc(&map->usercnt);
+	return map;
+}

@@ -1,0 +1,59 @@
+The vulnerable issue:
+netfilter: nf_nat_snmp_basic: add missing length checks in ASN.1 cbs
+
+The generic ASN.1 decoder infrastructure doesn't guarantee that callbacks
+will get as much data as they expect; callbacks have to check the `datalen`
+parameter before looking at `data`. Make sure that snmp_version() and
+snmp_helper() don't read/write beyond the end of the packet data.
+
+(Also move the assignment to `pdata` down below the check to make it clear
+that it isn't necessarily a pointer we can use before the `datalen` check.)
+
+Fixes: cc2d58634e0f ("netfilter: nf_nat_snmp_basic: use asn1 decoder library")
+Signed-off-by: Jann Horn <jannh@google.com>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+
+
+
+The vulnerable function:
+int snmp_helper(void *context, size_t hdrlen, unsigned char tag,
+		const void *data, size_t datalen)
+{
+	struct snmp_ctx *ctx = (struct snmp_ctx *)context;
+	__be32 *pdata = (__be32 *)data;
+
+	if (*pdata == ctx->from) {
+		pr_debug("%s: %pI4 to %pI4\n", __func__,
+			 (void *)&ctx->from, (void *)&ctx->to);
+
+		if (*ctx->check)
+			fast_csum(ctx, (unsigned char *)data - ctx->begin);
+		*pdata = ctx->to;
+	}
+
+	return 1;
+}
+
+
+
+The corrected function:
+int snmp_helper(void *context, size_t hdrlen, unsigned char tag,
+		const void *data, size_t datalen)
+{
+	struct snmp_ctx *ctx = (struct snmp_ctx *)context;
+	__be32 *pdata;
+
+	if (datalen != 4)
+		return -EINVAL;
+	pdata = (__be32 *)data;
+	if (*pdata == ctx->from) {
+		pr_debug("%s: %pI4 to %pI4\n", __func__,
+			 (void *)&ctx->from, (void *)&ctx->to);
+
+		if (*ctx->check)
+			fast_csum(ctx, (unsigned char *)data - ctx->begin);
+		*pdata = ctx->to;
+	}
+
+	return 1;
+}

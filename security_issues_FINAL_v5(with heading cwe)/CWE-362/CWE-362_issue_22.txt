@@ -1,0 +1,65 @@
+This issue file has CWE-362. Your task is to create this CWE-362 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+fsnotify: clear PARENT_WATCHED flags lazily
+
+In some setups directories can have many (usually negative) dentries.
+Hence __fsnotify_update_child_dentry_flags() function can take a
+significant amount of time. Since the bulk of this function happens
+under inode->i_lock this causes a significant contention on the lock
+when we remove the watch from the directory as the
+__fsnotify_update_child_dentry_flags() call from fsnotify_recalc_mask()
+races with __fsnotify_update_child_dentry_flags() calls from
+__fsnotify_parent() happening on children. This can lead upto softlockup
+reports reported by users.
+
+Fix the problem by calling fsnotify_update_children_dentry_flags() to
+set PARENT_WATCHED flags only when parent starts watching children.
+
+When parent stops watching children, clear false positive PARENT_WATCHED
+flags lazily in __fsnotify_parent() for each accessed child.
+
+Suggested-by: Jan Kara <jack@suse.cz>
+Signed-off-by: Amir Goldstein <amir73il@gmail.com>
+Signed-off-by: Stephen Brennan <stephen.s.brennan@oracle.com>
+Signed-off-by: Jan Kara <jack@suse.cz>
+
+
+
+The vulnerable function:
+void fsnotify_recalc_mask(struct fsnotify_mark_connector *conn)
+{
+	if (!conn)
+		return;
+
+	spin_lock(&conn->lock);
+	__fsnotify_recalc_mask(conn);
+	spin_unlock(&conn->lock);
+	if (conn->type == FSNOTIFY_OBJ_TYPE_INODE)
+		__fsnotify_update_child_dentry_flags(
+					fsnotify_conn_inode(conn));
+}
+
+
+
+The corrected function:
+void fsnotify_recalc_mask(struct fsnotify_mark_connector *conn)
+{
+	bool update_children;
+
+	if (!conn)
+		return;
+
+	spin_lock(&conn->lock);
+	update_children = !fsnotify_conn_watches_children(conn);
+	__fsnotify_recalc_mask(conn);
+	update_children &= fsnotify_conn_watches_children(conn);
+	spin_unlock(&conn->lock);
+	/*
+	 * Set children's PARENT_WATCHED flags only if parent started watching.
+	 * When parent stops watching, we clear false positive PARENT_WATCHED
+	 * flags lazily in __fsnotify_parent().
+	 */
+	if (update_children)
+		fsnotify_conn_set_children_dentry_flags(conn);
+}

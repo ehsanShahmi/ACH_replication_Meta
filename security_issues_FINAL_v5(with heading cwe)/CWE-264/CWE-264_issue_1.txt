@@ -1,0 +1,76 @@
+This issue file has CWE-264. Your task is to create this CWE-264 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+cifs: clean up cifs_find_smb_ses (try #2)
+
+This patch replaces the earlier patch by the same name. The only
+difference is that MAX_PASSWORD_SIZE has been increased to attempt to
+match the limits that windows enforces.
+
+Do a better job of matching sessions by authtype. Matching by username
+for a Kerberos session is incorrect, and anonymous sessions need special
+handling.
+
+Also, in the case where we do match by username, we also need to match
+by password. That ensures that someone else doesn't "borrow" an existing
+session without needing to know the password.
+
+Finally, passwords can be longer than 16 bytes. Bump MAX_PASSWORD_SIZE
+to 512 to match the size that the userspace mount helper allows.
+
+Signed-off-by: Jeff Layton <jlayton@redhat.com>
+Signed-off-by: Steve French <sfrench@us.ibm.com>
+
+
+
+The vulnerable function:
+cifs_find_smb_ses(struct TCP_Server_Info *server, char *username)
+{
+	struct list_head *tmp;
+	struct cifsSesInfo *ses;
+
+	write_lock(&cifs_tcp_ses_lock);
+	list_for_each(tmp, &server->smb_ses_list) {
+		ses = list_entry(tmp, struct cifsSesInfo, smb_ses_list);
+		if (strncmp(ses->userName, username, MAX_USERNAME_SIZE))
+			continue;
+
+		++ses->ses_count;
+		write_unlock(&cifs_tcp_ses_lock);
+		return ses;
+	}
+	write_unlock(&cifs_tcp_ses_lock);
+	return NULL;
+}
+
+
+
+The corrected function:
+cifs_find_smb_ses(struct TCP_Server_Info *server, struct smb_vol *vol)
+{
+	struct cifsSesInfo *ses;
+
+	write_lock(&cifs_tcp_ses_lock);
+	list_for_each_entry(ses, &server->smb_ses_list, smb_ses_list) {
+		switch (server->secType) {
+		case Kerberos:
+			if (vol->linux_uid != ses->linux_uid)
+				continue;
+			break;
+		default:
+			/* anything else takes username/password */
+			if (strncmp(ses->userName, vol->username,
+				    MAX_USERNAME_SIZE))
+				continue;
+			if (strlen(vol->username) != 0 &&
+			    strncmp(ses->password, vol->password,
+				    MAX_PASSWORD_SIZE))
+				continue;
+		}
+		++ses->ses_count;
+		write_unlock(&cifs_tcp_ses_lock);
+		return ses;
+	}
+	write_unlock(&cifs_tcp_ses_lock);
+	return NULL;
+}

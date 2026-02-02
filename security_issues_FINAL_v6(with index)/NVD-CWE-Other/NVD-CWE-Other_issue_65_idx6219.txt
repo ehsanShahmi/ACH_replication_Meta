@@ -1,0 +1,61 @@
+This issue file has NVD-CWE-Other. Your task is to create this NVD-CWE-Other type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+netfilter: nf_tables: fix pointer math issue in nft_byteorder_eval()
+
+The problem is in nft_byteorder_eval() where we are iterating through a
+loop and writing to dst[0], dst[1], dst[2] and so on...  On each
+iteration we are writing 8 bytes.  But dst[] is an array of u32 so each
+element only has space for 4 bytes.  That means that every iteration
+overwrites part of the previous element.
+
+I spotted this bug while reviewing commit caf3ef7468f7 ("netfilter:
+nf_tables: prevent OOB access in nft_byteorder_eval") which is a related
+issue.  I think that the reason we have not detected this bug in testing
+is that most of time we only write one element.
+
+Fixes: ce1e7989d989 ("netfilter: nft_byteorder: provide 64bit le/be conversion")
+Signed-off-by: Dan Carpenter <dan.carpenter@linaro.org>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+
+
+
+The vulnerable function:
+nft_meta_get_eval_time(enum nft_meta_keys key,
+		       u32 *dest)
+{
+	switch (key) {
+	case NFT_META_TIME_NS:
+		nft_reg_store64(dest, ktime_get_real_ns());
+		break;
+	case NFT_META_TIME_DAY:
+		nft_reg_store8(dest, nft_meta_weekday());
+		break;
+	case NFT_META_TIME_HOUR:
+		*dest = nft_meta_hour(ktime_get_real_seconds());
+		break;
+	default:
+		break;
+	}
+}
+
+
+
+The corrected function:
+nft_meta_get_eval_time(enum nft_meta_keys key,
+		       u32 *dest)
+{
+	switch (key) {
+	case NFT_META_TIME_NS:
+		nft_reg_store64((u64 *)dest, ktime_get_real_ns());
+		break;
+	case NFT_META_TIME_DAY:
+		nft_reg_store8(dest, nft_meta_weekday());
+		break;
+	case NFT_META_TIME_HOUR:
+		*dest = nft_meta_hour(ktime_get_real_seconds());
+		break;
+	default:
+		break;
+	}
+}

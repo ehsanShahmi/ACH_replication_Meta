@@ -1,0 +1,332 @@
+This issue file has CWE-415. Your task is to create this CWE-415 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+scsi: aacraid: Fix double-free on probe failure
+
+aac_probe_one() calls hardware-specific init functions through the
+aac_driver_ident::init pointer, all of which eventually call down to
+aac_init_adapter().
+
+If aac_init_adapter() fails after allocating memory for aac_dev::queues,
+it frees the memory but does not clear that member.
+
+After the hardware-specific init function returns an error,
+aac_probe_one() goes down an error path that frees the memory pointed to
+by aac_dev::queues, resulting.in a double-free.
+
+Reported-by: Michael Gordon <m.gordon.zelenoborsky@gmail.com>
+Link: https://bugs.debian.org/1075855
+Fixes: 8e0c5ebde82b ("[SCSI] aacraid: Newer adapter communication iterface support")
+Signed-off-by: Ben Hutchings <benh@debian.org>
+Link: https://lore.kernel.org/r/ZsZvfqlQMveoL5KQ@decadent.org.uk
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+
+
+The vulnerable function:
+struct aac_dev *aac_init_adapter(struct aac_dev *dev)
+{
+	u32 status[5];
+	struct Scsi_Host * host = dev->scsi_host_ptr;
+	extern int aac_sync_mode;
+
+	/*
+	 *	Check the preferred comm settings, defaults from template.
+	 */
+	dev->management_fib_count = 0;
+	spin_lock_init(&dev->manage_lock);
+	spin_lock_init(&dev->sync_lock);
+	spin_lock_init(&dev->iq_lock);
+	dev->max_fib_size = sizeof(struct hw_fib);
+	dev->sg_tablesize = host->sg_tablesize = (dev->max_fib_size
+		- sizeof(struct aac_fibhdr)
+		- sizeof(struct aac_write) + sizeof(struct sgentry))
+			/ sizeof(struct sgentry);
+	dev->comm_interface = AAC_COMM_PRODUCER;
+	dev->raw_io_interface = dev->raw_io_64 = 0;
+
+
+	/*
+	 * Enable INTX mode, if not done already Enabled
+	 */
+	if (aac_is_msix_mode(dev)) {
+		aac_change_to_intx(dev);
+		dev_info(&dev->pdev->dev, "Changed firmware to INTX mode");
+	}
+
+	if ((!aac_adapter_sync_cmd(dev, GET_ADAPTER_PROPERTIES,
+		0, 0, 0, 0, 0, 0,
+		status+0, status+1, status+2, status+3, status+4)) &&
+		(status[0] == 0x00000001)) {
+		dev->doorbell_mask = status[3];
+		if (status[1] & AAC_OPT_NEW_COMM_64)
+			dev->raw_io_64 = 1;
+		dev->sync_mode = aac_sync_mode;
+		if (dev->a_ops.adapter_comm &&
+		    (status[1] & AAC_OPT_NEW_COMM)) {
+			dev->comm_interface = AAC_COMM_MESSAGE;
+			dev->raw_io_interface = 1;
+			if ((status[1] & AAC_OPT_NEW_COMM_TYPE1)) {
+				/* driver supports TYPE1 (Tupelo) */
+				dev->comm_interface = AAC_COMM_MESSAGE_TYPE1;
+			} else if (status[1] & AAC_OPT_NEW_COMM_TYPE2) {
+				/* driver supports TYPE2 (Denali, Yosemite) */
+				dev->comm_interface = AAC_COMM_MESSAGE_TYPE2;
+			} else if (status[1] & AAC_OPT_NEW_COMM_TYPE3) {
+				/* driver supports TYPE3 (Yosemite, Thor) */
+				dev->comm_interface = AAC_COMM_MESSAGE_TYPE3;
+			} else if (status[1] & AAC_OPT_NEW_COMM_TYPE4) {
+				/* not supported TYPE - switch to sync. mode */
+				dev->comm_interface = AAC_COMM_MESSAGE_TYPE2;
+				dev->sync_mode = 1;
+			}
+		}
+		if ((status[1] & le32_to_cpu(AAC_OPT_EXTENDED)) &&
+			(status[4] & le32_to_cpu(AAC_EXTOPT_SA_FIRMWARE)))
+			dev->sa_firmware = 1;
+		else
+			dev->sa_firmware = 0;
+
+		if (status[4] & le32_to_cpu(AAC_EXTOPT_SOFT_RESET))
+			dev->soft_reset_support = 1;
+		else
+			dev->soft_reset_support = 0;
+
+		if ((dev->comm_interface == AAC_COMM_MESSAGE) &&
+		    (status[2] > dev->base_size)) {
+			aac_adapter_ioremap(dev, 0);
+			dev->base_size = status[2];
+			if (aac_adapter_ioremap(dev, status[2])) {
+				/* remap failed, go back ... */
+				dev->comm_interface = AAC_COMM_PRODUCER;
+				if (aac_adapter_ioremap(dev, AAC_MIN_FOOTPRINT_SIZE)) {
+					printk(KERN_WARNING
+					  "aacraid: unable to map adapter.\n");
+					return NULL;
+				}
+			}
+		}
+	}
+	dev->max_msix = 0;
+	dev->msi_enabled = 0;
+	dev->adapter_shutdown = 0;
+	if ((!aac_adapter_sync_cmd(dev, GET_COMM_PREFERRED_SETTINGS,
+	  0, 0, 0, 0, 0, 0,
+	  status+0, status+1, status+2, status+3, status+4))
+	 && (status[0] == 0x00000001)) {
+		/*
+		 *	status[1] >> 16		maximum command size in KB
+		 *	status[1] & 0xFFFF	maximum FIB size
+		 *	status[2] >> 16		maximum SG elements to driver
+		 *	status[2] & 0xFFFF	maximum SG elements from driver
+		 *	status[3] & 0xFFFF	maximum number FIBs outstanding
+		 */
+		host->max_sectors = (status[1] >> 16) << 1;
+		/* Multiple of 32 for PMC */
+		dev->max_fib_size = status[1] & 0xFFE0;
+		host->sg_tablesize = status[2] >> 16;
+		dev->sg_tablesize = status[2] & 0xFFFF;
+		if (aac_is_src(dev)) {
+			if (host->can_queue > (status[3] >> 16) -
+					AAC_NUM_MGT_FIB)
+				host->can_queue = (status[3] >> 16) -
+					AAC_NUM_MGT_FIB;
+		} else if (host->can_queue > (status[3] & 0xFFFF) -
+				AAC_NUM_MGT_FIB)
+			host->can_queue = (status[3] & 0xFFFF) -
+				AAC_NUM_MGT_FIB;
+
+		dev->max_num_aif = status[4] & 0xFFFF;
+	}
+	if (numacb > 0) {
+		if (numacb < host->can_queue)
+			host->can_queue = numacb;
+		else
+			pr_warn("numacb=%d ignored\n", numacb);
+	}
+
+	if (aac_is_src(dev))
+		aac_define_int_mode(dev);
+	/*
+	 *	Ok now init the communication subsystem
+	 */
+
+	dev->queues = kzalloc(sizeof(struct aac_queue_block), GFP_KERNEL);
+	if (dev->queues == NULL) {
+		printk(KERN_ERR "Error could not allocate comm region.\n");
+		return NULL;
+	}
+
+	if (aac_comm_init(dev)<0){
+		kfree(dev->queues);
+		return NULL;
+	}
+	/*
+	 *	Initialize the list of fibs
+	 */
+	if (aac_fib_setup(dev) < 0) {
+		kfree(dev->queues);
+		return NULL;
+	}
+		
+	INIT_LIST_HEAD(&dev->fib_list);
+	INIT_LIST_HEAD(&dev->sync_fib_list);
+
+	return dev;
+}
+
+
+
+The corrected function:
+struct aac_dev *aac_init_adapter(struct aac_dev *dev)
+{
+	u32 status[5];
+	struct Scsi_Host * host = dev->scsi_host_ptr;
+	extern int aac_sync_mode;
+
+	/*
+	 *	Check the preferred comm settings, defaults from template.
+	 */
+	dev->management_fib_count = 0;
+	spin_lock_init(&dev->manage_lock);
+	spin_lock_init(&dev->sync_lock);
+	spin_lock_init(&dev->iq_lock);
+	dev->max_fib_size = sizeof(struct hw_fib);
+	dev->sg_tablesize = host->sg_tablesize = (dev->max_fib_size
+		- sizeof(struct aac_fibhdr)
+		- sizeof(struct aac_write) + sizeof(struct sgentry))
+			/ sizeof(struct sgentry);
+	dev->comm_interface = AAC_COMM_PRODUCER;
+	dev->raw_io_interface = dev->raw_io_64 = 0;
+
+
+	/*
+	 * Enable INTX mode, if not done already Enabled
+	 */
+	if (aac_is_msix_mode(dev)) {
+		aac_change_to_intx(dev);
+		dev_info(&dev->pdev->dev, "Changed firmware to INTX mode");
+	}
+
+	if ((!aac_adapter_sync_cmd(dev, GET_ADAPTER_PROPERTIES,
+		0, 0, 0, 0, 0, 0,
+		status+0, status+1, status+2, status+3, status+4)) &&
+		(status[0] == 0x00000001)) {
+		dev->doorbell_mask = status[3];
+		if (status[1] & AAC_OPT_NEW_COMM_64)
+			dev->raw_io_64 = 1;
+		dev->sync_mode = aac_sync_mode;
+		if (dev->a_ops.adapter_comm &&
+		    (status[1] & AAC_OPT_NEW_COMM)) {
+			dev->comm_interface = AAC_COMM_MESSAGE;
+			dev->raw_io_interface = 1;
+			if ((status[1] & AAC_OPT_NEW_COMM_TYPE1)) {
+				/* driver supports TYPE1 (Tupelo) */
+				dev->comm_interface = AAC_COMM_MESSAGE_TYPE1;
+			} else if (status[1] & AAC_OPT_NEW_COMM_TYPE2) {
+				/* driver supports TYPE2 (Denali, Yosemite) */
+				dev->comm_interface = AAC_COMM_MESSAGE_TYPE2;
+			} else if (status[1] & AAC_OPT_NEW_COMM_TYPE3) {
+				/* driver supports TYPE3 (Yosemite, Thor) */
+				dev->comm_interface = AAC_COMM_MESSAGE_TYPE3;
+			} else if (status[1] & AAC_OPT_NEW_COMM_TYPE4) {
+				/* not supported TYPE - switch to sync. mode */
+				dev->comm_interface = AAC_COMM_MESSAGE_TYPE2;
+				dev->sync_mode = 1;
+			}
+		}
+		if ((status[1] & le32_to_cpu(AAC_OPT_EXTENDED)) &&
+			(status[4] & le32_to_cpu(AAC_EXTOPT_SA_FIRMWARE)))
+			dev->sa_firmware = 1;
+		else
+			dev->sa_firmware = 0;
+
+		if (status[4] & le32_to_cpu(AAC_EXTOPT_SOFT_RESET))
+			dev->soft_reset_support = 1;
+		else
+			dev->soft_reset_support = 0;
+
+		if ((dev->comm_interface == AAC_COMM_MESSAGE) &&
+		    (status[2] > dev->base_size)) {
+			aac_adapter_ioremap(dev, 0);
+			dev->base_size = status[2];
+			if (aac_adapter_ioremap(dev, status[2])) {
+				/* remap failed, go back ... */
+				dev->comm_interface = AAC_COMM_PRODUCER;
+				if (aac_adapter_ioremap(dev, AAC_MIN_FOOTPRINT_SIZE)) {
+					printk(KERN_WARNING
+					  "aacraid: unable to map adapter.\n");
+					return NULL;
+				}
+			}
+		}
+	}
+	dev->max_msix = 0;
+	dev->msi_enabled = 0;
+	dev->adapter_shutdown = 0;
+	if ((!aac_adapter_sync_cmd(dev, GET_COMM_PREFERRED_SETTINGS,
+	  0, 0, 0, 0, 0, 0,
+	  status+0, status+1, status+2, status+3, status+4))
+	 && (status[0] == 0x00000001)) {
+		/*
+		 *	status[1] >> 16		maximum command size in KB
+		 *	status[1] & 0xFFFF	maximum FIB size
+		 *	status[2] >> 16		maximum SG elements to driver
+		 *	status[2] & 0xFFFF	maximum SG elements from driver
+		 *	status[3] & 0xFFFF	maximum number FIBs outstanding
+		 */
+		host->max_sectors = (status[1] >> 16) << 1;
+		/* Multiple of 32 for PMC */
+		dev->max_fib_size = status[1] & 0xFFE0;
+		host->sg_tablesize = status[2] >> 16;
+		dev->sg_tablesize = status[2] & 0xFFFF;
+		if (aac_is_src(dev)) {
+			if (host->can_queue > (status[3] >> 16) -
+					AAC_NUM_MGT_FIB)
+				host->can_queue = (status[3] >> 16) -
+					AAC_NUM_MGT_FIB;
+		} else if (host->can_queue > (status[3] & 0xFFFF) -
+				AAC_NUM_MGT_FIB)
+			host->can_queue = (status[3] & 0xFFFF) -
+				AAC_NUM_MGT_FIB;
+
+		dev->max_num_aif = status[4] & 0xFFFF;
+	}
+	if (numacb > 0) {
+		if (numacb < host->can_queue)
+			host->can_queue = numacb;
+		else
+			pr_warn("numacb=%d ignored\n", numacb);
+	}
+
+	if (aac_is_src(dev))
+		aac_define_int_mode(dev);
+	/*
+	 *	Ok now init the communication subsystem
+	 */
+
+	dev->queues = kzalloc(sizeof(struct aac_queue_block), GFP_KERNEL);
+	if (dev->queues == NULL) {
+		printk(KERN_ERR "Error could not allocate comm region.\n");
+		return NULL;
+	}
+
+	if (aac_comm_init(dev)<0){
+		kfree(dev->queues);
+		dev->queues = NULL;
+		return NULL;
+	}
+	/*
+	 *	Initialize the list of fibs
+	 */
+	if (aac_fib_setup(dev) < 0) {
+		kfree(dev->queues);
+		dev->queues = NULL;
+		return NULL;
+	}
+		
+	INIT_LIST_HEAD(&dev->fib_list);
+	INIT_LIST_HEAD(&dev->sync_fib_list);
+
+	return dev;
+}

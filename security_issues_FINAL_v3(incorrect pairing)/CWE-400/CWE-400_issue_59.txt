@@ -1,0 +1,98 @@
+The vulnerable issue:
+perf: Remove the nmi parameter from the swevent and overflow interface
+
+The nmi parameter indicated if we could do wakeups from the current
+context, if not, we would set some state and self-IPI and let the
+resulting interrupt do the wakeup.
+
+For the various event classes:
+
+  - hardware: nmi=0; PMI is in fact an NMI or we run irq_work_run from
+    the PMI-tail (ARM etc.)
+  - tracepoint: nmi=0; since tracepoint could be from NMI context.
+  - software: nmi=[0,1]; some, like the schedule thing cannot
+    perform wakeups, and hence need 0.
+
+As one can see, there is very little nmi=1 usage, and the down-side of
+not using it is that on some platforms some software events can have a
+jiffy delay in wakeup (when arch_irq_work_raise isn't implemented).
+
+The up-side however is that we can remove the nmi parameter and save a
+bunch of conditionals in fast paths.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: Michael Cree <mcree@orcon.net.nz>
+Cc: Will Deacon <will.deacon@arm.com>
+Cc: Deng-Cheng Zhu <dengcheng.zhu@gmail.com>
+Cc: Anton Blanchard <anton@samba.org>
+Cc: Eric B Munson <emunson@mgebm.net>
+Cc: Heiko Carstens <heiko.carstens@de.ibm.com>
+Cc: Paul Mundt <lethal@linux-sh.org>
+Cc: David S. Miller <davem@davemloft.net>
+Cc: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Jason Wessel <jason.wessel@windriver.com>
+Cc: Don Zickus <dzickus@redhat.com>
+Link: http://lkml.kernel.org/n/tip-agjev8eu666tvknpb3iaj0fg@git.kernel.org
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+
+
+The vulnerable function:
+static void perf_event_mmap_output(struct perf_event *event,
+				     struct perf_mmap_event *mmap_event)
+{
+	struct perf_output_handle handle;
+	struct perf_sample_data sample;
+	int size = mmap_event->event_id.header.size;
+	int ret;
+
+	perf_event_header__init_id(&mmap_event->event_id.header, &sample, event);
+	ret = perf_output_begin(&handle, event,
+				mmap_event->event_id.header.size, 0, 0);
+	if (ret)
+		goto out;
+
+	mmap_event->event_id.pid = perf_event_pid(event, current);
+	mmap_event->event_id.tid = perf_event_tid(event, current);
+
+	perf_output_put(&handle, mmap_event->event_id);
+	__output_copy(&handle, mmap_event->file_name,
+				   mmap_event->file_size);
+
+	perf_event__output_id_sample(event, &handle, &sample);
+
+	perf_output_end(&handle);
+out:
+	mmap_event->event_id.header.size = size;
+}
+
+
+
+The corrected function:
+static void perf_event_mmap_output(struct perf_event *event,
+				     struct perf_mmap_event *mmap_event)
+{
+	struct perf_output_handle handle;
+	struct perf_sample_data sample;
+	int size = mmap_event->event_id.header.size;
+	int ret;
+
+	perf_event_header__init_id(&mmap_event->event_id.header, &sample, event);
+	ret = perf_output_begin(&handle, event,
+				mmap_event->event_id.header.size, 0);
+	if (ret)
+		goto out;
+
+	mmap_event->event_id.pid = perf_event_pid(event, current);
+	mmap_event->event_id.tid = perf_event_tid(event, current);
+
+	perf_output_put(&handle, mmap_event->event_id);
+	__output_copy(&handle, mmap_event->file_name,
+				   mmap_event->file_size);
+
+	perf_event__output_id_sample(event, &handle, &sample);
+
+	perf_output_end(&handle);
+out:
+	mmap_event->event_id.header.size = size;
+}

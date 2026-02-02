@@ -1,0 +1,129 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+printk: fix buffer overflow when calling log_prefix function from call_console_drivers
+
+This patch corrects a buffer overflow in kernels from 3.0 to 3.4 when calling
+log_prefix() function from call_console_drivers().
+
+This bug existed in previous releases but has been revealed with commit
+162a7e7500f9664636e649ba59defe541b7c2c60 (2.6.39 => 3.0) that made changes
+about how to allocate memory for early printk buffer (use of memblock_alloc).
+It disappears with commit 7ff9554bb578ba02166071d2d487b7fc7d860d62 (3.4 => 3.5)
+that does a refactoring of printk buffer management.
+
+In log_prefix(), the access to "p[0]", "p[1]", "p[2]" or
+"simple_strtoul(&p[1], &endp, 10)" may cause a buffer overflow as this
+function is called from call_console_drivers by passing "&LOG_BUF(cur_index)"
+where the index must be masked to do not exceed the buffer's boundary.
+
+The trick is to prepare in call_console_drivers() a buffer with the necessary
+data (PRI field of syslog message) to be safely evaluated in log_prefix().
+
+This patch can be applied to stable kernel branches 3.0.y, 3.2.y and 3.4.y.
+
+Without this patch, one can freeze a server running this loop from shell :
+  $ export DUMMY=`cat /dev/urandom | tr -dc '12345AZERTYUIOPQSDFGHJKLMWXCVBNazertyuiopqsdfghjklmwxcvbn' | head -c255`
+  $ while true do ; echo $DUMMY > /dev/kmsg ; done
+
+The "server freeze" depends on where memblock_alloc does allocate printk buffer :
+if the buffer overflow is inside another kernel allocation the problem may not
+be revealed, else the server may hangs up.
+
+Signed-off-by: Alexandre SIMON <Alexandre.Simon@univ-lorraine.fr>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+
+
+The vulnerable function:
+static void call_console_drivers(unsigned start, unsigned end)
+{
+	unsigned cur_index, start_print;
+	static int msg_level = -1;
+
+	BUG_ON(((int)(start - end)) > 0);
+
+	cur_index = start;
+ 	start_print = start;
+ 	while (cur_index != end) {
+ 		if (msg_level < 0 && ((end - cur_index) > 2)) {
+ 			/* strip log prefix */
+			cur_index += log_prefix(&LOG_BUF(cur_index), &msg_level, NULL);
+ 			start_print = cur_index;
+ 		}
+ 		while (cur_index != end) {
+			char c = LOG_BUF(cur_index);
+
+			cur_index++;
+			if (c == '\n') {
+				if (msg_level < 0) {
+					/*
+					 * printk() has already given us loglevel tags in
+					 * the buffer.  This code is here in case the
+					 * log buffer has wrapped right round and scribbled
+					 * on those tags
+					 */
+					msg_level = default_message_loglevel;
+				}
+				_call_console_drivers(start_print, cur_index, msg_level);
+				msg_level = -1;
+				start_print = cur_index;
+				break;
+			}
+		}
+	}
+	_call_console_drivers(start_print, end, msg_level);
+}
+
+
+
+The corrected function:
+static void call_console_drivers(unsigned start, unsigned end)
+{
+	unsigned cur_index, start_print;
+	static int msg_level = -1;
+
+	BUG_ON(((int)(start - end)) > 0);
+
+	cur_index = start;
+ 	start_print = start;
+ 	while (cur_index != end) {
+ 		if (msg_level < 0 && ((end - cur_index) > 2)) {
+			/*
+			 * prepare buf_prefix, as a contiguous array,
+			 * to be processed by log_prefix function
+			 */
+			char buf_prefix[SYSLOG_PRI_MAX_LENGTH+1];
+			unsigned i;
+			for (i = 0; i < ((end - cur_index)) && (i < SYSLOG_PRI_MAX_LENGTH); i++) {
+				buf_prefix[i] = LOG_BUF(cur_index + i);
+			}
+			buf_prefix[i] = '\0'; /* force '\0' as last string character */
+
+ 			/* strip log prefix */
+			cur_index += log_prefix((const char *)&buf_prefix, &msg_level, NULL);
+ 			start_print = cur_index;
+ 		}
+ 		while (cur_index != end) {
+			char c = LOG_BUF(cur_index);
+
+			cur_index++;
+			if (c == '\n') {
+				if (msg_level < 0) {
+					/*
+					 * printk() has already given us loglevel tags in
+					 * the buffer.  This code is here in case the
+					 * log buffer has wrapped right round and scribbled
+					 * on those tags
+					 */
+					msg_level = default_message_loglevel;
+				}
+				_call_console_drivers(start_print, cur_index, msg_level);
+				msg_level = -1;
+				start_print = cur_index;
+				break;
+			}
+		}
+	}
+	_call_console_drivers(start_print, end, msg_level);
+}

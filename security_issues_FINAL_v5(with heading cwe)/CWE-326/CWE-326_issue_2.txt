@@ -1,0 +1,75 @@
+This issue file has CWE-326. Your task is to create this CWE-326 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+inet: switch IP ID generator to siphash
+
+According to Amit Klein and Benny Pinkas, IP ID generation is too weak
+and might be used by attackers.
+
+Even with recent net_hash_mix() fix (netns: provide pure entropy for net_hash_mix())
+having 64bit key and Jenkins hash is risky.
+
+It is time to switch to siphash and its 128bit keys.
+
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Reported-by: Amit Klein <aksecurity@gmail.com>
+Reported-by: Benny Pinkas <benny@pinkas.net>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static u32 __ipv6_select_ident(struct net *net, u32 hashrnd,
+			       const struct in6_addr *dst,
+			       const struct in6_addr *src)
+{
+	u32 hash, id;
+
+	hash = __ipv6_addr_jhash(dst, hashrnd);
+	hash = __ipv6_addr_jhash(src, hash);
+	hash ^= net_hash_mix(net);
+
+	/* Treat id of 0 as unset and if we get 0 back from ip_idents_reserve,
+	 * set the hight order instead thus minimizing possible future
+	 * collisions.
+	 */
+	id = ip_idents_reserve(hash, 1);
+	if (unlikely(!id))
+		id = 1 << 31;
+
+	return id;
+}
+
+
+
+The corrected function:
+static u32 __ipv6_select_ident(struct net *net,
+			       const struct in6_addr *dst,
+			       const struct in6_addr *src)
+{
+	const struct {
+		struct in6_addr dst;
+		struct in6_addr src;
+	} __aligned(SIPHASH_ALIGNMENT) combined = {
+		.dst = *dst,
+		.src = *src,
+	};
+	u32 hash, id;
+
+	/* Note the following code is not safe, but this is okay. */
+	if (unlikely(siphash_key_is_zero(&net->ipv4.ip_id_key)))
+		get_random_bytes(&net->ipv4.ip_id_key,
+				 sizeof(net->ipv4.ip_id_key));
+
+	hash = siphash(&combined, sizeof(combined), &net->ipv4.ip_id_key);
+
+	/* Treat id of 0 as unset and if we get 0 back from ip_idents_reserve,
+	 * set the hight order instead thus minimizing possible future
+	 * collisions.
+	 */
+	id = ip_idents_reserve(hash, 1);
+	if (unlikely(!id))
+		id = 1 << 31;
+
+	return id;
+}

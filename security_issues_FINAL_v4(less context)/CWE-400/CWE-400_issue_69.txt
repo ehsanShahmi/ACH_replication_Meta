@@ -1,0 +1,217 @@
+The vulnerable issue:
+perf: Remove the nmi parameter from the swevent and overflow interface
+
+The nmi parameter indicated if we could do wakeups from the current
+context, if not, we would set some state and self-IPI and let the
+resulting interrupt do the wakeup.
+
+For the various event classes:
+
+  - hardware: nmi=0; PMI is in fact an NMI or we run irq_work_run from
+    the PMI-tail (ARM etc.)
+  - tracepoint: nmi=0; since tracepoint could be from NMI context.
+  - software: nmi=[0,1]; some, like the schedule thing cannot
+    perform wakeups, and hence need 0.
+
+As one can see, there is very little nmi=1 usage, and the down-side of
+not using it is that on some platforms some software events can have a
+jiffy delay in wakeup (when arch_irq_work_raise isn't implemented).
+
+The up-side however is that we can remove the nmi parameter and save a
+bunch of conditionals in fast paths.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: Michael Cree <mcree@orcon.net.nz>
+Cc: Will Deacon <will.deacon@arm.com>
+Cc: Deng-Cheng Zhu <dengcheng.zhu@gmail.com>
+Cc: Anton Blanchard <anton@samba.org>
+Cc: Eric B Munson <emunson@mgebm.net>
+Cc: Heiko Carstens <heiko.carstens@de.ibm.com>
+Cc: Paul Mundt <lethal@linux-sh.org>
+Cc: David S. Miller <davem@davemloft.net>
+Cc: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Jason Wessel <jason.wessel@windriver.com>
+Cc: Don Zickus <dzickus@redhat.com>
+Link: http://lkml.kernel.org/n/tip-agjev8eu666tvknpb3iaj0fg@git.kernel.org
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+
+
+The vulnerable function:
+int perf_output_begin(struct perf_output_handle *handle,
+		      struct perf_event *event, unsigned int size,
+		      int nmi, int sample)
+{
+	struct ring_buffer *rb;
+	unsigned long tail, offset, head;
+	int have_lost;
+	struct perf_sample_data sample_data;
+	struct {
+		struct perf_event_header header;
+		u64			 id;
+		u64			 lost;
+	} lost_event;
+
+	rcu_read_lock();
+	/*
+	 * For inherited events we send all the output towards the parent.
+	 */
+	if (event->parent)
+		event = event->parent;
+
+	rb = rcu_dereference(event->rb);
+	if (!rb)
+		goto out;
+
+	handle->rb	= rb;
+	handle->event	= event;
+	handle->nmi	= nmi;
+	handle->sample	= sample;
+
+	if (!rb->nr_pages)
+		goto out;
+
+	have_lost = local_read(&rb->lost);
+	if (have_lost) {
+		lost_event.header.size = sizeof(lost_event);
+		perf_event_header__init_id(&lost_event.header, &sample_data,
+					   event);
+		size += lost_event.header.size;
+	}
+
+	perf_output_get_handle(handle);
+
+	do {
+		/*
+		 * Userspace could choose to issue a mb() before updating the
+		 * tail pointer. So that all reads will be completed before the
+		 * write is issued.
+		 */
+		tail = ACCESS_ONCE(rb->user_page->data_tail);
+		smp_rmb();
+		offset = head = local_read(&rb->head);
+		head += size;
+		if (unlikely(!perf_output_space(rb, tail, offset, head)))
+			goto fail;
+	} while (local_cmpxchg(&rb->head, offset, head) != offset);
+
+	if (head - local_read(&rb->wakeup) > rb->watermark)
+		local_add(rb->watermark, &rb->wakeup);
+
+	handle->page = offset >> (PAGE_SHIFT + page_order(rb));
+	handle->page &= rb->nr_pages - 1;
+	handle->size = offset & ((PAGE_SIZE << page_order(rb)) - 1);
+	handle->addr = rb->data_pages[handle->page];
+	handle->addr += handle->size;
+	handle->size = (PAGE_SIZE << page_order(rb)) - handle->size;
+
+	if (have_lost) {
+		lost_event.header.type = PERF_RECORD_LOST;
+		lost_event.header.misc = 0;
+		lost_event.id          = event->id;
+		lost_event.lost        = local_xchg(&rb->lost, 0);
+
+		perf_output_put(handle, lost_event);
+		perf_event__output_id_sample(event, handle, &sample_data);
+	}
+
+	return 0;
+
+fail:
+	local_inc(&rb->lost);
+	perf_output_put_handle(handle);
+out:
+	rcu_read_unlock();
+
+	return -ENOSPC;
+}
+
+
+
+The corrected function:
+int perf_output_begin(struct perf_output_handle *handle,
+		      struct perf_event *event, unsigned int size,
+		      int sample)
+{
+	struct ring_buffer *rb;
+	unsigned long tail, offset, head;
+	int have_lost;
+	struct perf_sample_data sample_data;
+	struct {
+		struct perf_event_header header;
+		u64			 id;
+		u64			 lost;
+	} lost_event;
+
+	rcu_read_lock();
+	/*
+	 * For inherited events we send all the output towards the parent.
+	 */
+	if (event->parent)
+		event = event->parent;
+
+	rb = rcu_dereference(event->rb);
+	if (!rb)
+		goto out;
+
+	handle->rb	= rb;
+	handle->event	= event;
+	handle->sample	= sample;
+
+	if (!rb->nr_pages)
+		goto out;
+
+	have_lost = local_read(&rb->lost);
+	if (have_lost) {
+		lost_event.header.size = sizeof(lost_event);
+		perf_event_header__init_id(&lost_event.header, &sample_data,
+					   event);
+		size += lost_event.header.size;
+	}
+
+	perf_output_get_handle(handle);
+
+	do {
+		/*
+		 * Userspace could choose to issue a mb() before updating the
+		 * tail pointer. So that all reads will be completed before the
+		 * write is issued.
+		 */
+		tail = ACCESS_ONCE(rb->user_page->data_tail);
+		smp_rmb();
+		offset = head = local_read(&rb->head);
+		head += size;
+		if (unlikely(!perf_output_space(rb, tail, offset, head)))
+			goto fail;
+	} while (local_cmpxchg(&rb->head, offset, head) != offset);
+
+	if (head - local_read(&rb->wakeup) > rb->watermark)
+		local_add(rb->watermark, &rb->wakeup);
+
+	handle->page = offset >> (PAGE_SHIFT + page_order(rb));
+	handle->page &= rb->nr_pages - 1;
+	handle->size = offset & ((PAGE_SIZE << page_order(rb)) - 1);
+	handle->addr = rb->data_pages[handle->page];
+	handle->addr += handle->size;
+	handle->size = (PAGE_SIZE << page_order(rb)) - handle->size;
+
+	if (have_lost) {
+		lost_event.header.type = PERF_RECORD_LOST;
+		lost_event.header.misc = 0;
+		lost_event.id          = event->id;
+		lost_event.lost        = local_xchg(&rb->lost, 0);
+
+		perf_output_put(handle, lost_event);
+		perf_event__output_id_sample(event, handle, &sample_data);
+	}
+
+	return 0;
+
+fail:
+	local_inc(&rb->lost);
+	perf_output_put_handle(handle);
+out:
+	rcu_read_unlock();
+
+	return -ENOSPC;
+}

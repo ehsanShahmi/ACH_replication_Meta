@@ -1,0 +1,79 @@
+The vulnerable issue:
+io_uring/msg_ring: check file type before putting
+
+If we're invoked with a fixed file, follow the normal rules of not
+calling io_fput_file(). Fixed files are permanently registered to the
+ring, and do not need putting separately.
+
+Cc: stable@vger.kernel.org
+Fixes: aa184e8671f0 ("io_uring: don't attempt to IOPOLL for MSG_RING requests")
+Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+
+
+The vulnerable function:
+int io_msg_ring(struct io_kiocb *req, unsigned int issue_flags)
+{
+	struct io_msg *msg = io_kiocb_to_cmd(req, struct io_msg);
+	int ret;
+
+	ret = -EBADFD;
+	if (!io_is_uring_fops(req->file))
+		goto done;
+
+	switch (msg->cmd) {
+	case IORING_MSG_DATA:
+		ret = io_msg_ring_data(req);
+		break;
+	case IORING_MSG_SEND_FD:
+		ret = io_msg_send_fd(req, issue_flags);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+done:
+	if (ret < 0)
+		req_set_fail(req);
+	io_req_set_res(req, ret, 0);
+	/* put file to avoid an attempt to IOPOLL the req */
+	io_put_file(req->file);
+	req->file = NULL;
+	return IOU_OK;
+}
+
+
+
+The corrected function:
+int io_msg_ring(struct io_kiocb *req, unsigned int issue_flags)
+{
+	struct io_msg *msg = io_kiocb_to_cmd(req, struct io_msg);
+	int ret;
+
+	ret = -EBADFD;
+	if (!io_is_uring_fops(req->file))
+		goto done;
+
+	switch (msg->cmd) {
+	case IORING_MSG_DATA:
+		ret = io_msg_ring_data(req);
+		break;
+	case IORING_MSG_SEND_FD:
+		ret = io_msg_send_fd(req, issue_flags);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+done:
+	if (ret < 0)
+		req_set_fail(req);
+	io_req_set_res(req, ret, 0);
+	/* put file to avoid an attempt to IOPOLL the req */
+	if (!(req->flags & REQ_F_FIXED_FILE))
+		io_put_file(req->file);
+	req->file = NULL;
+	return IOU_OK;
+}

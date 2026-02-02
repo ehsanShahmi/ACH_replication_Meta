@@ -1,0 +1,212 @@
+This issue file has CWE-125. Your task is to create this CWE-125 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+dma-mapping: benchmark: handle NUMA_NO_NODE correctly
+
+cpumask_of_node() can be called for NUMA_NO_NODE inside do_map_benchmark()
+resulting in the following sanitizer report:
+
+UBSAN: array-index-out-of-bounds in ./arch/x86/include/asm/topology.h:72:28
+index -1 is out of range for type 'cpumask [64][1]'
+CPU: 1 PID: 990 Comm: dma_map_benchma Not tainted 6.9.0-rc6 #29
+Hardware name: QEMU Standard PC (i440FX + PIIX, 1996)
+Call Trace:
+ <TASK>
+dump_stack_lvl (lib/dump_stack.c:117)
+ubsan_epilogue (lib/ubsan.c:232)
+__ubsan_handle_out_of_bounds (lib/ubsan.c:429)
+cpumask_of_node (arch/x86/include/asm/topology.h:72) [inline]
+do_map_benchmark (kernel/dma/map_benchmark.c:104)
+map_benchmark_ioctl (kernel/dma/map_benchmark.c:246)
+full_proxy_unlocked_ioctl (fs/debugfs/file.c:333)
+__x64_sys_ioctl (fs/ioctl.c:890)
+do_syscall_64 (arch/x86/entry/common.c:83)
+entry_SYSCALL_64_after_hwframe (arch/x86/entry/entry_64.S:130)
+
+Use cpumask_of_node() in place when binding a kernel thread to a cpuset
+of a particular node.
+
+Note that the provided node id is checked inside map_benchmark_ioctl().
+It's just a NUMA_NO_NODE case which is not handled properly later.
+
+Found by Linux Verification Center (linuxtesting.org).
+
+Fixes: 65789daa8087 ("dma-mapping: add benchmark support for streaming DMA APIs")
+Signed-off-by: Fedor Pchelkin <pchelkin@ispras.ru>
+Acked-by: Barry Song <baohua@kernel.org>
+Signed-off-by: Christoph Hellwig <hch@lst.de>
+
+
+
+The vulnerable function:
+static int do_map_benchmark(struct map_benchmark_data *map)
+{
+	struct task_struct **tsk;
+	int threads = map->bparam.threads;
+	int node = map->bparam.node;
+	const cpumask_t *cpu_mask = cpumask_of_node(node);
+	u64 loops;
+	int ret = 0;
+	int i;
+
+	tsk = kmalloc_array(threads, sizeof(*tsk), GFP_KERNEL);
+	if (!tsk)
+		return -ENOMEM;
+
+	get_device(map->dev);
+
+	for (i = 0; i < threads; i++) {
+		tsk[i] = kthread_create_on_node(map_benchmark_thread, map,
+				map->bparam.node, "dma-map-benchmark/%d", i);
+		if (IS_ERR(tsk[i])) {
+			pr_err("create dma_map thread failed\n");
+			ret = PTR_ERR(tsk[i]);
+			while (--i >= 0)
+				kthread_stop(tsk[i]);
+			goto out;
+		}
+
+		if (node != NUMA_NO_NODE)
+			kthread_bind_mask(tsk[i], cpu_mask);
+	}
+
+	/* clear the old value in the previous benchmark */
+	atomic64_set(&map->sum_map_100ns, 0);
+	atomic64_set(&map->sum_unmap_100ns, 0);
+	atomic64_set(&map->sum_sq_map, 0);
+	atomic64_set(&map->sum_sq_unmap, 0);
+	atomic64_set(&map->loops, 0);
+
+	for (i = 0; i < threads; i++) {
+		get_task_struct(tsk[i]);
+		wake_up_process(tsk[i]);
+	}
+
+	msleep_interruptible(map->bparam.seconds * 1000);
+
+	/* wait for the completion of all started benchmark threads */
+	for (i = 0; i < threads; i++) {
+		int kthread_ret = kthread_stop_put(tsk[i]);
+
+		if (kthread_ret)
+			ret = kthread_ret;
+	}
+
+	if (ret)
+		goto out;
+
+	loops = atomic64_read(&map->loops);
+	if (likely(loops > 0)) {
+		u64 map_variance, unmap_variance;
+		u64 sum_map = atomic64_read(&map->sum_map_100ns);
+		u64 sum_unmap = atomic64_read(&map->sum_unmap_100ns);
+		u64 sum_sq_map = atomic64_read(&map->sum_sq_map);
+		u64 sum_sq_unmap = atomic64_read(&map->sum_sq_unmap);
+
+		/* average latency */
+		map->bparam.avg_map_100ns = div64_u64(sum_map, loops);
+		map->bparam.avg_unmap_100ns = div64_u64(sum_unmap, loops);
+
+		/* standard deviation of latency */
+		map_variance = div64_u64(sum_sq_map, loops) -
+				map->bparam.avg_map_100ns *
+				map->bparam.avg_map_100ns;
+		unmap_variance = div64_u64(sum_sq_unmap, loops) -
+				map->bparam.avg_unmap_100ns *
+				map->bparam.avg_unmap_100ns;
+		map->bparam.map_stddev = int_sqrt64(map_variance);
+		map->bparam.unmap_stddev = int_sqrt64(unmap_variance);
+	}
+
+out:
+	put_device(map->dev);
+	kfree(tsk);
+	return ret;
+}
+
+
+
+The corrected function:
+static int do_map_benchmark(struct map_benchmark_data *map)
+{
+	struct task_struct **tsk;
+	int threads = map->bparam.threads;
+	int node = map->bparam.node;
+	u64 loops;
+	int ret = 0;
+	int i;
+
+	tsk = kmalloc_array(threads, sizeof(*tsk), GFP_KERNEL);
+	if (!tsk)
+		return -ENOMEM;
+
+	get_device(map->dev);
+
+	for (i = 0; i < threads; i++) {
+		tsk[i] = kthread_create_on_node(map_benchmark_thread, map,
+				map->bparam.node, "dma-map-benchmark/%d", i);
+		if (IS_ERR(tsk[i])) {
+			pr_err("create dma_map thread failed\n");
+			ret = PTR_ERR(tsk[i]);
+			while (--i >= 0)
+				kthread_stop(tsk[i]);
+			goto out;
+		}
+
+		if (node != NUMA_NO_NODE)
+			kthread_bind_mask(tsk[i], cpumask_of_node(node));
+	}
+
+	/* clear the old value in the previous benchmark */
+	atomic64_set(&map->sum_map_100ns, 0);
+	atomic64_set(&map->sum_unmap_100ns, 0);
+	atomic64_set(&map->sum_sq_map, 0);
+	atomic64_set(&map->sum_sq_unmap, 0);
+	atomic64_set(&map->loops, 0);
+
+	for (i = 0; i < threads; i++) {
+		get_task_struct(tsk[i]);
+		wake_up_process(tsk[i]);
+	}
+
+	msleep_interruptible(map->bparam.seconds * 1000);
+
+	/* wait for the completion of all started benchmark threads */
+	for (i = 0; i < threads; i++) {
+		int kthread_ret = kthread_stop_put(tsk[i]);
+
+		if (kthread_ret)
+			ret = kthread_ret;
+	}
+
+	if (ret)
+		goto out;
+
+	loops = atomic64_read(&map->loops);
+	if (likely(loops > 0)) {
+		u64 map_variance, unmap_variance;
+		u64 sum_map = atomic64_read(&map->sum_map_100ns);
+		u64 sum_unmap = atomic64_read(&map->sum_unmap_100ns);
+		u64 sum_sq_map = atomic64_read(&map->sum_sq_map);
+		u64 sum_sq_unmap = atomic64_read(&map->sum_sq_unmap);
+
+		/* average latency */
+		map->bparam.avg_map_100ns = div64_u64(sum_map, loops);
+		map->bparam.avg_unmap_100ns = div64_u64(sum_unmap, loops);
+
+		/* standard deviation of latency */
+		map_variance = div64_u64(sum_sq_map, loops) -
+				map->bparam.avg_map_100ns *
+				map->bparam.avg_map_100ns;
+		unmap_variance = div64_u64(sum_sq_unmap, loops) -
+				map->bparam.avg_unmap_100ns *
+				map->bparam.avg_unmap_100ns;
+		map->bparam.map_stddev = int_sqrt64(map_variance);
+		map->bparam.unmap_stddev = int_sqrt64(unmap_variance);
+	}
+
+out:
+	put_device(map->dev);
+	kfree(tsk);
+	return ret;
+}

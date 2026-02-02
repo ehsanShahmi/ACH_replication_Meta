@@ -1,0 +1,105 @@
+The vulnerable issue:
+net/smc: Fix NULL pointer dereferencing in smc_vlan_by_tcpsk()
+
+Coverity reports a possible NULL dereferencing problem:
+
+in smc_vlan_by_tcpsk():
+6. returned_null: netdev_lower_get_next returns NULL (checked 29 out of 30 times).
+7. var_assigned: Assigning: ndev = NULL return value from netdev_lower_get_next.
+1623                ndev = (struct net_device *)netdev_lower_get_next(ndev, &lower);
+CID 1468509 (#1 of 1): Dereference null return value (NULL_RETURNS)
+8. dereference: Dereferencing a pointer that might be NULL ndev when calling is_vlan_dev.
+1624                if (is_vlan_dev(ndev)) {
+
+Remove the manual implementation and use netdev_walk_all_lower_dev() to
+iterate over the lower devices. While on it remove an obsolete function
+parameter comment.
+
+Fixes: cb9d43f67754 ("net/smc: determine vlan_id of stacked net_device")
+Suggested-by: Julian Wiedmann <jwi@linux.ibm.com>
+Signed-off-by: Karsten Graul <kgraul@linux.ibm.com>
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+
+
+The vulnerable function:
+int smc_vlan_by_tcpsk(struct socket *clcsock, struct smc_init_info *ini)
+{
+	struct dst_entry *dst = sk_dst_get(clcsock->sk);
+	struct net_device *ndev;
+	int i, nest_lvl, rc = 0;
+
+	ini->vlan_id = 0;
+	if (!dst) {
+		rc = -ENOTCONN;
+		goto out;
+	}
+	if (!dst->dev) {
+		rc = -ENODEV;
+		goto out_rel;
+	}
+
+	ndev = dst->dev;
+	if (is_vlan_dev(ndev)) {
+		ini->vlan_id = vlan_dev_vlan_id(ndev);
+		goto out_rel;
+	}
+
+	rtnl_lock();
+	nest_lvl = ndev->lower_level;
+	for (i = 0; i < nest_lvl; i++) {
+		struct list_head *lower = &ndev->adj_list.lower;
+
+		if (list_empty(lower))
+			break;
+		lower = lower->next;
+		ndev = (struct net_device *)netdev_lower_get_next(ndev, &lower);
+		if (is_vlan_dev(ndev)) {
+			ini->vlan_id = vlan_dev_vlan_id(ndev);
+			break;
+		}
+	}
+	rtnl_unlock();
+
+out_rel:
+	dst_release(dst);
+out:
+	return rc;
+}
+
+
+
+The corrected function:
+int smc_vlan_by_tcpsk(struct socket *clcsock, struct smc_init_info *ini)
+{
+	struct dst_entry *dst = sk_dst_get(clcsock->sk);
+	struct netdev_nested_priv priv;
+	struct net_device *ndev;
+	int rc = 0;
+
+	ini->vlan_id = 0;
+	if (!dst) {
+		rc = -ENOTCONN;
+		goto out;
+	}
+	if (!dst->dev) {
+		rc = -ENODEV;
+		goto out_rel;
+	}
+
+	ndev = dst->dev;
+	if (is_vlan_dev(ndev)) {
+		ini->vlan_id = vlan_dev_vlan_id(ndev);
+		goto out_rel;
+	}
+
+	priv.data = (void *)&ini->vlan_id;
+	rtnl_lock();
+	netdev_walk_all_lower_dev(ndev, smc_vlan_by_tcpsk_walk, &priv);
+	rtnl_unlock();
+
+out_rel:
+	dst_release(dst);
+out:
+	return rc;
+}

@@ -1,0 +1,84 @@
+This issue file has CWE-125. Your task is to create this CWE-125 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+netlabel: fix out-of-bounds memory accesses
+
+There are two array out-of-bounds memory accesses, one in
+cipso_v4_map_lvl_valid(), the other in netlbl_bitmap_walk().  Both
+errors are embarassingly simple, and the fixes are straightforward.
+
+As a FYI for anyone backporting this patch to kernels prior to v4.8,
+you'll want to apply the netlbl_bitmap_walk() patch to
+cipso_v4_bitmap_walk() as netlbl_bitmap_walk() doesn't exist before
+Linux v4.8.
+
+Reported-by: Jann Horn <jannh@google.com>
+Fixes: 446fda4f2682 ("[NetLabel]: CIPSOv4 engine")
+Fixes: 3faa8f982f95 ("netlabel: Move bitmap manipulation functions to the NetLabel core.")
+Signed-off-by: Paul Moore <paul@paul-moore.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+int netlbl_bitmap_walk(const unsigned char *bitmap, u32 bitmap_len,
+		       u32 offset, u8 state)
+{
+	u32 bit_spot;
+	u32 byte_offset;
+	unsigned char bitmask;
+	unsigned char byte;
+
+	byte_offset = offset / 8;
+	byte = bitmap[byte_offset];
+	bit_spot = offset;
+	bitmask = 0x80 >> (offset % 8);
+
+	while (bit_spot < bitmap_len) {
+		if ((state && (byte & bitmask) == bitmask) ||
+		    (state == 0 && (byte & bitmask) == 0))
+			return bit_spot;
+
+		bit_spot++;
+		bitmask >>= 1;
+		if (bitmask == 0) {
+			byte = bitmap[++byte_offset];
+			bitmask = 0x80;
+		}
+	}
+
+	return -1;
+}
+
+
+
+The corrected function:
+int netlbl_bitmap_walk(const unsigned char *bitmap, u32 bitmap_len,
+		       u32 offset, u8 state)
+{
+	u32 bit_spot;
+	u32 byte_offset;
+	unsigned char bitmask;
+	unsigned char byte;
+
+	byte_offset = offset / 8;
+	byte = bitmap[byte_offset];
+	bit_spot = offset;
+	bitmask = 0x80 >> (offset % 8);
+
+	while (bit_spot < bitmap_len) {
+		if ((state && (byte & bitmask) == bitmask) ||
+		    (state == 0 && (byte & bitmask) == 0))
+			return bit_spot;
+
+		if (++bit_spot >= bitmap_len)
+			return -1;
+		bitmask >>= 1;
+		if (bitmask == 0) {
+			byte = bitmap[++byte_offset];
+			bitmask = 0x80;
+		}
+	}
+
+	return -1;
+}

@@ -1,0 +1,164 @@
+The vulnerable issue:
+perf: Remove the nmi parameter from the swevent and overflow interface
+
+The nmi parameter indicated if we could do wakeups from the current
+context, if not, we would set some state and self-IPI and let the
+resulting interrupt do the wakeup.
+
+For the various event classes:
+
+  - hardware: nmi=0; PMI is in fact an NMI or we run irq_work_run from
+    the PMI-tail (ARM etc.)
+  - tracepoint: nmi=0; since tracepoint could be from NMI context.
+  - software: nmi=[0,1]; some, like the schedule thing cannot
+    perform wakeups, and hence need 0.
+
+As one can see, there is very little nmi=1 usage, and the down-side of
+not using it is that on some platforms some software events can have a
+jiffy delay in wakeup (when arch_irq_work_raise isn't implemented).
+
+The up-side however is that we can remove the nmi parameter and save a
+bunch of conditionals in fast paths.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: Michael Cree <mcree@orcon.net.nz>
+Cc: Will Deacon <will.deacon@arm.com>
+Cc: Deng-Cheng Zhu <dengcheng.zhu@gmail.com>
+Cc: Anton Blanchard <anton@samba.org>
+Cc: Eric B Munson <emunson@mgebm.net>
+Cc: Heiko Carstens <heiko.carstens@de.ibm.com>
+Cc: Paul Mundt <lethal@linux-sh.org>
+Cc: David S. Miller <davem@davemloft.net>
+Cc: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Jason Wessel <jason.wessel@windriver.com>
+Cc: Don Zickus <dzickus@redhat.com>
+Link: http://lkml.kernel.org/n/tip-agjev8eu666tvknpb3iaj0fg@git.kernel.org
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+
+
+The vulnerable function:
+void handle_lddfmna(struct pt_regs *regs, unsigned long sfar, unsigned long sfsr)
+{
+	unsigned long pc = regs->tpc;
+	unsigned long tstate = regs->tstate;
+	u32 insn;
+	u64 value;
+	u8 freg;
+	int flag;
+	struct fpustate *f = FPUSTATE;
+
+	if (tstate & TSTATE_PRIV)
+		die_if_kernel("lddfmna from kernel", regs);
+	perf_sw_event(PERF_COUNT_SW_ALIGNMENT_FAULTS, 1, 0, regs, sfar);
+	if (test_thread_flag(TIF_32BIT))
+		pc = (u32)pc;
+	if (get_user(insn, (u32 __user *) pc) != -EFAULT) {
+		int asi = decode_asi(insn, regs);
+		u32 first, second;
+		int err;
+
+		if ((asi > ASI_SNFL) ||
+		    (asi < ASI_P))
+			goto daex;
+		first = second = 0;
+		err = get_user(first, (u32 __user *)sfar);
+		if (!err)
+			err = get_user(second, (u32 __user *)(sfar + 4));
+		if (err) {
+			if (!(asi & 0x2))
+				goto daex;
+			first = second = 0;
+		}
+		save_and_clear_fpu();
+		freg = ((insn >> 25) & 0x1e) | ((insn >> 20) & 0x20);
+		value = (((u64)first) << 32) | second;
+		if (asi & 0x8) /* Little */
+			value = __swab64p(&value);
+		flag = (freg < 32) ? FPRS_DL : FPRS_DU;
+		if (!(current_thread_info()->fpsaved[0] & FPRS_FEF)) {
+			current_thread_info()->fpsaved[0] = FPRS_FEF;
+			current_thread_info()->gsr[0] = 0;
+		}
+		if (!(current_thread_info()->fpsaved[0] & flag)) {
+			if (freg < 32)
+				memset(f->regs, 0, 32*sizeof(u32));
+			else
+				memset(f->regs+32, 0, 32*sizeof(u32));
+		}
+		*(u64 *)(f->regs + freg) = value;
+		current_thread_info()->fpsaved[0] |= flag;
+	} else {
+daex:
+		if (tlb_type == hypervisor)
+			sun4v_data_access_exception(regs, sfar, sfsr);
+		else
+			spitfire_data_access_exception(regs, sfsr, sfar);
+		return;
+	}
+	advance(regs);
+}
+
+
+
+The corrected function:
+void handle_lddfmna(struct pt_regs *regs, unsigned long sfar, unsigned long sfsr)
+{
+	unsigned long pc = regs->tpc;
+	unsigned long tstate = regs->tstate;
+	u32 insn;
+	u64 value;
+	u8 freg;
+	int flag;
+	struct fpustate *f = FPUSTATE;
+
+	if (tstate & TSTATE_PRIV)
+		die_if_kernel("lddfmna from kernel", regs);
+	perf_sw_event(PERF_COUNT_SW_ALIGNMENT_FAULTS, 1, regs, sfar);
+	if (test_thread_flag(TIF_32BIT))
+		pc = (u32)pc;
+	if (get_user(insn, (u32 __user *) pc) != -EFAULT) {
+		int asi = decode_asi(insn, regs);
+		u32 first, second;
+		int err;
+
+		if ((asi > ASI_SNFL) ||
+		    (asi < ASI_P))
+			goto daex;
+		first = second = 0;
+		err = get_user(first, (u32 __user *)sfar);
+		if (!err)
+			err = get_user(second, (u32 __user *)(sfar + 4));
+		if (err) {
+			if (!(asi & 0x2))
+				goto daex;
+			first = second = 0;
+		}
+		save_and_clear_fpu();
+		freg = ((insn >> 25) & 0x1e) | ((insn >> 20) & 0x20);
+		value = (((u64)first) << 32) | second;
+		if (asi & 0x8) /* Little */
+			value = __swab64p(&value);
+		flag = (freg < 32) ? FPRS_DL : FPRS_DU;
+		if (!(current_thread_info()->fpsaved[0] & FPRS_FEF)) {
+			current_thread_info()->fpsaved[0] = FPRS_FEF;
+			current_thread_info()->gsr[0] = 0;
+		}
+		if (!(current_thread_info()->fpsaved[0] & flag)) {
+			if (freg < 32)
+				memset(f->regs, 0, 32*sizeof(u32));
+			else
+				memset(f->regs+32, 0, 32*sizeof(u32));
+		}
+		*(u64 *)(f->regs + freg) = value;
+		current_thread_info()->fpsaved[0] |= flag;
+	} else {
+daex:
+		if (tlb_type == hypervisor)
+			sun4v_data_access_exception(regs, sfar, sfsr);
+		else
+			spitfire_data_access_exception(regs, sfsr, sfar);
+		return;
+	}
+	advance(regs);
+}

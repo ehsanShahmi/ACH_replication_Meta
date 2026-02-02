@@ -1,0 +1,67 @@
+The vulnerable issue:
+net: fix __dst_negative_advice() race
+
+__dst_negative_advice() does not enforce proper RCU rules when
+sk->dst_cache must be cleared, leading to possible UAF.
+
+RCU rules are that we must first clear sk->sk_dst_cache,
+then call dst_release(old_dst).
+
+Note that sk_dst_reset(sk) is implementing this protocol correctly,
+while __dst_negative_advice() uses the wrong order.
+
+Given that ip6_negative_advice() has special logic
+against RTF_CACHE, this means each of the three ->negative_advice()
+existing methods must perform the sk_dst_reset() themselves.
+
+Note the check against NULL dst is centralized in
+__dst_negative_advice(), there is no need to duplicate
+it in various callbacks.
+
+Many thanks to Clement Lecigne for tracking this issue.
+
+This old bug became visible after the blamed commit, using UDP sockets.
+
+Fixes: a87cb3e48ee8 ("net: Facility to report route quality of connected sockets")
+Reported-by: Clement Lecigne <clecigne@google.com>
+Diagnosed-by: Clement Lecigne <clecigne@google.com>
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Cc: Tom Herbert <tom@herbertland.com>
+Reviewed-by: David Ahern <dsahern@kernel.org>
+Link: https://lore.kernel.org/r/20240528114353.1794151-1-edumazet@google.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+
+
+The vulnerable function:
+static struct dst_entry *ipv4_negative_advice(struct dst_entry *dst)
+{
+	struct rtable *rt = dst_rtable(dst);
+	struct dst_entry *ret = dst;
+
+	if (rt) {
+		if (dst->obsolete > 0) {
+			ip_rt_put(rt);
+			ret = NULL;
+		} else if ((rt->rt_flags & RTCF_REDIRECTED) ||
+			   rt->dst.expires) {
+			ip_rt_put(rt);
+			ret = NULL;
+		}
+	}
+	return ret;
+}
+
+
+
+The corrected function:
+static void ipv4_negative_advice(struct sock *sk,
+				 struct dst_entry *dst)
+{
+	struct rtable *rt = dst_rtable(dst);
+
+	if ((dst->obsolete > 0) ||
+	    (rt->rt_flags & RTCF_REDIRECTED) ||
+	    rt->dst.expires)
+		sk_dst_reset(sk);
+}

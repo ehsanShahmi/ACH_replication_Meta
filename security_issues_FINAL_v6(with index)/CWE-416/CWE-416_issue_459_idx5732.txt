@@ -1,0 +1,55 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+drm/nouveau/mmu: add more general vmm free/node handling functions
+
+Aside from being a nice cleanup, these will to allow the upcoming direct
+page mapping interfaces to play nicely with normal mappings.
+
+Signed-off-by: Ben Skeggs <bskeggs@redhat.com>
+
+
+
+The vulnerable function:
+nvkm_vmm_put_region(struct nvkm_vmm *vmm, struct nvkm_vma *vma)
+{
+	struct nvkm_vma *prev, *next;
+
+	if ((prev = node(vma, prev)) && !prev->used) {
+		rb_erase(&prev->tree, &vmm->free);
+		list_del(&prev->head);
+		vma->addr  = prev->addr;
+		vma->size += prev->size;
+		kfree(prev);
+	}
+
+	if ((next = node(vma, next)) && !next->used) {
+		rb_erase(&next->tree, &vmm->free);
+		list_del(&next->head);
+		vma->size += next->size;
+		kfree(next);
+	}
+
+	nvkm_vmm_free_insert(vmm, vma);
+}
+
+
+
+The corrected function:
+nvkm_vmm_put_region(struct nvkm_vmm *vmm, struct nvkm_vma *vma)
+{
+	struct nvkm_vma *prev, *next;
+
+	if ((prev = node(vma, prev)) && !prev->used) {
+		vma->addr  = prev->addr;
+		vma->size += prev->size;
+		nvkm_vmm_free_delete(vmm, prev);
+	}
+
+	if ((next = node(vma, next)) && !next->used) {
+		vma->size += next->size;
+		nvkm_vmm_free_delete(vmm, next);
+	}
+
+	nvkm_vmm_free_insert(vmm, vma);
+}

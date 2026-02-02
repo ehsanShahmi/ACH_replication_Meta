@@ -1,0 +1,793 @@
+The vulnerable issue:
+net: prevent mss overflow in skb_segment()
+
+Once again syzbot is able to crash the kernel in skb_segment() [1]
+
+GSO_BY_FRAGS is a forbidden value, but unfortunately the following
+computation in skb_segment() can reach it quite easily :
+
+	mss = mss * partial_segs;
+
+65535 = 3 * 5 * 17 * 257, so many initial values of mss can lead to
+a bad final result.
+
+Make sure to limit segmentation so that the new mss value is smaller
+than GSO_BY_FRAGS.
+
+[1]
+
+general protection fault, probably for non-canonical address 0xdffffc000000000e: 0000 [#1] PREEMPT SMP KASAN
+KASAN: null-ptr-deref in range [0x0000000000000070-0x0000000000000077]
+CPU: 1 PID: 5079 Comm: syz-executor993 Not tainted 6.7.0-rc4-syzkaller-00141-g1ae4cd3cbdd0 #0
+Hardware name: Google Google Compute Engine/Google Compute Engine, BIOS Google 11/10/2023
+RIP: 0010:skb_segment+0x181d/0x3f30 net/core/skbuff.c:4551
+Code: 83 e3 02 e9 fb ed ff ff e8 90 68 1c f9 48 8b 84 24 f8 00 00 00 48 8d 78 70 48 b8 00 00 00 00 00 fc ff df 48 89 fa 48 c1 ea 03 <0f> b6 04 02 84 c0 74 08 3c 03 0f 8e 8a 21 00 00 48 8b 84 24 f8 00
+RSP: 0018:ffffc900043473d0 EFLAGS: 00010202
+RAX: dffffc0000000000 RBX: 0000000000010046 RCX: ffffffff886b1597
+RDX: 000000000000000e RSI: ffffffff886b2520 RDI: 0000000000000070
+RBP: ffffc90004347578 R08: 0000000000000005 R09: 000000000000ffff
+R10: 000000000000ffff R11: 0000000000000002 R12: ffff888063202ac0
+R13: 0000000000010000 R14: 000000000000ffff R15: 0000000000000046
+FS: 0000555556e7e380(0000) GS:ffff8880b9900000(0000) knlGS:0000000000000000
+CS: 0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+CR2: 0000000020010000 CR3: 0000000027ee2000 CR4: 00000000003506f0
+DR0: 0000000000000000 DR1: 0000000000000000 DR2: 0000000000000000
+DR3: 0000000000000000 DR6: 00000000fffe0ff0 DR7: 0000000000000400
+Call Trace:
+<TASK>
+udp6_ufo_fragment+0xa0e/0xd00 net/ipv6/udp_offload.c:109
+ipv6_gso_segment+0x534/0x17e0 net/ipv6/ip6_offload.c:120
+skb_mac_gso_segment+0x290/0x610 net/core/gso.c:53
+__skb_gso_segment+0x339/0x710 net/core/gso.c:124
+skb_gso_segment include/net/gso.h:83 [inline]
+validate_xmit_skb+0x36c/0xeb0 net/core/dev.c:3626
+__dev_queue_xmit+0x6f3/0x3d60 net/core/dev.c:4338
+dev_queue_xmit include/linux/netdevice.h:3134 [inline]
+packet_xmit+0x257/0x380 net/packet/af_packet.c:276
+packet_snd net/packet/af_packet.c:3087 [inline]
+packet_sendmsg+0x24c6/0x5220 net/packet/af_packet.c:3119
+sock_sendmsg_nosec net/socket.c:730 [inline]
+__sock_sendmsg+0xd5/0x180 net/socket.c:745
+__sys_sendto+0x255/0x340 net/socket.c:2190
+__do_sys_sendto net/socket.c:2202 [inline]
+__se_sys_sendto net/socket.c:2198 [inline]
+__x64_sys_sendto+0xe0/0x1b0 net/socket.c:2198
+do_syscall_x64 arch/x86/entry/common.c:52 [inline]
+do_syscall_64+0x40/0x110 arch/x86/entry/common.c:83
+entry_SYSCALL_64_after_hwframe+0x63/0x6b
+RIP: 0033:0x7f8692032aa9
+Code: 28 00 00 00 75 05 48 83 c4 28 c3 e8 d1 19 00 00 90 48 89 f8 48 89 f7 48 89 d6 48 89 ca 4d 89 c2 4d 89 c8 4c 8b 4c 24 08 0f 05 <48> 3d 01 f0 ff ff 73 01 c3 48 c7 c1 b8 ff ff ff f7 d8 64 89 01 48
+RSP: 002b:00007fff8d685418 EFLAGS: 00000246 ORIG_RAX: 000000000000002c
+RAX: ffffffffffffffda RBX: 0000000000000003 RCX: 00007f8692032aa9
+RDX: 0000000000010048 RSI: 00000000200000c0 RDI: 0000000000000003
+RBP: 00000000000f4240 R08: 0000000020000540 R09: 0000000000000014
+R10: 0000000000000000 R11: 0000000000000246 R12: 00007fff8d685480
+R13: 0000000000000001 R14: 00007fff8d685480 R15: 0000000000000003
+</TASK>
+Modules linked in:
+---[ end trace 0000000000000000 ]---
+RIP: 0010:skb_segment+0x181d/0x3f30 net/core/skbuff.c:4551
+Code: 83 e3 02 e9 fb ed ff ff e8 90 68 1c f9 48 8b 84 24 f8 00 00 00 48 8d 78 70 48 b8 00 00 00 00 00 fc ff df 48 89 fa 48 c1 ea 03 <0f> b6 04 02 84 c0 74 08 3c 03 0f 8e 8a 21 00 00 48 8b 84 24 f8 00
+RSP: 0018:ffffc900043473d0 EFLAGS: 00010202
+RAX: dffffc0000000000 RBX: 0000000000010046 RCX: ffffffff886b1597
+RDX: 000000000000000e RSI: ffffffff886b2520 RDI: 0000000000000070
+RBP: ffffc90004347578 R08: 0000000000000005 R09: 000000000000ffff
+R10: 000000000000ffff R11: 0000000000000002 R12: ffff888063202ac0
+R13: 0000000000010000 R14: 000000000000ffff R15: 0000000000000046
+FS: 0000555556e7e380(0000) GS:ffff8880b9900000(0000) knlGS:0000000000000000
+CS: 0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+CR2: 0000000020010000 CR3: 0000000027ee2000 CR4: 00000000003506f0
+DR0: 0000000000000000 DR1: 0000000000000000 DR2: 0000000000000000
+DR3: 0000000000000000 DR6: 00000000fffe0ff0 DR7: 0000000000000400
+
+Fixes: 3953c46c3ac7 ("sk_buff: allow segmenting based on frag sizes")
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Cc: Marcelo Ricardo Leitner <marcelo.leitner@gmail.com>
+Reviewed-by: Willem de Bruijn <willemb@google.com>
+Link: https://lore.kernel.org/r/20231212164621.4131800-1-edumazet@google.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+
+
+The vulnerable function:
+struct sk_buff *skb_segment(struct sk_buff *head_skb,
+			    netdev_features_t features)
+{
+	struct sk_buff *segs = NULL;
+	struct sk_buff *tail = NULL;
+	struct sk_buff *list_skb = skb_shinfo(head_skb)->frag_list;
+	unsigned int mss = skb_shinfo(head_skb)->gso_size;
+	unsigned int doffset = head_skb->data - skb_mac_header(head_skb);
+	unsigned int offset = doffset;
+	unsigned int tnl_hlen = skb_tnl_header_len(head_skb);
+	unsigned int partial_segs = 0;
+	unsigned int headroom;
+	unsigned int len = head_skb->len;
+	struct sk_buff *frag_skb;
+	skb_frag_t *frag;
+	__be16 proto;
+	bool csum, sg;
+	int err = -ENOMEM;
+	int i = 0;
+	int nfrags, pos;
+
+	if ((skb_shinfo(head_skb)->gso_type & SKB_GSO_DODGY) &&
+	    mss != GSO_BY_FRAGS && mss != skb_headlen(head_skb)) {
+		struct sk_buff *check_skb;
+
+		for (check_skb = list_skb; check_skb; check_skb = check_skb->next) {
+			if (skb_headlen(check_skb) && !check_skb->head_frag) {
+				/* gso_size is untrusted, and we have a frag_list with
+				 * a linear non head_frag item.
+				 *
+				 * If head_skb's headlen does not fit requested gso_size,
+				 * it means that the frag_list members do NOT terminate
+				 * on exact gso_size boundaries. Hence we cannot perform
+				 * skb_frag_t page sharing. Therefore we must fallback to
+				 * copying the frag_list skbs; we do so by disabling SG.
+				 */
+				features &= ~NETIF_F_SG;
+				break;
+			}
+		}
+	}
+
+	__skb_push(head_skb, doffset);
+	proto = skb_network_protocol(head_skb, NULL);
+	if (unlikely(!proto))
+		return ERR_PTR(-EINVAL);
+
+	sg = !!(features & NETIF_F_SG);
+	csum = !!can_checksum_protocol(features, proto);
+
+	if (sg && csum && (mss != GSO_BY_FRAGS))  {
+		if (!(features & NETIF_F_GSO_PARTIAL)) {
+			struct sk_buff *iter;
+			unsigned int frag_len;
+
+			if (!list_skb ||
+			    !net_gso_ok(features, skb_shinfo(head_skb)->gso_type))
+				goto normal;
+
+			/* If we get here then all the required
+			 * GSO features except frag_list are supported.
+			 * Try to split the SKB to multiple GSO SKBs
+			 * with no frag_list.
+			 * Currently we can do that only when the buffers don't
+			 * have a linear part and all the buffers except
+			 * the last are of the same length.
+			 */
+			frag_len = list_skb->len;
+			skb_walk_frags(head_skb, iter) {
+				if (frag_len != iter->len && iter->next)
+					goto normal;
+				if (skb_headlen(iter) && !iter->head_frag)
+					goto normal;
+
+				len -= iter->len;
+			}
+
+			if (len != frag_len)
+				goto normal;
+		}
+
+		/* GSO partial only requires that we trim off any excess that
+		 * doesn't fit into an MSS sized block, so take care of that
+		 * now.
+		 */
+		partial_segs = len / mss;
+		if (partial_segs > 1)
+			mss *= partial_segs;
+		else
+			partial_segs = 0;
+	}
+
+normal:
+	headroom = skb_headroom(head_skb);
+	pos = skb_headlen(head_skb);
+
+	if (skb_orphan_frags(head_skb, GFP_ATOMIC))
+		return ERR_PTR(-ENOMEM);
+
+	nfrags = skb_shinfo(head_skb)->nr_frags;
+	frag = skb_shinfo(head_skb)->frags;
+	frag_skb = head_skb;
+
+	do {
+		struct sk_buff *nskb;
+		skb_frag_t *nskb_frag;
+		int hsize;
+		int size;
+
+		if (unlikely(mss == GSO_BY_FRAGS)) {
+			len = list_skb->len;
+		} else {
+			len = head_skb->len - offset;
+			if (len > mss)
+				len = mss;
+		}
+
+		hsize = skb_headlen(head_skb) - offset;
+
+		if (hsize <= 0 && i >= nfrags && skb_headlen(list_skb) &&
+		    (skb_headlen(list_skb) == len || sg)) {
+			BUG_ON(skb_headlen(list_skb) > len);
+
+			nskb = skb_clone(list_skb, GFP_ATOMIC);
+			if (unlikely(!nskb))
+				goto err;
+
+			i = 0;
+			nfrags = skb_shinfo(list_skb)->nr_frags;
+			frag = skb_shinfo(list_skb)->frags;
+			frag_skb = list_skb;
+			pos += skb_headlen(list_skb);
+
+			while (pos < offset + len) {
+				BUG_ON(i >= nfrags);
+
+				size = skb_frag_size(frag);
+				if (pos + size > offset + len)
+					break;
+
+				i++;
+				pos += size;
+				frag++;
+			}
+
+			list_skb = list_skb->next;
+
+			if (unlikely(pskb_trim(nskb, len))) {
+				kfree_skb(nskb);
+				goto err;
+			}
+
+			hsize = skb_end_offset(nskb);
+			if (skb_cow_head(nskb, doffset + headroom)) {
+				kfree_skb(nskb);
+				goto err;
+			}
+
+			nskb->truesize += skb_end_offset(nskb) - hsize;
+			skb_release_head_state(nskb);
+			__skb_push(nskb, doffset);
+		} else {
+			if (hsize < 0)
+				hsize = 0;
+			if (hsize > len || !sg)
+				hsize = len;
+
+			nskb = __alloc_skb(hsize + doffset + headroom,
+					   GFP_ATOMIC, skb_alloc_rx_flag(head_skb),
+					   NUMA_NO_NODE);
+
+			if (unlikely(!nskb))
+				goto err;
+
+			skb_reserve(nskb, headroom);
+			__skb_put(nskb, doffset);
+		}
+
+		if (segs)
+			tail->next = nskb;
+		else
+			segs = nskb;
+		tail = nskb;
+
+		__copy_skb_header(nskb, head_skb);
+
+		skb_headers_offset_update(nskb, skb_headroom(nskb) - headroom);
+		skb_reset_mac_len(nskb);
+
+		skb_copy_from_linear_data_offset(head_skb, -tnl_hlen,
+						 nskb->data - tnl_hlen,
+						 doffset + tnl_hlen);
+
+		if (nskb->len == len + doffset)
+			goto perform_csum_check;
+
+		if (!sg) {
+			if (!csum) {
+				if (!nskb->remcsum_offload)
+					nskb->ip_summed = CHECKSUM_NONE;
+				SKB_GSO_CB(nskb)->csum =
+					skb_copy_and_csum_bits(head_skb, offset,
+							       skb_put(nskb,
+								       len),
+							       len);
+				SKB_GSO_CB(nskb)->csum_start =
+					skb_headroom(nskb) + doffset;
+			} else {
+				if (skb_copy_bits(head_skb, offset, skb_put(nskb, len), len))
+					goto err;
+			}
+			continue;
+		}
+
+		nskb_frag = skb_shinfo(nskb)->frags;
+
+		skb_copy_from_linear_data_offset(head_skb, offset,
+						 skb_put(nskb, hsize), hsize);
+
+		skb_shinfo(nskb)->flags |= skb_shinfo(head_skb)->flags &
+					   SKBFL_SHARED_FRAG;
+
+		if (skb_zerocopy_clone(nskb, frag_skb, GFP_ATOMIC))
+			goto err;
+
+		while (pos < offset + len) {
+			if (i >= nfrags) {
+				if (skb_orphan_frags(list_skb, GFP_ATOMIC) ||
+				    skb_zerocopy_clone(nskb, list_skb,
+						       GFP_ATOMIC))
+					goto err;
+
+				i = 0;
+				nfrags = skb_shinfo(list_skb)->nr_frags;
+				frag = skb_shinfo(list_skb)->frags;
+				frag_skb = list_skb;
+				if (!skb_headlen(list_skb)) {
+					BUG_ON(!nfrags);
+				} else {
+					BUG_ON(!list_skb->head_frag);
+
+					/* to make room for head_frag. */
+					i--;
+					frag--;
+				}
+
+				list_skb = list_skb->next;
+			}
+
+			if (unlikely(skb_shinfo(nskb)->nr_frags >=
+				     MAX_SKB_FRAGS)) {
+				net_warn_ratelimited(
+					"skb_segment: too many frags: %u %u\n",
+					pos, mss);
+				err = -EINVAL;
+				goto err;
+			}
+
+			*nskb_frag = (i < 0) ? skb_head_frag_to_page_desc(frag_skb) : *frag;
+			__skb_frag_ref(nskb_frag);
+			size = skb_frag_size(nskb_frag);
+
+			if (pos < offset) {
+				skb_frag_off_add(nskb_frag, offset - pos);
+				skb_frag_size_sub(nskb_frag, offset - pos);
+			}
+
+			skb_shinfo(nskb)->nr_frags++;
+
+			if (pos + size <= offset + len) {
+				i++;
+				frag++;
+				pos += size;
+			} else {
+				skb_frag_size_sub(nskb_frag, pos + size - (offset + len));
+				goto skip_fraglist;
+			}
+
+			nskb_frag++;
+		}
+
+skip_fraglist:
+		nskb->data_len = len - hsize;
+		nskb->len += nskb->data_len;
+		nskb->truesize += nskb->data_len;
+
+perform_csum_check:
+		if (!csum) {
+			if (skb_has_shared_frag(nskb) &&
+			    __skb_linearize(nskb))
+				goto err;
+
+			if (!nskb->remcsum_offload)
+				nskb->ip_summed = CHECKSUM_NONE;
+			SKB_GSO_CB(nskb)->csum =
+				skb_checksum(nskb, doffset,
+					     nskb->len - doffset, 0);
+			SKB_GSO_CB(nskb)->csum_start =
+				skb_headroom(nskb) + doffset;
+		}
+	} while ((offset += len) < head_skb->len);
+
+	/* Some callers want to get the end of the list.
+	 * Put it in segs->prev to avoid walking the list.
+	 * (see validate_xmit_skb_list() for example)
+	 */
+	segs->prev = tail;
+
+	if (partial_segs) {
+		struct sk_buff *iter;
+		int type = skb_shinfo(head_skb)->gso_type;
+		unsigned short gso_size = skb_shinfo(head_skb)->gso_size;
+
+		/* Update type to add partial and then remove dodgy if set */
+		type |= (features & NETIF_F_GSO_PARTIAL) / NETIF_F_GSO_PARTIAL * SKB_GSO_PARTIAL;
+		type &= ~SKB_GSO_DODGY;
+
+		/* Update GSO info and prepare to start updating headers on
+		 * our way back down the stack of protocols.
+		 */
+		for (iter = segs; iter; iter = iter->next) {
+			skb_shinfo(iter)->gso_size = gso_size;
+			skb_shinfo(iter)->gso_segs = partial_segs;
+			skb_shinfo(iter)->gso_type = type;
+			SKB_GSO_CB(iter)->data_offset = skb_headroom(iter) + doffset;
+		}
+
+		if (tail->len - doffset <= gso_size)
+			skb_shinfo(tail)->gso_size = 0;
+		else if (tail != segs)
+			skb_shinfo(tail)->gso_segs = DIV_ROUND_UP(tail->len - doffset, gso_size);
+	}
+
+	/* Following permits correct backpressure, for protocols
+	 * using skb_set_owner_w().
+	 * Idea is to tranfert ownership from head_skb to last segment.
+	 */
+	if (head_skb->destructor == sock_wfree) {
+		swap(tail->truesize, head_skb->truesize);
+		swap(tail->destructor, head_skb->destructor);
+		swap(tail->sk, head_skb->sk);
+	}
+	return segs;
+
+err:
+	kfree_skb_list(segs);
+	return ERR_PTR(err);
+}
+
+
+
+The corrected function:
+struct sk_buff *skb_segment(struct sk_buff *head_skb,
+			    netdev_features_t features)
+{
+	struct sk_buff *segs = NULL;
+	struct sk_buff *tail = NULL;
+	struct sk_buff *list_skb = skb_shinfo(head_skb)->frag_list;
+	unsigned int mss = skb_shinfo(head_skb)->gso_size;
+	unsigned int doffset = head_skb->data - skb_mac_header(head_skb);
+	unsigned int offset = doffset;
+	unsigned int tnl_hlen = skb_tnl_header_len(head_skb);
+	unsigned int partial_segs = 0;
+	unsigned int headroom;
+	unsigned int len = head_skb->len;
+	struct sk_buff *frag_skb;
+	skb_frag_t *frag;
+	__be16 proto;
+	bool csum, sg;
+	int err = -ENOMEM;
+	int i = 0;
+	int nfrags, pos;
+
+	if ((skb_shinfo(head_skb)->gso_type & SKB_GSO_DODGY) &&
+	    mss != GSO_BY_FRAGS && mss != skb_headlen(head_skb)) {
+		struct sk_buff *check_skb;
+
+		for (check_skb = list_skb; check_skb; check_skb = check_skb->next) {
+			if (skb_headlen(check_skb) && !check_skb->head_frag) {
+				/* gso_size is untrusted, and we have a frag_list with
+				 * a linear non head_frag item.
+				 *
+				 * If head_skb's headlen does not fit requested gso_size,
+				 * it means that the frag_list members do NOT terminate
+				 * on exact gso_size boundaries. Hence we cannot perform
+				 * skb_frag_t page sharing. Therefore we must fallback to
+				 * copying the frag_list skbs; we do so by disabling SG.
+				 */
+				features &= ~NETIF_F_SG;
+				break;
+			}
+		}
+	}
+
+	__skb_push(head_skb, doffset);
+	proto = skb_network_protocol(head_skb, NULL);
+	if (unlikely(!proto))
+		return ERR_PTR(-EINVAL);
+
+	sg = !!(features & NETIF_F_SG);
+	csum = !!can_checksum_protocol(features, proto);
+
+	if (sg && csum && (mss != GSO_BY_FRAGS))  {
+		if (!(features & NETIF_F_GSO_PARTIAL)) {
+			struct sk_buff *iter;
+			unsigned int frag_len;
+
+			if (!list_skb ||
+			    !net_gso_ok(features, skb_shinfo(head_skb)->gso_type))
+				goto normal;
+
+			/* If we get here then all the required
+			 * GSO features except frag_list are supported.
+			 * Try to split the SKB to multiple GSO SKBs
+			 * with no frag_list.
+			 * Currently we can do that only when the buffers don't
+			 * have a linear part and all the buffers except
+			 * the last are of the same length.
+			 */
+			frag_len = list_skb->len;
+			skb_walk_frags(head_skb, iter) {
+				if (frag_len != iter->len && iter->next)
+					goto normal;
+				if (skb_headlen(iter) && !iter->head_frag)
+					goto normal;
+
+				len -= iter->len;
+			}
+
+			if (len != frag_len)
+				goto normal;
+		}
+
+		/* GSO partial only requires that we trim off any excess that
+		 * doesn't fit into an MSS sized block, so take care of that
+		 * now.
+		 * Cap len to not accidentally hit GSO_BY_FRAGS.
+		 */
+		partial_segs = min(len, GSO_BY_FRAGS - 1) / mss;
+		if (partial_segs > 1)
+			mss *= partial_segs;
+		else
+			partial_segs = 0;
+	}
+
+normal:
+	headroom = skb_headroom(head_skb);
+	pos = skb_headlen(head_skb);
+
+	if (skb_orphan_frags(head_skb, GFP_ATOMIC))
+		return ERR_PTR(-ENOMEM);
+
+	nfrags = skb_shinfo(head_skb)->nr_frags;
+	frag = skb_shinfo(head_skb)->frags;
+	frag_skb = head_skb;
+
+	do {
+		struct sk_buff *nskb;
+		skb_frag_t *nskb_frag;
+		int hsize;
+		int size;
+
+		if (unlikely(mss == GSO_BY_FRAGS)) {
+			len = list_skb->len;
+		} else {
+			len = head_skb->len - offset;
+			if (len > mss)
+				len = mss;
+		}
+
+		hsize = skb_headlen(head_skb) - offset;
+
+		if (hsize <= 0 && i >= nfrags && skb_headlen(list_skb) &&
+		    (skb_headlen(list_skb) == len || sg)) {
+			BUG_ON(skb_headlen(list_skb) > len);
+
+			nskb = skb_clone(list_skb, GFP_ATOMIC);
+			if (unlikely(!nskb))
+				goto err;
+
+			i = 0;
+			nfrags = skb_shinfo(list_skb)->nr_frags;
+			frag = skb_shinfo(list_skb)->frags;
+			frag_skb = list_skb;
+			pos += skb_headlen(list_skb);
+
+			while (pos < offset + len) {
+				BUG_ON(i >= nfrags);
+
+				size = skb_frag_size(frag);
+				if (pos + size > offset + len)
+					break;
+
+				i++;
+				pos += size;
+				frag++;
+			}
+
+			list_skb = list_skb->next;
+
+			if (unlikely(pskb_trim(nskb, len))) {
+				kfree_skb(nskb);
+				goto err;
+			}
+
+			hsize = skb_end_offset(nskb);
+			if (skb_cow_head(nskb, doffset + headroom)) {
+				kfree_skb(nskb);
+				goto err;
+			}
+
+			nskb->truesize += skb_end_offset(nskb) - hsize;
+			skb_release_head_state(nskb);
+			__skb_push(nskb, doffset);
+		} else {
+			if (hsize < 0)
+				hsize = 0;
+			if (hsize > len || !sg)
+				hsize = len;
+
+			nskb = __alloc_skb(hsize + doffset + headroom,
+					   GFP_ATOMIC, skb_alloc_rx_flag(head_skb),
+					   NUMA_NO_NODE);
+
+			if (unlikely(!nskb))
+				goto err;
+
+			skb_reserve(nskb, headroom);
+			__skb_put(nskb, doffset);
+		}
+
+		if (segs)
+			tail->next = nskb;
+		else
+			segs = nskb;
+		tail = nskb;
+
+		__copy_skb_header(nskb, head_skb);
+
+		skb_headers_offset_update(nskb, skb_headroom(nskb) - headroom);
+		skb_reset_mac_len(nskb);
+
+		skb_copy_from_linear_data_offset(head_skb, -tnl_hlen,
+						 nskb->data - tnl_hlen,
+						 doffset + tnl_hlen);
+
+		if (nskb->len == len + doffset)
+			goto perform_csum_check;
+
+		if (!sg) {
+			if (!csum) {
+				if (!nskb->remcsum_offload)
+					nskb->ip_summed = CHECKSUM_NONE;
+				SKB_GSO_CB(nskb)->csum =
+					skb_copy_and_csum_bits(head_skb, offset,
+							       skb_put(nskb,
+								       len),
+							       len);
+				SKB_GSO_CB(nskb)->csum_start =
+					skb_headroom(nskb) + doffset;
+			} else {
+				if (skb_copy_bits(head_skb, offset, skb_put(nskb, len), len))
+					goto err;
+			}
+			continue;
+		}
+
+		nskb_frag = skb_shinfo(nskb)->frags;
+
+		skb_copy_from_linear_data_offset(head_skb, offset,
+						 skb_put(nskb, hsize), hsize);
+
+		skb_shinfo(nskb)->flags |= skb_shinfo(head_skb)->flags &
+					   SKBFL_SHARED_FRAG;
+
+		if (skb_zerocopy_clone(nskb, frag_skb, GFP_ATOMIC))
+			goto err;
+
+		while (pos < offset + len) {
+			if (i >= nfrags) {
+				if (skb_orphan_frags(list_skb, GFP_ATOMIC) ||
+				    skb_zerocopy_clone(nskb, list_skb,
+						       GFP_ATOMIC))
+					goto err;
+
+				i = 0;
+				nfrags = skb_shinfo(list_skb)->nr_frags;
+				frag = skb_shinfo(list_skb)->frags;
+				frag_skb = list_skb;
+				if (!skb_headlen(list_skb)) {
+					BUG_ON(!nfrags);
+				} else {
+					BUG_ON(!list_skb->head_frag);
+
+					/* to make room for head_frag. */
+					i--;
+					frag--;
+				}
+
+				list_skb = list_skb->next;
+			}
+
+			if (unlikely(skb_shinfo(nskb)->nr_frags >=
+				     MAX_SKB_FRAGS)) {
+				net_warn_ratelimited(
+					"skb_segment: too many frags: %u %u\n",
+					pos, mss);
+				err = -EINVAL;
+				goto err;
+			}
+
+			*nskb_frag = (i < 0) ? skb_head_frag_to_page_desc(frag_skb) : *frag;
+			__skb_frag_ref(nskb_frag);
+			size = skb_frag_size(nskb_frag);
+
+			if (pos < offset) {
+				skb_frag_off_add(nskb_frag, offset - pos);
+				skb_frag_size_sub(nskb_frag, offset - pos);
+			}
+
+			skb_shinfo(nskb)->nr_frags++;
+
+			if (pos + size <= offset + len) {
+				i++;
+				frag++;
+				pos += size;
+			} else {
+				skb_frag_size_sub(nskb_frag, pos + size - (offset + len));
+				goto skip_fraglist;
+			}
+
+			nskb_frag++;
+		}
+
+skip_fraglist:
+		nskb->data_len = len - hsize;
+		nskb->len += nskb->data_len;
+		nskb->truesize += nskb->data_len;
+
+perform_csum_check:
+		if (!csum) {
+			if (skb_has_shared_frag(nskb) &&
+			    __skb_linearize(nskb))
+				goto err;
+
+			if (!nskb->remcsum_offload)
+				nskb->ip_summed = CHECKSUM_NONE;
+			SKB_GSO_CB(nskb)->csum =
+				skb_checksum(nskb, doffset,
+					     nskb->len - doffset, 0);
+			SKB_GSO_CB(nskb)->csum_start =
+				skb_headroom(nskb) + doffset;
+		}
+	} while ((offset += len) < head_skb->len);
+
+	/* Some callers want to get the end of the list.
+	 * Put it in segs->prev to avoid walking the list.
+	 * (see validate_xmit_skb_list() for example)
+	 */
+	segs->prev = tail;
+
+	if (partial_segs) {
+		struct sk_buff *iter;
+		int type = skb_shinfo(head_skb)->gso_type;
+		unsigned short gso_size = skb_shinfo(head_skb)->gso_size;
+
+		/* Update type to add partial and then remove dodgy if set */
+		type |= (features & NETIF_F_GSO_PARTIAL) / NETIF_F_GSO_PARTIAL * SKB_GSO_PARTIAL;
+		type &= ~SKB_GSO_DODGY;
+
+		/* Update GSO info and prepare to start updating headers on
+		 * our way back down the stack of protocols.
+		 */
+		for (iter = segs; iter; iter = iter->next) {
+			skb_shinfo(iter)->gso_size = gso_size;
+			skb_shinfo(iter)->gso_segs = partial_segs;
+			skb_shinfo(iter)->gso_type = type;
+			SKB_GSO_CB(iter)->data_offset = skb_headroom(iter) + doffset;
+		}
+
+		if (tail->len - doffset <= gso_size)
+			skb_shinfo(tail)->gso_size = 0;
+		else if (tail != segs)
+			skb_shinfo(tail)->gso_segs = DIV_ROUND_UP(tail->len - doffset, gso_size);
+	}
+
+	/* Following permits correct backpressure, for protocols
+	 * using skb_set_owner_w().
+	 * Idea is to tranfert ownership from head_skb to last segment.
+	 */
+	if (head_skb->destructor == sock_wfree) {
+		swap(tail->truesize, head_skb->truesize);
+		swap(tail->destructor, head_skb->destructor);
+		swap(tail->sk, head_skb->sk);
+	}
+	return segs;
+
+err:
+	kfree_skb_list(segs);
+	return ERR_PTR(err);
+}

@@ -1,0 +1,37 @@
+This issue file has CWE-674. Your task is to create this CWE-674 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+netlink: limit recursion depth in policy validation
+
+Now that we have nested policies, we can theoretically
+recurse forever parsing attributes if a (sub-)policy
+refers back to a higher level one. This is a situation
+that has happened in nl80211, and we've avoided it there
+by not linking it.
+
+Add some code to netlink parsing to limit recursion depth.
+
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+int __nla_validate(const struct nlattr *head, int len, int maxtype,
+		   const struct nla_policy *policy, unsigned int validate,
+		   struct netlink_ext_ack *extack)
+{
+	return __nla_validate_parse(head, len, maxtype, policy, validate,
+				    extack, NULL);
+}
+
+
+
+The corrected function:
+int __nla_validate(const struct nlattr *head, int len, int maxtype,
+		   const struct nla_policy *policy, unsigned int validate,
+		   struct netlink_ext_ack *extack)
+{
+	return __nla_validate_parse(head, len, maxtype, policy, validate,
+				    extack, NULL, 0);
+}

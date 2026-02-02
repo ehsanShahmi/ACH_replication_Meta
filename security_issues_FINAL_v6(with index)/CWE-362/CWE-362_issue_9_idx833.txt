@@ -1,0 +1,56 @@
+This issue file has CWE-362. Your task is to create this CWE-362 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+ucount: Remove the atomicity from ucount->count
+
+Always increment/decrement ucount->count under the ucounts_lock.  The
+increments are there already and moving the decrements there means the
+locking logic of the code is simpler.  This simplification in the
+locking logic fixes a race between put_ucounts and get_ucounts that
+could result in a use-after-free because the count could go zero then
+be found by get_ucounts and then be freed by put_ucounts.
+
+A bug presumably this one was found by a combination of syzkaller and
+KASAN.  JongWhan Kim reported the syzkaller failure and Dmitry Vyukov
+spotted the race in the code.
+
+Cc: stable@vger.kernel.org
+Fixes: f6b2db1a3e8d ("userns: Make the count of user namespaces per user")
+Reported-by: JongHwan Kim <zzoru007@gmail.com>
+Reported-by: Dmitry Vyukov <dvyukov@google.com>
+Reviewed-by: Andrei Vagin <avagin@gmail.com>
+Signed-off-by: "Eric W. Biederman" <ebiederm@xmission.com>
+
+
+
+The vulnerable function:
+static void put_ucounts(struct ucounts *ucounts)
+{
+	unsigned long flags;
+
+	if (atomic_dec_and_test(&ucounts->count)) {
+		spin_lock_irqsave(&ucounts_lock, flags);
+		hlist_del_init(&ucounts->node);
+		spin_unlock_irqrestore(&ucounts_lock, flags);
+
+		kfree(ucounts);
+	}
+}
+
+
+
+The corrected function:
+static void put_ucounts(struct ucounts *ucounts)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&ucounts_lock, flags);
+	ucounts->count -= 1;
+	if (!ucounts->count)
+		hlist_del_init(&ucounts->node);
+	else
+		ucounts = NULL;
+	spin_unlock_irqrestore(&ucounts_lock, flags);
+
+	kfree(ucounts);
+}

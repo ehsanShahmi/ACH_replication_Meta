@@ -1,0 +1,112 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+serial: liteuart: Fix NULL pointer dereference in ->remove()
+
+drvdata has to be set in _probe() - otherwise platform_get_drvdata()
+causes null pointer dereference BUG in _remove().
+
+Fixes: 1da81e5562fa ("drivers/tty/serial: add LiteUART driver")
+Cc: stable <stable@vger.kernel.org>
+Reviewed-by: Johan Hovold <johan@kernel.org>
+Signed-off-by: Ilia Sergachev <silia@ethz.ch>
+Link: https://lore.kernel.org/r/20211115224944.23f8c12b@dtkw
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+
+
+The vulnerable function:
+static int liteuart_probe(struct platform_device *pdev)
+{
+	struct liteuart_port *uart;
+	struct uart_port *port;
+	struct xa_limit limit;
+	int dev_id, ret;
+
+	/* look for aliases; auto-enumerate for free index if not found */
+	dev_id = of_alias_get_id(pdev->dev.of_node, "serial");
+	if (dev_id < 0)
+		limit = XA_LIMIT(0, CONFIG_SERIAL_LITEUART_MAX_PORTS);
+	else
+		limit = XA_LIMIT(dev_id, dev_id);
+
+	uart = devm_kzalloc(&pdev->dev, sizeof(struct liteuart_port), GFP_KERNEL);
+	if (!uart)
+		return -ENOMEM;
+
+	ret = xa_alloc(&liteuart_array, &dev_id, uart, limit, GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	uart->id = dev_id;
+	port = &uart->port;
+
+	/* get membase */
+	port->membase = devm_platform_get_and_ioremap_resource(pdev, 0, NULL);
+	if (IS_ERR(port->membase))
+		return PTR_ERR(port->membase);
+
+	/* values not from device tree */
+	port->dev = &pdev->dev;
+	port->iotype = UPIO_MEM;
+	port->flags = UPF_BOOT_AUTOCONF;
+	port->ops = &liteuart_ops;
+	port->regshift = 2;
+	port->fifosize = 16;
+	port->iobase = 1;
+	port->type = PORT_UNKNOWN;
+	port->line = dev_id;
+	spin_lock_init(&port->lock);
+
+	return uart_add_one_port(&liteuart_driver, &uart->port);
+}
+
+
+
+The corrected function:
+static int liteuart_probe(struct platform_device *pdev)
+{
+	struct liteuart_port *uart;
+	struct uart_port *port;
+	struct xa_limit limit;
+	int dev_id, ret;
+
+	/* look for aliases; auto-enumerate for free index if not found */
+	dev_id = of_alias_get_id(pdev->dev.of_node, "serial");
+	if (dev_id < 0)
+		limit = XA_LIMIT(0, CONFIG_SERIAL_LITEUART_MAX_PORTS);
+	else
+		limit = XA_LIMIT(dev_id, dev_id);
+
+	uart = devm_kzalloc(&pdev->dev, sizeof(struct liteuart_port), GFP_KERNEL);
+	if (!uart)
+		return -ENOMEM;
+
+	ret = xa_alloc(&liteuart_array, &dev_id, uart, limit, GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	uart->id = dev_id;
+	port = &uart->port;
+
+	/* get membase */
+	port->membase = devm_platform_get_and_ioremap_resource(pdev, 0, NULL);
+	if (IS_ERR(port->membase))
+		return PTR_ERR(port->membase);
+
+	/* values not from device tree */
+	port->dev = &pdev->dev;
+	port->iotype = UPIO_MEM;
+	port->flags = UPF_BOOT_AUTOCONF;
+	port->ops = &liteuart_ops;
+	port->regshift = 2;
+	port->fifosize = 16;
+	port->iobase = 1;
+	port->type = PORT_UNKNOWN;
+	port->line = dev_id;
+	spin_lock_init(&port->lock);
+
+	platform_set_drvdata(pdev, port);
+
+	return uart_add_one_port(&liteuart_driver, &uart->port);
+}

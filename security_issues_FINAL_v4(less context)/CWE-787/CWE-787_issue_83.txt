@@ -1,0 +1,205 @@
+The vulnerable issue:
+netfilter: x_tables: fix compat match/target pad out-of-bound write
+
+xt_compat_match/target_from_user doesn't check that zeroing the area
+to start of next rule won't write past end of allocated ruleset blob.
+
+Remove this code and zero the entire blob beforehand.
+
+Reported-by: syzbot+cfc0247ac173f597aaaa@syzkaller.appspotmail.com
+Reported-by: Andy Nguyen <theflow@google.com>
+Fixes: 9fa492cdc160c ("[NETFILTER]: x_tables: simplify compat API")
+Signed-off-by: Florian Westphal <fw@strlen.de>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+
+
+
+The vulnerable function:
+static int translate_compat_table(struct net *net,
+				  struct xt_table_info **pinfo,
+				  void **pentry0,
+				  const struct compat_arpt_replace *compatr)
+{
+	unsigned int i, j;
+	struct xt_table_info *newinfo, *info;
+	void *pos, *entry0, *entry1;
+	struct compat_arpt_entry *iter0;
+	struct arpt_replace repl;
+	unsigned int size;
+	int ret;
+
+	info = *pinfo;
+	entry0 = *pentry0;
+	size = compatr->size;
+	info->number = compatr->num_entries;
+
+	j = 0;
+	xt_compat_lock(NFPROTO_ARP);
+	ret = xt_compat_init_offsets(NFPROTO_ARP, compatr->num_entries);
+	if (ret)
+		goto out_unlock;
+	/* Walk through entries, checking offsets. */
+	xt_entry_foreach(iter0, entry0, compatr->size) {
+		ret = check_compat_entry_size_and_hooks(iter0, info, &size,
+							entry0,
+							entry0 + compatr->size);
+		if (ret != 0)
+			goto out_unlock;
+		++j;
+	}
+
+	ret = -EINVAL;
+	if (j != compatr->num_entries)
+		goto out_unlock;
+
+	ret = -ENOMEM;
+	newinfo = xt_alloc_table_info(size);
+	if (!newinfo)
+		goto out_unlock;
+
+	newinfo->number = compatr->num_entries;
+	for (i = 0; i < NF_ARP_NUMHOOKS; i++) {
+		newinfo->hook_entry[i] = compatr->hook_entry[i];
+		newinfo->underflow[i] = compatr->underflow[i];
+	}
+	entry1 = newinfo->entries;
+	pos = entry1;
+	size = compatr->size;
+	xt_entry_foreach(iter0, entry0, compatr->size)
+		compat_copy_entry_from_user(iter0, &pos, &size,
+					    newinfo, entry1);
+
+	/* all module references in entry0 are now gone */
+
+	xt_compat_flush_offsets(NFPROTO_ARP);
+	xt_compat_unlock(NFPROTO_ARP);
+
+	memcpy(&repl, compatr, sizeof(*compatr));
+
+	for (i = 0; i < NF_ARP_NUMHOOKS; i++) {
+		repl.hook_entry[i] = newinfo->hook_entry[i];
+		repl.underflow[i] = newinfo->underflow[i];
+	}
+
+	repl.num_counters = 0;
+	repl.counters = NULL;
+	repl.size = newinfo->size;
+	ret = translate_table(net, newinfo, entry1, &repl);
+	if (ret)
+		goto free_newinfo;
+
+	*pinfo = newinfo;
+	*pentry0 = entry1;
+	xt_free_table_info(info);
+	return 0;
+
+free_newinfo:
+	xt_free_table_info(newinfo);
+	return ret;
+out_unlock:
+	xt_compat_flush_offsets(NFPROTO_ARP);
+	xt_compat_unlock(NFPROTO_ARP);
+	xt_entry_foreach(iter0, entry0, compatr->size) {
+		if (j-- == 0)
+			break;
+		compat_release_entry(iter0);
+	}
+	return ret;
+}
+
+
+
+The corrected function:
+static int translate_compat_table(struct net *net,
+				  struct xt_table_info **pinfo,
+				  void **pentry0,
+				  const struct compat_arpt_replace *compatr)
+{
+	unsigned int i, j;
+	struct xt_table_info *newinfo, *info;
+	void *pos, *entry0, *entry1;
+	struct compat_arpt_entry *iter0;
+	struct arpt_replace repl;
+	unsigned int size;
+	int ret;
+
+	info = *pinfo;
+	entry0 = *pentry0;
+	size = compatr->size;
+	info->number = compatr->num_entries;
+
+	j = 0;
+	xt_compat_lock(NFPROTO_ARP);
+	ret = xt_compat_init_offsets(NFPROTO_ARP, compatr->num_entries);
+	if (ret)
+		goto out_unlock;
+	/* Walk through entries, checking offsets. */
+	xt_entry_foreach(iter0, entry0, compatr->size) {
+		ret = check_compat_entry_size_and_hooks(iter0, info, &size,
+							entry0,
+							entry0 + compatr->size);
+		if (ret != 0)
+			goto out_unlock;
+		++j;
+	}
+
+	ret = -EINVAL;
+	if (j != compatr->num_entries)
+		goto out_unlock;
+
+	ret = -ENOMEM;
+	newinfo = xt_alloc_table_info(size);
+	if (!newinfo)
+		goto out_unlock;
+
+	memset(newinfo->entries, 0, size);
+
+	newinfo->number = compatr->num_entries;
+	for (i = 0; i < NF_ARP_NUMHOOKS; i++) {
+		newinfo->hook_entry[i] = compatr->hook_entry[i];
+		newinfo->underflow[i] = compatr->underflow[i];
+	}
+	entry1 = newinfo->entries;
+	pos = entry1;
+	size = compatr->size;
+	xt_entry_foreach(iter0, entry0, compatr->size)
+		compat_copy_entry_from_user(iter0, &pos, &size,
+					    newinfo, entry1);
+
+	/* all module references in entry0 are now gone */
+
+	xt_compat_flush_offsets(NFPROTO_ARP);
+	xt_compat_unlock(NFPROTO_ARP);
+
+	memcpy(&repl, compatr, sizeof(*compatr));
+
+	for (i = 0; i < NF_ARP_NUMHOOKS; i++) {
+		repl.hook_entry[i] = newinfo->hook_entry[i];
+		repl.underflow[i] = newinfo->underflow[i];
+	}
+
+	repl.num_counters = 0;
+	repl.counters = NULL;
+	repl.size = newinfo->size;
+	ret = translate_table(net, newinfo, entry1, &repl);
+	if (ret)
+		goto free_newinfo;
+
+	*pinfo = newinfo;
+	*pentry0 = entry1;
+	xt_free_table_info(info);
+	return 0;
+
+free_newinfo:
+	xt_free_table_info(newinfo);
+	return ret;
+out_unlock:
+	xt_compat_flush_offsets(NFPROTO_ARP);
+	xt_compat_unlock(NFPROTO_ARP);
+	xt_entry_foreach(iter0, entry0, compatr->size) {
+		if (j-- == 0)
+			break;
+		compat_release_entry(iter0);
+	}
+	return ret;
+}

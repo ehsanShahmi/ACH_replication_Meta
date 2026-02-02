@@ -1,0 +1,267 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+mfd: syscon: Fix null pointer dereference in of_syscon_register()
+
+kasprintf() returns a pointer to dynamically allocated memory
+which can be NULL upon failure.
+
+Fixes: e15d7f2b81d2 ("mfd: syscon: Use a unique name with regmap_config")
+Signed-off-by: Kunwu Chan <chentao@kylinos.cn>
+Reviewed-by: Arnd Bergmann <arnd@arndb.de>
+Link: https://lore.kernel.org/r/20231204092443.2462115-1-chentao@kylinos.cn
+Signed-off-by: Lee Jones <lee@kernel.org>
+
+
+
+The vulnerable function:
+static struct syscon *of_syscon_register(struct device_node *np, bool check_res)
+{
+	struct clk *clk;
+	struct syscon *syscon;
+	struct regmap *regmap;
+	void __iomem *base;
+	u32 reg_io_width;
+	int ret;
+	struct regmap_config syscon_config = syscon_regmap_config;
+	struct resource res;
+	struct reset_control *reset;
+
+	syscon = kzalloc(sizeof(*syscon), GFP_KERNEL);
+	if (!syscon)
+		return ERR_PTR(-ENOMEM);
+
+	if (of_address_to_resource(np, 0, &res)) {
+		ret = -ENOMEM;
+		goto err_map;
+	}
+
+	base = of_iomap(np, 0);
+	if (!base) {
+		ret = -ENOMEM;
+		goto err_map;
+	}
+
+	/* Parse the device's DT node for an endianness specification */
+	if (of_property_read_bool(np, "big-endian"))
+		syscon_config.val_format_endian = REGMAP_ENDIAN_BIG;
+	else if (of_property_read_bool(np, "little-endian"))
+		syscon_config.val_format_endian = REGMAP_ENDIAN_LITTLE;
+	else if (of_property_read_bool(np, "native-endian"))
+		syscon_config.val_format_endian = REGMAP_ENDIAN_NATIVE;
+
+	/*
+	 * search for reg-io-width property in DT. If it is not provided,
+	 * default to 4 bytes. regmap_init_mmio will return an error if values
+	 * are invalid so there is no need to check them here.
+	 */
+	ret = of_property_read_u32(np, "reg-io-width", &reg_io_width);
+	if (ret)
+		reg_io_width = 4;
+
+	ret = of_hwspin_lock_get_id(np, 0);
+	if (ret > 0 || (IS_ENABLED(CONFIG_HWSPINLOCK) && ret == 0)) {
+		syscon_config.use_hwlock = true;
+		syscon_config.hwlock_id = ret;
+		syscon_config.hwlock_mode = HWLOCK_IRQSTATE;
+	} else if (ret < 0) {
+		switch (ret) {
+		case -ENOENT:
+			/* Ignore missing hwlock, it's optional. */
+			break;
+		default:
+			pr_err("Failed to retrieve valid hwlock: %d\n", ret);
+			fallthrough;
+		case -EPROBE_DEFER:
+			goto err_regmap;
+		}
+	}
+
+	syscon_config.name = kasprintf(GFP_KERNEL, "%pOFn@%pa", np, &res.start);
+	syscon_config.reg_stride = reg_io_width;
+	syscon_config.val_bits = reg_io_width * 8;
+	syscon_config.max_register = resource_size(&res) - reg_io_width;
+
+	regmap = regmap_init_mmio(NULL, base, &syscon_config);
+	kfree(syscon_config.name);
+	if (IS_ERR(regmap)) {
+		pr_err("regmap init failed\n");
+		ret = PTR_ERR(regmap);
+		goto err_regmap;
+	}
+
+	if (check_res) {
+		clk = of_clk_get(np, 0);
+		if (IS_ERR(clk)) {
+			ret = PTR_ERR(clk);
+			/* clock is optional */
+			if (ret != -ENOENT)
+				goto err_clk;
+		} else {
+			ret = regmap_mmio_attach_clk(regmap, clk);
+			if (ret)
+				goto err_attach_clk;
+		}
+
+		reset = of_reset_control_get_optional_exclusive(np, NULL);
+		if (IS_ERR(reset)) {
+			ret = PTR_ERR(reset);
+			goto err_attach_clk;
+		}
+
+		ret = reset_control_deassert(reset);
+		if (ret)
+			goto err_reset;
+	}
+
+	syscon->regmap = regmap;
+	syscon->np = np;
+
+	spin_lock(&syscon_list_slock);
+	list_add_tail(&syscon->list, &syscon_list);
+	spin_unlock(&syscon_list_slock);
+
+	return syscon;
+
+err_reset:
+	reset_control_put(reset);
+err_attach_clk:
+	if (!IS_ERR(clk))
+		clk_put(clk);
+err_clk:
+	regmap_exit(regmap);
+err_regmap:
+	iounmap(base);
+err_map:
+	kfree(syscon);
+	return ERR_PTR(ret);
+}
+
+
+
+The corrected function:
+static struct syscon *of_syscon_register(struct device_node *np, bool check_res)
+{
+	struct clk *clk;
+	struct syscon *syscon;
+	struct regmap *regmap;
+	void __iomem *base;
+	u32 reg_io_width;
+	int ret;
+	struct regmap_config syscon_config = syscon_regmap_config;
+	struct resource res;
+	struct reset_control *reset;
+
+	syscon = kzalloc(sizeof(*syscon), GFP_KERNEL);
+	if (!syscon)
+		return ERR_PTR(-ENOMEM);
+
+	if (of_address_to_resource(np, 0, &res)) {
+		ret = -ENOMEM;
+		goto err_map;
+	}
+
+	base = of_iomap(np, 0);
+	if (!base) {
+		ret = -ENOMEM;
+		goto err_map;
+	}
+
+	/* Parse the device's DT node for an endianness specification */
+	if (of_property_read_bool(np, "big-endian"))
+		syscon_config.val_format_endian = REGMAP_ENDIAN_BIG;
+	else if (of_property_read_bool(np, "little-endian"))
+		syscon_config.val_format_endian = REGMAP_ENDIAN_LITTLE;
+	else if (of_property_read_bool(np, "native-endian"))
+		syscon_config.val_format_endian = REGMAP_ENDIAN_NATIVE;
+
+	/*
+	 * search for reg-io-width property in DT. If it is not provided,
+	 * default to 4 bytes. regmap_init_mmio will return an error if values
+	 * are invalid so there is no need to check them here.
+	 */
+	ret = of_property_read_u32(np, "reg-io-width", &reg_io_width);
+	if (ret)
+		reg_io_width = 4;
+
+	ret = of_hwspin_lock_get_id(np, 0);
+	if (ret > 0 || (IS_ENABLED(CONFIG_HWSPINLOCK) && ret == 0)) {
+		syscon_config.use_hwlock = true;
+		syscon_config.hwlock_id = ret;
+		syscon_config.hwlock_mode = HWLOCK_IRQSTATE;
+	} else if (ret < 0) {
+		switch (ret) {
+		case -ENOENT:
+			/* Ignore missing hwlock, it's optional. */
+			break;
+		default:
+			pr_err("Failed to retrieve valid hwlock: %d\n", ret);
+			fallthrough;
+		case -EPROBE_DEFER:
+			goto err_regmap;
+		}
+	}
+
+	syscon_config.name = kasprintf(GFP_KERNEL, "%pOFn@%pa", np, &res.start);
+	if (!syscon_config.name) {
+		ret = -ENOMEM;
+		goto err_regmap;
+	}
+	syscon_config.reg_stride = reg_io_width;
+	syscon_config.val_bits = reg_io_width * 8;
+	syscon_config.max_register = resource_size(&res) - reg_io_width;
+
+	regmap = regmap_init_mmio(NULL, base, &syscon_config);
+	kfree(syscon_config.name);
+	if (IS_ERR(regmap)) {
+		pr_err("regmap init failed\n");
+		ret = PTR_ERR(regmap);
+		goto err_regmap;
+	}
+
+	if (check_res) {
+		clk = of_clk_get(np, 0);
+		if (IS_ERR(clk)) {
+			ret = PTR_ERR(clk);
+			/* clock is optional */
+			if (ret != -ENOENT)
+				goto err_clk;
+		} else {
+			ret = regmap_mmio_attach_clk(regmap, clk);
+			if (ret)
+				goto err_attach_clk;
+		}
+
+		reset = of_reset_control_get_optional_exclusive(np, NULL);
+		if (IS_ERR(reset)) {
+			ret = PTR_ERR(reset);
+			goto err_attach_clk;
+		}
+
+		ret = reset_control_deassert(reset);
+		if (ret)
+			goto err_reset;
+	}
+
+	syscon->regmap = regmap;
+	syscon->np = np;
+
+	spin_lock(&syscon_list_slock);
+	list_add_tail(&syscon->list, &syscon_list);
+	spin_unlock(&syscon_list_slock);
+
+	return syscon;
+
+err_reset:
+	reset_control_put(reset);
+err_attach_clk:
+	if (!IS_ERR(clk))
+		clk_put(clk);
+err_clk:
+	regmap_exit(regmap);
+err_regmap:
+	iounmap(base);
+err_map:
+	kfree(syscon);
+	return ERR_PTR(ret);
+}

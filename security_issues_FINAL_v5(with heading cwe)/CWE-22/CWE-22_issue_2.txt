@@ -1,0 +1,85 @@
+This issue file has CWE-22. Your task is to create this CWE-22 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+scsi: target: Fix XCOPY NAA identifier lookup
+
+When attempting to match EXTENDED COPY CSCD descriptors with corresponding
+se_devices, target_xcopy_locate_se_dev_e4() currently iterates over LIO's
+global devices list which includes all configured backstores.
+
+This change ensures that only initiator-accessible backstores are
+considered during CSCD descriptor lookup, according to the session's
+se_node_acl LUN list.
+
+To avoid LUN removal race conditions, device pinning is changed from being
+configfs based to instead using the se_node_acl lun_ref.
+
+Reference: CVE-2020-28374
+Fixes: cbf031f425fd ("target: Add support for EXTENDED_COPY copy offload emulation")
+Reviewed-by: Lee Duncan <lduncan@suse.com>
+Signed-off-by: David Disseldorp <ddiss@suse.de>
+Signed-off-by: Mike Christie <michael.christie@oracle.com>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+
+
+The vulnerable function:
+static int target_xcopy_locate_se_dev_e4_iter(struct se_device *se_dev,
+					      void *data)
+{
+	struct xcopy_dev_search_info *info = data;
+	unsigned char tmp_dev_wwn[XCOPY_NAA_IEEE_REGEX_LEN];
+	int rc;
+
+	if (!se_dev->dev_attrib.emulate_3pc)
+		return 0;
+
+	memset(&tmp_dev_wwn[0], 0, XCOPY_NAA_IEEE_REGEX_LEN);
+	target_xcopy_gen_naa_ieee(se_dev, &tmp_dev_wwn[0]);
+
+	rc = memcmp(&tmp_dev_wwn[0], info->dev_wwn, XCOPY_NAA_IEEE_REGEX_LEN);
+	if (rc != 0)
+		return 0;
+
+	info->found_dev = se_dev;
+	pr_debug("XCOPY 0xe4: located se_dev: %p\n", se_dev);
+
+	rc = target_depend_item(&se_dev->dev_group.cg_item);
+	if (rc != 0) {
+		pr_err("configfs_depend_item attempt failed: %d for se_dev: %p\n",
+		       rc, se_dev);
+		return rc;
+	}
+
+	pr_debug("Called configfs_depend_item for se_dev: %p se_dev->se_dev_group: %p\n",
+		 se_dev, &se_dev->dev_group);
+	return 1;
+}
+
+
+
+The corrected function:
+static int target_xcopy_locate_se_dev_e4_iter(struct se_device *se_dev,
+					      const unsigned char *dev_wwn)
+{
+	unsigned char tmp_dev_wwn[XCOPY_NAA_IEEE_REGEX_LEN];
+	int rc;
+
+	if (!se_dev->dev_attrib.emulate_3pc) {
+		pr_debug("XCOPY: emulate_3pc disabled on se_dev %p\n", se_dev);
+		return 0;
+	}
+
+	memset(&tmp_dev_wwn[0], 0, XCOPY_NAA_IEEE_REGEX_LEN);
+	target_xcopy_gen_naa_ieee(se_dev, &tmp_dev_wwn[0]);
+
+	rc = memcmp(&tmp_dev_wwn[0], dev_wwn, XCOPY_NAA_IEEE_REGEX_LEN);
+	if (rc != 0) {
+		pr_debug("XCOPY: skip non-matching: %*ph\n",
+			 XCOPY_NAA_IEEE_REGEX_LEN, tmp_dev_wwn);
+		return 0;
+	}
+	pr_debug("XCOPY 0xe4: located se_dev: %p\n", se_dev);
+
+	return 1;
+}

@@ -1,0 +1,69 @@
+The vulnerable issue:
+tcp: mark skbs with SCM_TIMESTAMPING_OPT_STATS
+
+SOF_TIMESTAMPING_OPT_STATS can be enabled and disabled
+while packets are collected on the error queue.
+So, checking SOF_TIMESTAMPING_OPT_STATS in sk->sk_tsflags
+is not enough to safely assume that the skb contains
+OPT_STATS data.
+
+Add a bit in sock_exterr_skb to indicate whether the
+skb contains opt_stats data.
+
+Fixes: 1c885808e456 ("tcp: SOF_TIMESTAMPING_OPT_STATS option for SO_TIMESTAMPING")
+Reported-by: JongHwan Kim <zzoru007@gmail.com>
+Signed-off-by: Soheil Hassas Yeganeh <soheil@google.com>
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Signed-off-by: Willem de Bruijn <willemb@google.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+void skb_complete_tx_timestamp(struct sk_buff *skb,
+			       struct skb_shared_hwtstamps *hwtstamps)
+{
+	struct sock *sk = skb->sk;
+
+	if (!skb_may_tx_timestamp(sk, false))
+		return;
+
+	/* Take a reference to prevent skb_orphan() from freeing the socket,
+	 * but only if the socket refcount is not zero.
+	 */
+	if (likely(atomic_inc_not_zero(&sk->sk_refcnt))) {
+		*skb_hwtstamps(skb) = *hwtstamps;
+		__skb_complete_tx_timestamp(skb, sk, SCM_TSTAMP_SND);
+		sock_put(sk);
+	}
+
+
+
+The corrected function:
+static void __skb_complete_tx_timestamp(struct sk_buff *skb,
+					struct sock *sk,
+					int tstype,
+					bool opt_stats)
+{
+	struct sock_exterr_skb *serr;
+	int err;
+
+	BUILD_BUG_ON(sizeof(struct sock_exterr_skb) > sizeof(skb->cb));
+
+	serr = SKB_EXT_ERR(skb);
+	memset(serr, 0, sizeof(*serr));
+	serr->ee.ee_errno = ENOMSG;
+	serr->ee.ee_origin = SO_EE_ORIGIN_TIMESTAMPING;
+	serr->ee.ee_info = tstype;
+	serr->opt_stats = opt_stats;
+	if (sk->sk_tsflags & SOF_TIMESTAMPING_OPT_ID) {
+		serr->ee.ee_data = skb_shinfo(skb)->tskey;
+		if (sk->sk_protocol == IPPROTO_TCP &&
+		    sk->sk_type == SOCK_STREAM)
+			serr->ee.ee_data -= sk->sk_tskey;
+	}
+
+	err = sock_queue_err_skb(sk, skb);
+
+	if (err)
+		kfree_skb(skb);

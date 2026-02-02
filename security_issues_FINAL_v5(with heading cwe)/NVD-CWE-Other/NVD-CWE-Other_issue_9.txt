@@ -1,0 +1,62 @@
+This issue file has NVD-CWE-Other. Your task is to create this NVD-CWE-Other type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+ext4: use ext4_get_block_write in buffer write
+
+Allocate uninitialized extent before ext4 buffer write and
+convert the extent to initialized after io completes.
+The purpose is to make sure an extent can only be marked
+initialized after it has been written with new data so
+we can safely drop the i_mutex lock in ext4 DIO read without
+exposing stale data. This helps to improve multi-thread DIO
+read performance on high-speed disks.
+
+Skip the nobh and data=journal mount cases to make things simple for now.
+
+Signed-off-by: Jiaying Zhang <jiayingz@google.com>
+Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+
+
+
+The vulnerable function:
+static void ext4_end_io_work(struct work_struct *work)
+{
+	ext4_io_end_t *io  = container_of(work, ext4_io_end_t, work);
+	struct inode *inode = io->inode;
+	int ret = 0;
+
+	mutex_lock(&inode->i_mutex);
+	ret = ext4_end_io_nolock(io);
+	if (ret >= 0) {
+		if (!list_empty(&io->list))
+			list_del_init(&io->list);
+		ext4_free_io_end(io);
+	}
+	mutex_unlock(&inode->i_mutex);
+}
+
+
+
+The corrected function:
+static void ext4_end_io_work(struct work_struct *work)
+{
+	ext4_io_end_t		*io = container_of(work, ext4_io_end_t, work);
+	struct inode		*inode = io->inode;
+	struct ext4_inode_info	*ei = EXT4_I(inode);
+	unsigned long		flags;
+	int			ret;
+
+	mutex_lock(&inode->i_mutex);
+	ret = ext4_end_io_nolock(io);
+	if (ret < 0) {
+		mutex_unlock(&inode->i_mutex);
+		return;
+	}
+
+	spin_lock_irqsave(&ei->i_completed_io_lock, flags);
+	if (!list_empty(&io->list))
+		list_del_init(&io->list);
+	spin_unlock_irqrestore(&ei->i_completed_io_lock, flags);
+	mutex_unlock(&inode->i_mutex);
+	ext4_free_io_end(io);
+}

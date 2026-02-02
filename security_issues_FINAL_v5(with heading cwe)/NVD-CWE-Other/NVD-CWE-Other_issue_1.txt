@@ -1,0 +1,38 @@
+This issue file has NVD-CWE-Other. Your task is to create this NVD-CWE-Other type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+gre: fix netns vs proto registration ordering
+
+GRE protocol receive hook can be called right after protocol addition is done.
+If netns stuff is not yet initialized, we're going to oops in
+net_generic().
+
+This is remotely oopsable if ip_gre is compiled as module and packet
+comes at unfortunate moment of module loading.
+
+Signed-off-by: Alexey Dobriyan <adobriyan@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static void __exit ipgre_fini(void)
+{
+	rtnl_link_unregister(&ipgre_tap_ops);
+	rtnl_link_unregister(&ipgre_link_ops);
+	unregister_pernet_device(&ipgre_net_ops);
+	if (inet_del_protocol(&ipgre_protocol, IPPROTO_GRE) < 0)
+		printk(KERN_INFO "ipgre close: can't remove protocol\n");
+}
+
+
+
+The corrected function:
+static void __exit ipgre_fini(void)
+{
+	rtnl_link_unregister(&ipgre_tap_ops);
+	rtnl_link_unregister(&ipgre_link_ops);
+	if (inet_del_protocol(&ipgre_protocol, IPPROTO_GRE) < 0)
+		printk(KERN_INFO "ipgre close: can't remove protocol\n");
+	unregister_pernet_device(&ipgre_net_ops);
+}

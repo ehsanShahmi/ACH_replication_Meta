@@ -1,0 +1,104 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+net: hso: fix NULL-deref on disconnect regression
+
+Commit 8a12f8836145 ("net: hso: fix null-ptr-deref during tty device
+unregistration") fixed the racy minor allocation reported by syzbot, but
+introduced an unconditional NULL-pointer dereference on every disconnect
+instead.
+
+Specifically, the serial device table must no longer be accessed after
+the minor has been released by hso_serial_tty_unregister().
+
+Fixes: 8a12f8836145 ("net: hso: fix null-ptr-deref during tty device unregistration")
+Cc: stable@vger.kernel.org
+Cc: Anirudh Rayabharam <mail@anirudhrb.com>
+Reported-by: Leonardo Antoniazzi <leoanto@aruba.it>
+Signed-off-by: Johan Hovold <johan@kernel.org>
+Reviewed-by: Anirudh Rayabharam <mail@anirudhrb.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static void hso_free_interface(struct usb_interface *interface)
+{
+	struct hso_serial *serial;
+	int i;
+
+	for (i = 0; i < HSO_SERIAL_TTY_MINORS; i++) {
+		if (serial_table[i] &&
+		    (serial_table[i]->interface == interface)) {
+			serial = dev2ser(serial_table[i]);
+			tty_port_tty_hangup(&serial->port, false);
+			mutex_lock(&serial->parent->mutex);
+			serial->parent->usb_gone = 1;
+			mutex_unlock(&serial->parent->mutex);
+			cancel_work_sync(&serial_table[i]->async_put_intf);
+			cancel_work_sync(&serial_table[i]->async_get_intf);
+			hso_serial_tty_unregister(serial);
+			kref_put(&serial_table[i]->ref, hso_serial_ref_free);
+		}
+	}
+
+	for (i = 0; i < HSO_MAX_NET_DEVICES; i++) {
+		if (network_table[i] &&
+		    (network_table[i]->interface == interface)) {
+			struct rfkill *rfk = dev2net(network_table[i])->rfkill;
+			/* hso_stop_net_device doesn't stop the net queue since
+			 * traffic needs to start it again when suspended */
+			netif_stop_queue(dev2net(network_table[i])->net);
+			hso_stop_net_device(network_table[i]);
+			cancel_work_sync(&network_table[i]->async_put_intf);
+			cancel_work_sync(&network_table[i]->async_get_intf);
+			if (rfk) {
+				rfkill_unregister(rfk);
+				rfkill_destroy(rfk);
+			}
+			hso_free_net_device(network_table[i], false);
+		}
+	}
+}
+
+
+
+The corrected function:
+static void hso_free_interface(struct usb_interface *interface)
+{
+	struct hso_serial *serial;
+	int i;
+
+	for (i = 0; i < HSO_SERIAL_TTY_MINORS; i++) {
+		if (serial_table[i] &&
+		    (serial_table[i]->interface == interface)) {
+			serial = dev2ser(serial_table[i]);
+			tty_port_tty_hangup(&serial->port, false);
+			mutex_lock(&serial->parent->mutex);
+			serial->parent->usb_gone = 1;
+			mutex_unlock(&serial->parent->mutex);
+			cancel_work_sync(&serial_table[i]->async_put_intf);
+			cancel_work_sync(&serial_table[i]->async_get_intf);
+			hso_serial_tty_unregister(serial);
+			kref_put(&serial->parent->ref, hso_serial_ref_free);
+		}
+	}
+
+	for (i = 0; i < HSO_MAX_NET_DEVICES; i++) {
+		if (network_table[i] &&
+		    (network_table[i]->interface == interface)) {
+			struct rfkill *rfk = dev2net(network_table[i])->rfkill;
+			/* hso_stop_net_device doesn't stop the net queue since
+			 * traffic needs to start it again when suspended */
+			netif_stop_queue(dev2net(network_table[i])->net);
+			hso_stop_net_device(network_table[i]);
+			cancel_work_sync(&network_table[i]->async_put_intf);
+			cancel_work_sync(&network_table[i]->async_get_intf);
+			if (rfk) {
+				rfkill_unregister(rfk);
+				rfkill_destroy(rfk);
+			}
+			hso_free_net_device(network_table[i], false);
+		}
+	}
+}

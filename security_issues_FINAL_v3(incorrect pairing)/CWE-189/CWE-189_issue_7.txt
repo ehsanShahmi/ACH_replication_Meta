@@ -1,0 +1,50 @@
+The vulnerable issue:
+remove div_long_long_rem
+
+x86 is the only arch right now, which provides an optimized for
+div_long_long_rem and it has the downside that one has to be very careful that
+the divide doesn't overflow.
+
+The API is a little akward, as the arguments for the unsigned divide are
+signed.  The signed version also doesn't handle a negative divisor and
+produces worse code on 64bit archs.
+
+There is little incentive to keep this API alive, so this converts the few
+users to the new API.
+
+Signed-off-by: Roman Zippel <zippel@linux-m68k.org>
+Cc: Ralf Baechle <ralf@linux-mips.org>
+Cc: Ingo Molnar <mingo@elte.hu>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: john stultz <johnstul@us.ibm.com>
+Cc: Christoph Lameter <clameter@sgi.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+jiffies_to_timespec(const unsigned long jiffies, struct timespec *value)
+{
+	/*
+	 * Convert jiffies to nanoseconds and separate with
+	 * one divide.
+	 */
+	u64 nsec = (u64)jiffies * TICK_NSEC;
+	value->tv_sec = div_long_long_rem(nsec, NSEC_PER_SEC, &value->tv_nsec);
+}
+
+
+
+The corrected function:
+jiffies_to_timespec(const unsigned long jiffies, struct timespec *value)
+{
+	/*
+	 * Convert jiffies to nanoseconds and separate with
+	 * one divide.
+	 */
+	u32 rem;
+	value->tv_sec = div_u64_rem((u64)jiffies * TICK_NSEC,
+				    NSEC_PER_SEC, &rem);
+	value->tv_nsec = rem;
+}

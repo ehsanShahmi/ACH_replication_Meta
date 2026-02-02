@@ -1,0 +1,85 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+drm/i915: Fix potential context UAFs
+
+gem_context_register() makes the context visible to userspace, and which
+point a separate thread can trigger the I915_GEM_CONTEXT_DESTROY ioctl.
+So we need to ensure that nothing uses the ctx ptr after this.  And we
+need to ensure that adding the ctx to the xarray is the *last* thing
+that gem_context_register() does with the ctx pointer.
+
+Signed-off-by: Rob Clark <robdclark@chromium.org>
+Fixes: eb4dedae920a ("drm/i915/gem: Delay tracking the GEM context until it is registered")
+Fixes: a4c1cdd34e2c ("drm/i915/gem: Delay context creation (v3)")
+Fixes: 49bd54b390c2 ("drm/i915: Track all user contexts per client")
+Cc: <stable@vger.kernel.org> # v5.10+
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Andi Shyti <andi.shyti@linux.intel.com>
+[tursulin: Stable and fixes tags add/tidy.]
+Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20230103234948.1218393-1-robdclark@gmail.com
+(cherry picked from commit bed4b455cf5374e68879be56971c1da563bcd90c)
+Signed-off-by: Rodrigo Vivi <rodrigo.vivi@intel.com>
+
+
+
+The vulnerable function:
+static void gem_context_register(struct i915_gem_context *ctx,
+				 struct drm_i915_file_private *fpriv,
+				 u32 id)
+{
+	struct drm_i915_private *i915 = ctx->i915;
+	void *old;
+
+	ctx->file_priv = fpriv;
+
+	ctx->pid = get_task_pid(current, PIDTYPE_PID);
+	ctx->client = i915_drm_client_get(fpriv->client);
+
+	snprintf(ctx->name, sizeof(ctx->name), "%s[%d]",
+		 current->comm, pid_nr(ctx->pid));
+
+	/* And finally expose ourselves to userspace via the idr */
+	old = xa_store(&fpriv->context_xa, id, ctx, GFP_KERNEL);
+	WARN_ON(old);
+
+	spin_lock(&ctx->client->ctx_lock);
+	list_add_tail_rcu(&ctx->client_link, &ctx->client->ctx_list);
+	spin_unlock(&ctx->client->ctx_lock);
+
+	spin_lock(&i915->gem.contexts.lock);
+	list_add_tail(&ctx->link, &i915->gem.contexts.list);
+	spin_unlock(&i915->gem.contexts.lock);
+}
+
+
+
+The corrected function:
+static void gem_context_register(struct i915_gem_context *ctx,
+				 struct drm_i915_file_private *fpriv,
+				 u32 id)
+{
+	struct drm_i915_private *i915 = ctx->i915;
+	void *old;
+
+	ctx->file_priv = fpriv;
+
+	ctx->pid = get_task_pid(current, PIDTYPE_PID);
+	ctx->client = i915_drm_client_get(fpriv->client);
+
+	snprintf(ctx->name, sizeof(ctx->name), "%s[%d]",
+		 current->comm, pid_nr(ctx->pid));
+
+	spin_lock(&ctx->client->ctx_lock);
+	list_add_tail_rcu(&ctx->client_link, &ctx->client->ctx_list);
+	spin_unlock(&ctx->client->ctx_lock);
+
+	spin_lock(&i915->gem.contexts.lock);
+	list_add_tail(&ctx->link, &i915->gem.contexts.list);
+	spin_unlock(&i915->gem.contexts.lock);
+
+	/* And finally expose ourselves to userspace via the idr */
+	old = xa_store(&fpriv->context_xa, id, ctx, GFP_KERNEL);
+	WARN_ON(old);
+}

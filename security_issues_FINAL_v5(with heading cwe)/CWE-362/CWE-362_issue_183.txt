@@ -1,0 +1,67 @@
+This issue file has CWE-362. Your task is to create this CWE-362 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+hamradio: remove needs_free_netdev to avoid UAF
+
+The former patch "defer 6pack kfree after unregister_netdev" reorders
+the kfree of two buffer after the unregister_netdev to prevent the race
+condition. It also adds free_netdev() function in sixpack_close(), which
+is a direct copy from the similar code in mkiss_close().
+
+However, in sixpack driver, the flag needs_free_netdev is set to true in
+sp_setup(), hence the unregister_netdev() will free the netdev
+automatically. Therefore, as the sp is netdev_priv, use-after-free
+occurs.
+
+This patch removes the needs_free_netdev = true and just let the
+free_netdev to finish this deallocation task.
+
+Fixes: 0b9111922b1f ("hamradio: defer 6pack kfree after unregister_netdev")
+Signed-off-by: Lin Ma <linma@zju.edu.cn>
+Link: https://lore.kernel.org/r/20211111141402.7551-1-linma@zju.edu.cn
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+
+
+The vulnerable function:
+static void sp_setup(struct net_device *dev)
+{
+	/* Finish setting up the DEVICE info. */
+	dev->netdev_ops		= &sp_netdev_ops;
+	dev->needs_free_netdev	= true;
+	dev->mtu		= SIXP_MTU;
+	dev->hard_header_len	= AX25_MAX_HEADER_LEN;
+	dev->header_ops 	= &ax25_header_ops;
+
+	dev->addr_len		= AX25_ADDR_LEN;
+	dev->type		= ARPHRD_AX25;
+	dev->tx_queue_len	= 10;
+
+	/* Only activated in AX.25 mode */
+	memcpy(dev->broadcast, &ax25_bcast, AX25_ADDR_LEN);
+	dev_addr_set(dev, (u8 *)&ax25_defaddr);
+
+	dev->flags		= 0;
+}
+
+
+
+The corrected function:
+static void sp_setup(struct net_device *dev)
+{
+	/* Finish setting up the DEVICE info. */
+	dev->netdev_ops		= &sp_netdev_ops;
+	dev->mtu		= SIXP_MTU;
+	dev->hard_header_len	= AX25_MAX_HEADER_LEN;
+	dev->header_ops 	= &ax25_header_ops;
+
+	dev->addr_len		= AX25_ADDR_LEN;
+	dev->type		= ARPHRD_AX25;
+	dev->tx_queue_len	= 10;
+
+	/* Only activated in AX.25 mode */
+	memcpy(dev->broadcast, &ax25_bcast, AX25_ADDR_LEN);
+	dev_addr_set(dev, (u8 *)&ax25_defaddr);
+
+	dev->flags		= 0;
+}

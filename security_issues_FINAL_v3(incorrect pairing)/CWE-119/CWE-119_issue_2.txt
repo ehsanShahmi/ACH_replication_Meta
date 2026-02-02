@@ -1,0 +1,213 @@
+The vulnerable issue:
+nfp: fix use-after-free in area_cache_get()
+
+area_cache_get() is used to distribute cache->area and set cache->id,
+ and if cache->id is not 0 and cache->area->kref refcount is 0, it will
+ release the cache->area by nfp_cpp_area_release(). area_cache_get()
+ set cache->id before cpp->op->area_init() and nfp_cpp_area_acquire().
+
+But if area_init() or nfp_cpp_area_acquire() fails, the cache->id is
+ is already set but the refcount is not increased as expected. At this
+ time, calling the nfp_cpp_area_release() will cause use-after-free.
+
+To avoid the use-after-free, set cache->id after area_init() and
+ nfp_cpp_area_acquire() complete successfully.
+
+Note: This vulnerability is triggerable by providing emulated device
+ equipped with specified configuration.
+
+ BUG: KASAN: use-after-free in nfp6000_area_init (drivers/net/ethernet/netronome/nfp/nfpcore/nfp6000_pcie.c:760)
+  Write of size 4 at addr ffff888005b7f4a0 by task swapper/0/1
+
+ Call Trace:
+  <TASK>
+ nfp6000_area_init (drivers/net/ethernet/netronome/nfp/nfpcore/nfp6000_pcie.c:760)
+ area_cache_get.constprop.8 (drivers/net/ethernet/netronome/nfp/nfpcore/nfp_cppcore.c:884)
+
+ Allocated by task 1:
+ nfp_cpp_area_alloc_with_name (drivers/net/ethernet/netronome/nfp/nfpcore/nfp_cppcore.c:303)
+ nfp_cpp_area_cache_add (drivers/net/ethernet/netronome/nfp/nfpcore/nfp_cppcore.c:802)
+ nfp6000_init (drivers/net/ethernet/netronome/nfp/nfpcore/nfp6000_pcie.c:1230)
+ nfp_cpp_from_operations (drivers/net/ethernet/netronome/nfp/nfpcore/nfp_cppcore.c:1215)
+ nfp_pci_probe (drivers/net/ethernet/netronome/nfp/nfp_main.c:744)
+
+ Freed by task 1:
+ kfree (mm/slub.c:4562)
+ area_cache_get.constprop.8 (drivers/net/ethernet/netronome/nfp/nfpcore/nfp_cppcore.c:873)
+ nfp_cpp_read (drivers/net/ethernet/netronome/nfp/nfpcore/nfp_cppcore.c:924 drivers/net/ethernet/netronome/nfp/nfpcore/nfp_cppcore.c:973)
+ nfp_cpp_readl (drivers/net/ethernet/netronome/nfp/nfpcore/nfp_cpplib.c:48)
+
+Signed-off-by: Jialiang Wang <wangjialiang0806@163.com>
+Reviewed-by: Yinjun Zhang <yinjun.zhang@corigine.com>
+Acked-by: Simon Horman <simon.horman@corigine.com>
+Link: https://lore.kernel.org/r/20220810073057.4032-1-wangjialiang0806@163.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+
+
+The vulnerable function:
+static struct nfp_cpp_area_cache *
+area_cache_get(struct nfp_cpp *cpp, u32 id,
+	       u64 addr, unsigned long *offset, size_t length)
+{
+	struct nfp_cpp_area_cache *cache;
+	int err;
+
+	/* Early exit when length == 0, which prevents
+	 * the need for special case code below when
+	 * checking against available cache size.
+	 */
+	if (length == 0 || id == 0)
+		return NULL;
+
+	/* Remap from cpp_island to cpp_target */
+	err = nfp_target_cpp(id, addr, &id, &addr, cpp->imb_cat_table);
+	if (err < 0)
+		return NULL;
+
+	mutex_lock(&cpp->area_cache_mutex);
+
+	if (list_empty(&cpp->area_cache_list)) {
+		mutex_unlock(&cpp->area_cache_mutex);
+		return NULL;
+	}
+
+	addr += *offset;
+
+	/* See if we have a match */
+	list_for_each_entry(cache, &cpp->area_cache_list, entry) {
+		if (id == cache->id &&
+		    addr >= cache->addr &&
+		    addr + length <= cache->addr + cache->size)
+			goto exit;
+	}
+
+	/* No matches - inspect the tail of the LRU */
+	cache = list_entry(cpp->area_cache_list.prev,
+			   struct nfp_cpp_area_cache, entry);
+
+	/* Can we fit in the cache entry? */
+	if (round_down(addr + length - 1, cache->size) !=
+	    round_down(addr, cache->size)) {
+		mutex_unlock(&cpp->area_cache_mutex);
+		return NULL;
+	}
+
+	/* If id != 0, we will need to release it */
+	if (cache->id) {
+		nfp_cpp_area_release(cache->area);
+		cache->id = 0;
+		cache->addr = 0;
+	}
+
+	/* Adjust the start address to be cache size aligned */
+	cache->id = id;
+	cache->addr = addr & ~(u64)(cache->size - 1);
+
+	/* Re-init to the new ID and address */
+	if (cpp->op->area_init) {
+		err = cpp->op->area_init(cache->area,
+					 id, cache->addr, cache->size);
+		if (err < 0) {
+			mutex_unlock(&cpp->area_cache_mutex);
+			return NULL;
+		}
+	}
+
+	/* Attempt to acquire */
+	err = nfp_cpp_area_acquire(cache->area);
+	if (err < 0) {
+		mutex_unlock(&cpp->area_cache_mutex);
+		return NULL;
+	}
+
+exit:
+	/* Adjust offset */
+	*offset = addr - cache->addr;
+	return cache;
+}
+
+
+
+The corrected function:
+static struct nfp_cpp_area_cache *
+area_cache_get(struct nfp_cpp *cpp, u32 id,
+	       u64 addr, unsigned long *offset, size_t length)
+{
+	struct nfp_cpp_area_cache *cache;
+	int err;
+
+	/* Early exit when length == 0, which prevents
+	 * the need for special case code below when
+	 * checking against available cache size.
+	 */
+	if (length == 0 || id == 0)
+		return NULL;
+
+	/* Remap from cpp_island to cpp_target */
+	err = nfp_target_cpp(id, addr, &id, &addr, cpp->imb_cat_table);
+	if (err < 0)
+		return NULL;
+
+	mutex_lock(&cpp->area_cache_mutex);
+
+	if (list_empty(&cpp->area_cache_list)) {
+		mutex_unlock(&cpp->area_cache_mutex);
+		return NULL;
+	}
+
+	addr += *offset;
+
+	/* See if we have a match */
+	list_for_each_entry(cache, &cpp->area_cache_list, entry) {
+		if (id == cache->id &&
+		    addr >= cache->addr &&
+		    addr + length <= cache->addr + cache->size)
+			goto exit;
+	}
+
+	/* No matches - inspect the tail of the LRU */
+	cache = list_entry(cpp->area_cache_list.prev,
+			   struct nfp_cpp_area_cache, entry);
+
+	/* Can we fit in the cache entry? */
+	if (round_down(addr + length - 1, cache->size) !=
+	    round_down(addr, cache->size)) {
+		mutex_unlock(&cpp->area_cache_mutex);
+		return NULL;
+	}
+
+	/* If id != 0, we will need to release it */
+	if (cache->id) {
+		nfp_cpp_area_release(cache->area);
+		cache->id = 0;
+		cache->addr = 0;
+	}
+
+	/* Adjust the start address to be cache size aligned */
+	cache->addr = addr & ~(u64)(cache->size - 1);
+
+	/* Re-init to the new ID and address */
+	if (cpp->op->area_init) {
+		err = cpp->op->area_init(cache->area,
+					 id, cache->addr, cache->size);
+		if (err < 0) {
+			mutex_unlock(&cpp->area_cache_mutex);
+			return NULL;
+		}
+	}
+
+	/* Attempt to acquire */
+	err = nfp_cpp_area_acquire(cache->area);
+	if (err < 0) {
+		mutex_unlock(&cpp->area_cache_mutex);
+		return NULL;
+	}
+
+	cache->id = id;
+
+exit:
+	/* Adjust offset */
+	*offset = addr - cache->addr;
+	return cache;
+}

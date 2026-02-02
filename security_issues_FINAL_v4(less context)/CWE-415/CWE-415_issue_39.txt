@@ -1,0 +1,70 @@
+The vulnerable issue:
+firmware: arm_scmi: Fix double free in OPTEE transport
+
+Channels can be shared between protocols, avoid freeing the same channel
+descriptors twice when unloading the stack.
+
+Fixes: 5f90f189a052 ("firmware: arm_scmi: Add optee transport")
+Signed-off-by: Cristian Marussi <cristian.marussi@arm.com>
+Tested-by: Peng Fan <peng.fan@nxp.com>  #i.MX95 19x19 EVK
+Reviewed-by: Peng Fan <peng.fan@nxp.com>
+Tested-by: Florian Fainelli <florian.fainelli@broadcom.com>
+Message-Id: <20240812173340.3912830-2-cristian.marussi@arm.com>
+Signed-off-by: Sudeep Holla <sudeep.holla@arm.com>
+
+
+
+The vulnerable function:
+static int scmi_optee_chan_free(int id, void *p, void *data)
+{
+	struct scmi_chan_info *cinfo = p;
+	struct scmi_optee_channel *channel = cinfo->transport_info;
+
+	mutex_lock(&scmi_optee_private->mu);
+	list_del(&channel->link);
+	mutex_unlock(&scmi_optee_private->mu);
+
+	close_session(scmi_optee_private, channel->tee_session);
+
+	if (channel->tee_shm) {
+		tee_shm_free(channel->tee_shm);
+		channel->tee_shm = NULL;
+	}
+
+	cinfo->transport_info = NULL;
+	channel->cinfo = NULL;
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int scmi_optee_chan_free(int id, void *p, void *data)
+{
+	struct scmi_chan_info *cinfo = p;
+	struct scmi_optee_channel *channel = cinfo->transport_info;
+
+	/*
+	 * Different protocols might share the same chan info, so a previous
+	 * call might have already freed the structure.
+	 */
+	if (!channel)
+		return 0;
+
+	mutex_lock(&scmi_optee_private->mu);
+	list_del(&channel->link);
+	mutex_unlock(&scmi_optee_private->mu);
+
+	close_session(scmi_optee_private, channel->tee_session);
+
+	if (channel->tee_shm) {
+		tee_shm_free(channel->tee_shm);
+		channel->tee_shm = NULL;
+	}
+
+	cinfo->transport_info = NULL;
+	channel->cinfo = NULL;
+
+	return 0;
+}

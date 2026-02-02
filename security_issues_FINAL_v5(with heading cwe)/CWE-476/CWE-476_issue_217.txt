@@ -1,0 +1,169 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+swiotlb: initialise restricted pool list_head when SWIOTLB_DYNAMIC=y
+
+Using restricted DMA pools (CONFIG_DMA_RESTRICTED_POOL=y) in conjunction
+with dynamic SWIOTLB (CONFIG_SWIOTLB_DYNAMIC=y) leads to the following
+crash when initialising the restricted pools at boot-time:
+
+  | Unable to handle kernel NULL pointer dereference at virtual address 0000000000000008
+  | Internal error: Oops: 0000000096000005 [#1] PREEMPT SMP
+  | pc : rmem_swiotlb_device_init+0xfc/0x1ec
+  | lr : rmem_swiotlb_device_init+0xf0/0x1ec
+  | Call trace:
+  |  rmem_swiotlb_device_init+0xfc/0x1ec
+  |  of_reserved_mem_device_init_by_idx+0x18c/0x238
+  |  of_dma_configure_id+0x31c/0x33c
+  |  platform_dma_configure+0x34/0x80
+
+faddr2line reveals that the crash is in the list validation code:
+
+  include/linux/list.h:83
+  include/linux/rculist.h:79
+  include/linux/rculist.h:106
+  kernel/dma/swiotlb.c:306
+  kernel/dma/swiotlb.c:1695
+
+because add_mem_pool() is trying to list_add_rcu() to a NULL
+'mem->pools'.
+
+Fix the crash by initialising the 'mem->pools' list_head in
+rmem_swiotlb_device_init() before calling add_mem_pool().
+
+Reported-by: Nikita Ioffe <ioffe@google.com>
+Tested-by: Nikita Ioffe <ioffe@google.com>
+Fixes: 1aaa736815eb ("swiotlb: allocate a new memory pool when existing pools are full")
+Signed-off-by: Will Deacon <will@kernel.org>
+Signed-off-by: Christoph Hellwig <hch@lst.de>
+
+
+
+The vulnerable function:
+static int rmem_swiotlb_device_init(struct reserved_mem *rmem,
+				    struct device *dev)
+{
+	struct io_tlb_mem *mem = rmem->priv;
+	unsigned long nslabs = rmem->size >> IO_TLB_SHIFT;
+
+	/* Set Per-device io tlb area to one */
+	unsigned int nareas = 1;
+
+	if (PageHighMem(pfn_to_page(PHYS_PFN(rmem->base)))) {
+		dev_err(dev, "Restricted DMA pool must be accessible within the linear mapping.");
+		return -EINVAL;
+	}
+
+	/*
+	 * Since multiple devices can share the same pool, the private data,
+	 * io_tlb_mem struct, will be initialized by the first device attached
+	 * to it.
+	 */
+	if (!mem) {
+		struct io_tlb_pool *pool;
+
+		mem = kzalloc(sizeof(*mem), GFP_KERNEL);
+		if (!mem)
+			return -ENOMEM;
+		pool = &mem->defpool;
+
+		pool->slots = kcalloc(nslabs, sizeof(*pool->slots), GFP_KERNEL);
+		if (!pool->slots) {
+			kfree(mem);
+			return -ENOMEM;
+		}
+
+		pool->areas = kcalloc(nareas, sizeof(*pool->areas),
+				GFP_KERNEL);
+		if (!pool->areas) {
+			kfree(pool->slots);
+			kfree(mem);
+			return -ENOMEM;
+		}
+
+		set_memory_decrypted((unsigned long)phys_to_virt(rmem->base),
+				     rmem->size >> PAGE_SHIFT);
+		swiotlb_init_io_tlb_pool(pool, rmem->base, nslabs,
+					 false, nareas);
+		mem->force_bounce = true;
+		mem->for_alloc = true;
+// #ifdef CONFIG_SWIOTLB_DYNAMIC
+		spin_lock_init(&mem->lock);
+#endif
+		add_mem_pool(mem, pool);
+
+		rmem->priv = mem;
+
+		swiotlb_create_debugfs_files(mem, rmem->name);
+	}
+
+	dev->dma_io_tlb_mem = mem;
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int rmem_swiotlb_device_init(struct reserved_mem *rmem,
+				    struct device *dev)
+{
+	struct io_tlb_mem *mem = rmem->priv;
+	unsigned long nslabs = rmem->size >> IO_TLB_SHIFT;
+
+	/* Set Per-device io tlb area to one */
+	unsigned int nareas = 1;
+
+	if (PageHighMem(pfn_to_page(PHYS_PFN(rmem->base)))) {
+		dev_err(dev, "Restricted DMA pool must be accessible within the linear mapping.");
+		return -EINVAL;
+	}
+
+	/*
+	 * Since multiple devices can share the same pool, the private data,
+	 * io_tlb_mem struct, will be initialized by the first device attached
+	 * to it.
+	 */
+	if (!mem) {
+		struct io_tlb_pool *pool;
+
+		mem = kzalloc(sizeof(*mem), GFP_KERNEL);
+		if (!mem)
+			return -ENOMEM;
+		pool = &mem->defpool;
+
+		pool->slots = kcalloc(nslabs, sizeof(*pool->slots), GFP_KERNEL);
+		if (!pool->slots) {
+			kfree(mem);
+			return -ENOMEM;
+		}
+
+		pool->areas = kcalloc(nareas, sizeof(*pool->areas),
+				GFP_KERNEL);
+		if (!pool->areas) {
+			kfree(pool->slots);
+			kfree(mem);
+			return -ENOMEM;
+		}
+
+		set_memory_decrypted((unsigned long)phys_to_virt(rmem->base),
+				     rmem->size >> PAGE_SHIFT);
+		swiotlb_init_io_tlb_pool(pool, rmem->base, nslabs,
+					 false, nareas);
+		mem->force_bounce = true;
+		mem->for_alloc = true;
+// #ifdef CONFIG_SWIOTLB_DYNAMIC
+		spin_lock_init(&mem->lock);
+		INIT_LIST_HEAD_RCU(&mem->pools);
+#endif
+		add_mem_pool(mem, pool);
+
+		rmem->priv = mem;
+
+		swiotlb_create_debugfs_files(mem, rmem->name);
+	}
+
+	dev->dma_io_tlb_mem = mem;
+
+	return 0;
+}

@@ -1,0 +1,62 @@
+The vulnerable issue:
+video/aperture: optionally match the device in sysfb_disable()
+
+In aperture_remove_conflicting_pci_devices(), we currently only
+call sysfb_disable() on vga class devices.  This leads to the
+following problem when the pimary device is not VGA compatible:
+
+1. A PCI device with a non-VGA class is the boot display
+2. That device is probed first and it is not a VGA device so
+   sysfb_disable() is not called, but the device resources
+   are freed by aperture_detach_platform_device()
+3. Non-primary GPU has a VGA class and it ends up calling sysfb_disable()
+4. NULL pointer dereference via sysfb_disable() since the resources
+   have already been freed by aperture_detach_platform_device() when
+   it was called by the other device.
+
+Fix this by passing a device pointer to sysfb_disable() and checking
+the device to determine if we should execute it or not.
+
+v2: Fix build when CONFIG_SCREEN_INFO is not set
+v3: Move device check into the mutex
+    Drop primary variable in aperture_remove_conflicting_pci_devices()
+    Drop __init on pci sysfb_pci_dev_is_enabled()
+
+Fixes: 5ae3716cfdcd ("video/aperture: Only remove sysfb on the default vga pci device")
+Cc: Javier Martinez Canillas <javierm@redhat.com>
+Cc: Thomas Zimmermann <tzimmermann@suse.de>
+Cc: Helge Deller <deller@gmx.de>
+Cc: Sam Ravnborg <sam@ravnborg.org>
+Cc: Daniel Vetter <daniel.vetter@ffwll.ch>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+Cc: stable@vger.kernel.org
+Reviewed-by: Javier Martinez Canillas <javierm@redhat.com>
+Reviewed-by: Thomas Zimmermann <tzimmermann@suse.de>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20240821191135.829765-1-alexander.deucher@amd.com
+
+
+
+The vulnerable function:
+void sysfb_disable(void)
+{
+	mutex_lock(&disable_lock);
+	sysfb_unregister();
+	disabled = true;
+	mutex_unlock(&disable_lock);
+}
+
+
+
+The corrected function:
+void sysfb_disable(struct device *dev)
+{
+	struct screen_info *si = &screen_info;
+
+	mutex_lock(&disable_lock);
+	if (!dev || dev == sysfb_parent_dev(si)) {
+		sysfb_unregister();
+		disabled = true;
+	}
+	mutex_unlock(&disable_lock);
+}

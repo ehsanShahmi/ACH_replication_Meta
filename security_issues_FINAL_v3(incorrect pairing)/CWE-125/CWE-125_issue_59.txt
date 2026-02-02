@@ -1,0 +1,47 @@
+The vulnerable issue:
+ksmbd: validate mech token in session setup
+
+If client send invalid mech token in session setup request, ksmbd
+validate and make the error if it is invalid.
+
+Cc: stable@vger.kernel.org
+Reported-by: zdi-disclosures@trendmicro.com # ZDI-CAN-22890
+Signed-off-by: Namjae Jeon <linkinjeon@kernel.org>
+Signed-off-by: Steve French <stfrench@microsoft.com>
+
+
+
+The vulnerable function:
+static int ksmbd_neg_token_alloc(void *context, size_t hdrlen,
+				 unsigned char tag, const void *value,
+				 size_t vlen)
+{
+	struct ksmbd_conn *conn = context;
+
+	conn->mechToken = kmemdup_nul(value, vlen, GFP_KERNEL);
+	if (!conn->mechToken)
+		return -ENOMEM;
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int ksmbd_neg_token_alloc(void *context, size_t hdrlen,
+				 unsigned char tag, const void *value,
+				 size_t vlen)
+{
+	struct ksmbd_conn *conn = context;
+
+	if (!vlen)
+		return -EINVAL;
+
+	conn->mechToken = kmemdup_nul(value, vlen, GFP_KERNEL);
+	if (!conn->mechToken)
+		return -ENOMEM;
+
+	conn->mechTokenLen = (unsigned int)vlen;
+
+	return 0;
+}

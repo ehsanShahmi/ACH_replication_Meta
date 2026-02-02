@@ -1,0 +1,168 @@
+This issue file has CWE-835. Your task is to create this CWE-835 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+fuse: break infinite loop in fuse_fill_write_pages()
+
+I got a report about unkillable task eating CPU. Further
+investigation shows, that the problem is in the fuse_fill_write_pages()
+function. If iov's first segment has zero length, we get an infinite
+loop, because we never reach iov_iter_advance() call.
+
+Fix this by calling iov_iter_advance() before repeating an attempt to
+copy data from userspace.
+
+A similar problem is described in 124d3b7041f ("fix writev regression:
+pan hanging unkillable and un-straceable"). If zero-length segmend
+is followed by segment with invalid address,
+iov_iter_fault_in_readable() checks only first segment (zero-length),
+iov_iter_copy_from_user_atomic() skips it, fails at second and
+returns zero -> goto again without skipping zero-length segment.
+
+Patch calls iov_iter_advance() before goto again: we'll skip zero-length
+segment at second iteraction and iov_iter_fault_in_readable() will detect
+invalid address.
+
+Special thanks to Konstantin Khlebnikov, who helped a lot with the commit
+description.
+
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Cc: Maxim Patlasov <mpatlasov@parallels.com>
+Cc: Konstantin Khlebnikov <khlebnikov@yandex-team.ru>
+Signed-off-by: Roman Gushchin <klamm@yandex-team.ru>
+Signed-off-by: Miklos Szeredi <miklos@szeredi.hu>
+Fixes: ea9b9907b82a ("fuse: implement perform_write")
+Cc: <stable@vger.kernel.org>
+
+
+
+The vulnerable function:
+static ssize_t fuse_fill_write_pages(struct fuse_req *req,
+			       struct address_space *mapping,
+			       struct iov_iter *ii, loff_t pos)
+{
+	struct fuse_conn *fc = get_fuse_conn(mapping->host);
+	unsigned offset = pos & (PAGE_CACHE_SIZE - 1);
+	size_t count = 0;
+	int err;
+
+	req->in.argpages = 1;
+	req->page_descs[0].offset = offset;
+
+	do {
+		size_t tmp;
+		struct page *page;
+		pgoff_t index = pos >> PAGE_CACHE_SHIFT;
+		size_t bytes = min_t(size_t, PAGE_CACHE_SIZE - offset,
+				     iov_iter_count(ii));
+
+		bytes = min_t(size_t, bytes, fc->max_write - count);
+
+ again:
+		err = -EFAULT;
+		if (iov_iter_fault_in_readable(ii, bytes))
+			break;
+
+		err = -ENOMEM;
+		page = grab_cache_page_write_begin(mapping, index, 0);
+		if (!page)
+			break;
+
+		if (mapping_writably_mapped(mapping))
+			flush_dcache_page(page);
+
+		tmp = iov_iter_copy_from_user_atomic(page, ii, offset, bytes);
+		flush_dcache_page(page);
+
+		if (!tmp) {
+			unlock_page(page);
+			page_cache_release(page);
+			bytes = min(bytes, iov_iter_single_seg_count(ii));
+			goto again;
+		}
+
+		err = 0;
+		req->pages[req->num_pages] = page;
+		req->page_descs[req->num_pages].length = tmp;
+		req->num_pages++;
+
+		iov_iter_advance(ii, tmp);
+		count += tmp;
+		pos += tmp;
+		offset += tmp;
+		if (offset == PAGE_CACHE_SIZE)
+			offset = 0;
+
+		if (!fc->big_writes)
+			break;
+	} while (iov_iter_count(ii) && count < fc->max_write &&
+		 req->num_pages < req->max_pages && offset == 0);
+
+	return count > 0 ? count : err;
+}
+
+
+
+The corrected function:
+static ssize_t fuse_fill_write_pages(struct fuse_req *req,
+			       struct address_space *mapping,
+			       struct iov_iter *ii, loff_t pos)
+{
+	struct fuse_conn *fc = get_fuse_conn(mapping->host);
+	unsigned offset = pos & (PAGE_CACHE_SIZE - 1);
+	size_t count = 0;
+	int err;
+
+	req->in.argpages = 1;
+	req->page_descs[0].offset = offset;
+
+	do {
+		size_t tmp;
+		struct page *page;
+		pgoff_t index = pos >> PAGE_CACHE_SHIFT;
+		size_t bytes = min_t(size_t, PAGE_CACHE_SIZE - offset,
+				     iov_iter_count(ii));
+
+		bytes = min_t(size_t, bytes, fc->max_write - count);
+
+ again:
+		err = -EFAULT;
+		if (iov_iter_fault_in_readable(ii, bytes))
+			break;
+
+		err = -ENOMEM;
+		page = grab_cache_page_write_begin(mapping, index, 0);
+		if (!page)
+			break;
+
+		if (mapping_writably_mapped(mapping))
+			flush_dcache_page(page);
+
+		tmp = iov_iter_copy_from_user_atomic(page, ii, offset, bytes);
+		flush_dcache_page(page);
+
+		iov_iter_advance(ii, tmp);
+		if (!tmp) {
+			unlock_page(page);
+			page_cache_release(page);
+			bytes = min(bytes, iov_iter_single_seg_count(ii));
+			goto again;
+		}
+
+		err = 0;
+		req->pages[req->num_pages] = page;
+		req->page_descs[req->num_pages].length = tmp;
+		req->num_pages++;
+
+		count += tmp;
+		pos += tmp;
+		offset += tmp;
+		if (offset == PAGE_CACHE_SIZE)
+			offset = 0;
+
+		if (!fc->big_writes)
+			break;
+	} while (iov_iter_count(ii) && count < fc->max_write &&
+		 req->num_pages < req->max_pages && offset == 0);
+
+	return count > 0 ? count : err;
+}

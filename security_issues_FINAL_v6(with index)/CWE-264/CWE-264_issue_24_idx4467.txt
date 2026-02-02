@@ -1,0 +1,42 @@
+This issue file has CWE-264. Your task is to create this CWE-264 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+ARM: dma-mapping: don't allow DMA mappings to be marked executable
+
+DMA mapping permissions were being derived from pgprot_kernel directly
+without using PAGE_KERNEL.  This causes them to be marked with executable
+permission, which is not what we want.  Fix this.
+
+Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>
+
+
+
+The vulnerable function:
+static void *arm_coherent_dma_alloc(struct device *dev, size_t size,
+	dma_addr_t *handle, gfp_t gfp, struct dma_attrs *attrs)
+{
+	pgprot_t prot = __get_dma_pgprot(attrs, pgprot_kernel);
+	void *memory;
+
+	if (dma_alloc_from_coherent(dev, size, handle, &memory))
+		return memory;
+
+	return __dma_alloc(dev, size, handle, gfp, prot, true,
+			   __builtin_return_address(0));
+}
+
+
+
+The corrected function:
+static void *arm_coherent_dma_alloc(struct device *dev, size_t size,
+	dma_addr_t *handle, gfp_t gfp, struct dma_attrs *attrs)
+{
+	pgprot_t prot = __get_dma_pgprot(attrs, PAGE_KERNEL);
+	void *memory;
+
+	if (dma_alloc_from_coherent(dev, size, handle, &memory))
+		return memory;
+
+	return __dma_alloc(dev, size, handle, gfp, prot, true,
+			   __builtin_return_address(0));
+}

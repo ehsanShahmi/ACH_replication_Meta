@@ -1,0 +1,56 @@
+The vulnerable issue:
+f2fs: fix null reference error when checking end of zone
+
+This patch fixes a potentially null pointer being accessed by
+is_end_zone_blkaddr() that checks the last block of a zone
+when f2fs is mounted as a single device.
+
+Fixes: e067dc3c6b9c ("f2fs: maintain six open zones for zoned devices")
+Signed-off-by: Daejun Park <daejun7.park@samsung.com>
+Reviewed-by: Chao Yu <chao@kernel.org>
+Reviewed-by: Daeho Jeong <daehojeong@google.com>
+Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+
+
+The vulnerable function:
+static bool is_end_zone_blkaddr(struct f2fs_sb_info *sbi, block_t blkaddr)
+{
+	int devi = 0;
+
+	if (f2fs_is_multi_device(sbi)) {
+		devi = f2fs_target_device_index(sbi, blkaddr);
+		if (blkaddr < FDEV(devi).start_blk ||
+		    blkaddr > FDEV(devi).end_blk) {
+			f2fs_err(sbi, "Invalid block %x", blkaddr);
+			return false;
+		}
+		blkaddr -= FDEV(devi).start_blk;
+	}
+	return bdev_is_zoned(FDEV(devi).bdev) &&
+		f2fs_blkz_is_seq(sbi, devi, blkaddr) &&
+		(blkaddr % sbi->blocks_per_blkz == sbi->blocks_per_blkz - 1);
+}
+
+
+
+The corrected function:
+static bool is_end_zone_blkaddr(struct f2fs_sb_info *sbi, block_t blkaddr)
+{
+	struct block_device *bdev = sbi->sb->s_bdev;
+	int devi = 0;
+
+	if (f2fs_is_multi_device(sbi)) {
+		devi = f2fs_target_device_index(sbi, blkaddr);
+		if (blkaddr < FDEV(devi).start_blk ||
+		    blkaddr > FDEV(devi).end_blk) {
+			f2fs_err(sbi, "Invalid block %x", blkaddr);
+			return false;
+		}
+		blkaddr -= FDEV(devi).start_blk;
+		bdev = FDEV(devi).bdev;
+	}
+	return bdev_is_zoned(bdev) &&
+		f2fs_blkz_is_seq(sbi, devi, blkaddr) &&
+		(blkaddr % sbi->blocks_per_blkz == sbi->blocks_per_blkz - 1);
+}

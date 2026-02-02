@@ -1,0 +1,62 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+media: meson: vdec: potential dereference of null pointer
+
+As the possible failure of the kzalloc(), the 'new_ts' could be NULL
+pointer.
+Therefore, it should be better to check it in order to avoid the
+dereference of the NULL pointer.
+Also, the caller esparser_queue() needs to deal with the return value of
+the amvdec_add_ts().
+
+Fixes: 876f123b8956 ("media: meson: vdec: bring up to compliance")
+Signed-off-by: Jiasheng Jiang <jiasheng@iscas.ac.cn>
+Suggested-by: Neil Armstrong <narmstrong@baylibre.com>
+Reviewed-by: Neil Armstrong <narmstrong@baylibre.com>
+Signed-off-by: Hans Verkuil <hverkuil-cisco@xs4all.nl>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@kernel.org>
+
+
+
+The vulnerable function:
+void amvdec_add_ts(struct amvdec_session *sess, u64 ts,
+		   struct v4l2_timecode tc, u32 offset, u32 vbuf_flags)
+{
+	struct amvdec_timestamp *new_ts;
+	unsigned long flags;
+
+	new_ts = kzalloc(sizeof(*new_ts), GFP_KERNEL);
+	new_ts->ts = ts;
+	new_ts->tc = tc;
+	new_ts->offset = offset;
+	new_ts->flags = vbuf_flags;
+
+	spin_lock_irqsave(&sess->ts_spinlock, flags);
+	list_add_tail(&new_ts->list, &sess->timestamps);
+	spin_unlock_irqrestore(&sess->ts_spinlock, flags);
+}
+
+
+
+The corrected function:
+int amvdec_add_ts(struct amvdec_session *sess, u64 ts,
+		  struct v4l2_timecode tc, u32 offset, u32 vbuf_flags)
+{
+	struct amvdec_timestamp *new_ts;
+	unsigned long flags;
+
+	new_ts = kzalloc(sizeof(*new_ts), GFP_KERNEL);
+	if (!new_ts)
+		return -ENOMEM;
+
+	new_ts->ts = ts;
+	new_ts->tc = tc;
+	new_ts->offset = offset;
+	new_ts->flags = vbuf_flags;
+
+	spin_lock_irqsave(&sess->ts_spinlock, flags);
+	list_add_tail(&new_ts->list, &sess->timestamps);
+	spin_unlock_irqrestore(&sess->ts_spinlock, flags);
+	return 0;
+}

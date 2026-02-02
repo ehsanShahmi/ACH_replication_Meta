@@ -1,0 +1,62 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+hwmon: (xgene) Fix use after free bug in xgene_hwmon_remove due to race condition
+
+In xgene_hwmon_probe, &ctx->workq is bound with xgene_hwmon_evt_work.
+Then it will be started.
+
+If we remove the driver which will call xgene_hwmon_remove to clean up,
+there may be unfinished work.
+
+The possible sequence is as follows:
+
+Fix it by finishing the work before cleanup in xgene_hwmon_remove.
+
+CPU0                  CPU1
+
+                    |xgene_hwmon_evt_work
+xgene_hwmon_remove   |
+kfifo_free(&ctx->async_msg_fifo);|
+                    |
+                    |kfifo_out_spinlocked
+                    |//use &ctx->async_msg_fifo
+Fixes: 2ca492e22cb7 ("hwmon: (xgene) Fix crash when alarm occurs before driver probe")
+Signed-off-by: Zheng Wang <zyytlz.wz@163.com>
+Link: https://lore.kernel.org/r/20230310084007.1403388-1-zyytlz.wz@163.com
+Signed-off-by: Guenter Roeck <linux@roeck-us.net>
+
+
+
+The vulnerable function:
+static int xgene_hwmon_remove(struct platform_device *pdev)
+{
+	struct xgene_hwmon_dev *ctx = platform_get_drvdata(pdev);
+
+	hwmon_device_unregister(ctx->hwmon_dev);
+	kfifo_free(&ctx->async_msg_fifo);
+	if (acpi_disabled)
+		mbox_free_channel(ctx->mbox_chan);
+	else
+		pcc_mbox_free_channel(ctx->pcc_chan);
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int xgene_hwmon_remove(struct platform_device *pdev)
+{
+	struct xgene_hwmon_dev *ctx = platform_get_drvdata(pdev);
+
+	cancel_work_sync(&ctx->workq);
+	hwmon_device_unregister(ctx->hwmon_dev);
+	kfifo_free(&ctx->async_msg_fifo);
+	if (acpi_disabled)
+		mbox_free_channel(ctx->mbox_chan);
+	else
+		pcc_mbox_free_channel(ctx->pcc_chan);
+
+	return 0;
+}

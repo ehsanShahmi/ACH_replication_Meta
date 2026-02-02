@@ -1,0 +1,59 @@
+The vulnerable issue:
+cdc_ncm: do not call usbnet_link_change from cdc_ncm_bind
+
+usbnet_link_change will call schedule_work and should be
+avoided if bind is failing. Otherwise we will end up with
+scheduled work referring to a netdev which has gone away.
+
+Instead of making the call conditional, we can just defer
+it to usbnet_probe, using the driver_info flag made for
+this purpose.
+
+Fixes: 8a34b0ae8778 ("usbnet: cdc_ncm: apply usbnet_link_change")
+Reported-by: Andrey Konovalov <andreyknvl@gmail.com>
+Suggested-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Bjørn Mork <bjorn@mork.no>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static int cdc_ncm_bind(struct usbnet *dev, struct usb_interface *intf)
+{
+	int ret;
+
+	/* MBIM backwards compatible function? */
+	if (cdc_ncm_select_altsetting(intf) != CDC_NCM_COMM_ALTSETTING_NCM)
+		return -ENODEV;
+
+	/* The NCM data altsetting is fixed, so we hard-coded it.
+	 * Additionally, generic NCM devices are assumed to accept arbitrarily
+	 * placed NDP.
+	 */
+	ret = cdc_ncm_bind_common(dev, intf, CDC_NCM_DATA_ALTSETTING_NCM, 0);
+
+	/*
+	 * We should get an event when network connection is "connected" or
+	 * "disconnected". Set network connection in "disconnected" state
+	 * (carrier is OFF) during attach, so the IP network stack does not
+	 * start IPv6 negotiation and more.
+	 */
+	usbnet_link_change(dev, 0, 0);
+	return ret;
+}
+
+
+
+The corrected function:
+static int cdc_ncm_bind(struct usbnet *dev, struct usb_interface *intf)
+{
+	/* MBIM backwards compatible function? */
+	if (cdc_ncm_select_altsetting(intf) != CDC_NCM_COMM_ALTSETTING_NCM)
+		return -ENODEV;
+
+	/* The NCM data altsetting is fixed, so we hard-coded it.
+	 * Additionally, generic NCM devices are assumed to accept arbitrarily
+	 * placed NDP.
+	 */
+	return cdc_ncm_bind_common(dev, intf, CDC_NCM_DATA_ALTSETTING_NCM, 0);
+}

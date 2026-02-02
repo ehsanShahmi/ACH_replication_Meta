@@ -1,0 +1,403 @@
+This issue file has CWE-787. Your task is to create this CWE-787 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+vhost_net: batch used ring update in rx
+
+This patch tries to batched used ring update during RX. This is pretty
+fit for the case when guest is much faster (e.g dpdk based
+backend). In this case, used ring is almost empty:
+
+- we may get serious cache line misses/contending on both used ring
+  and used idx.
+- at most 1 packet could be dequeued at one time, batching in guest
+  does not make much effect.
+
+Update used ring in a batch can help since guest won't access the used
+ring until used idx was advanced for several descriptors and since we
+advance used ring for every N packets, guest will only need to access
+used idx for every N packet since it can cache the used idx. To have a
+better interaction for both batch dequeuing and dpdk batching,
+VHOST_RX_BATCH was used as the maximum number of descriptors that
+could be batched.
+
+Test were done between two machines with 2.40GHz Intel(R) Xeon(R) CPU
+E5-2630 connected back to back through ixgbe. Traffic were generated
+on one remote ixgbe through MoonGen and measure the RX pps through
+testpmd in guest when do xdp_redirect_map from local ixgbe to
+tap. RX pps were increased from 3.05 Mpps to 4.00 Mpps (about 31%
+improvement).
+
+One possible concern for this is the implications for TCP (especially
+latency sensitive workload). Result[1] does not show obvious changes
+for most of the netperf test (RR, TX, and RX). And we do get some
+improvements for RX on some specific size.
+
+Guest RX:
+
+size/sessions/+thu%/+normalize%
+   64/     1/   +2%/   +2%
+   64/     2/   +2%/   -1%
+   64/     4/   +1%/   +1%
+   64/     8/    0%/    0%
+  256/     1/   +6%/   -3%
+  256/     2/   -3%/   +2%
+  256/     4/  +11%/  +11%
+  256/     8/    0%/    0%
+  512/     1/   +4%/    0%
+  512/     2/   +2%/   +2%
+  512/     4/    0%/   -1%
+  512/     8/   -8%/   -8%
+ 1024/     1/   -7%/  -17%
+ 1024/     2/   -8%/   -7%
+ 1024/     4/   +1%/    0%
+ 1024/     8/    0%/    0%
+ 2048/     1/  +30%/  +14%
+ 2048/     2/  +46%/  +40%
+ 2048/     4/    0%/    0%
+ 2048/     8/    0%/    0%
+ 4096/     1/  +23%/  +22%
+ 4096/     2/  +26%/  +23%
+ 4096/     4/    0%/   +1%
+ 4096/     8/    0%/    0%
+16384/     1/   -2%/   -3%
+16384/     2/   +1%/   -4%
+16384/     4/   -1%/   -3%
+16384/     8/    0%/   -1%
+65535/     1/  +15%/   +7%
+65535/     2/   +4%/   +7%
+65535/     4/    0%/   +1%
+65535/     8/    0%/    0%
+
+TCP_RR:
+
+size/sessions/+thu%/+normalize%
+    1/     1/    0%/   +1%
+    1/    25/   +2%/   +1%
+    1/    50/   +4%/   +1%
+   64/     1/    0%/   -4%
+   64/    25/   +2%/   +1%
+   64/    50/    0%/   -1%
+  256/     1/    0%/    0%
+  256/    25/    0%/    0%
+  256/    50/   +4%/   +2%
+
+Guest TX:
+
+size/sessions/+thu%/+normalize%
+   64/     1/   +4%/   -2%
+   64/     2/   -6%/   -5%
+   64/     4/   +3%/   +6%
+   64/     8/    0%/   +3%
+  256/     1/  +15%/  +16%
+  256/     2/  +11%/  +12%
+  256/     4/   +1%/    0%
+  256/     8/   +5%/   +5%
+  512/     1/   -1%/   -6%
+  512/     2/    0%/   -8%
+  512/     4/   -2%/   +4%
+  512/     8/   +6%/   +9%
+ 1024/     1/   +3%/   +1%
+ 1024/     2/   +3%/   +9%
+ 1024/     4/    0%/   +7%
+ 1024/     8/    0%/   +7%
+ 2048/     1/   +8%/   +2%
+ 2048/     2/   +3%/   -1%
+ 2048/     4/   -1%/  +11%
+ 2048/     8/   +3%/   +9%
+ 4096/     1/   +8%/   +8%
+ 4096/     2/    0%/   -7%
+ 4096/     4/   +4%/   +4%
+ 4096/     8/   +2%/   +5%
+16384/     1/   -3%/   +1%
+16384/     2/   -1%/  -12%
+16384/     4/   -1%/   +5%
+16384/     8/    0%/   +1%
+65535/     1/    0%/   -3%
+65535/     2/   +5%/  +16%
+65535/     4/   +1%/   +2%
+65535/     8/   +1%/   -1%
+
+Signed-off-by: Jason Wang <jasowang@redhat.com>
+Acked-by: Michael S. Tsirkin <mst@redhat.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static void handle_rx(struct vhost_net *net)
+{
+	struct vhost_net_virtqueue *nvq = &net->vqs[VHOST_NET_VQ_RX];
+	struct vhost_virtqueue *vq = &nvq->vq;
+	unsigned uninitialized_var(in), log;
+	struct vhost_log *vq_log;
+	struct msghdr msg = {
+		.msg_name = NULL,
+		.msg_namelen = 0,
+		.msg_control = NULL, /* FIXME: get and handle RX aux data. */
+		.msg_controllen = 0,
+		.msg_flags = MSG_DONTWAIT,
+	};
+	struct virtio_net_hdr hdr = {
+		.flags = 0,
+		.gso_type = VIRTIO_NET_HDR_GSO_NONE
+	};
+	size_t total_len = 0;
+	int err, mergeable;
+	s16 headcount;
+	size_t vhost_hlen, sock_hlen;
+	size_t vhost_len, sock_len;
+	struct socket *sock;
+	struct iov_iter fixup;
+	__virtio16 num_buffers;
+
+	mutex_lock(&vq->mutex);
+	sock = vq->private_data;
+	if (!sock)
+		goto out;
+
+	if (!vq_iotlb_prefetch(vq))
+		goto out;
+
+	vhost_disable_notify(&net->dev, vq);
+	vhost_net_disable_vq(net, vq);
+
+	vhost_hlen = nvq->vhost_hlen;
+	sock_hlen = nvq->sock_hlen;
+
+	vq_log = unlikely(vhost_has_feature(vq, VHOST_F_LOG_ALL)) ?
+		vq->log : NULL;
+	mergeable = vhost_has_feature(vq, VIRTIO_NET_F_MRG_RXBUF);
+
+	while ((sock_len = vhost_net_rx_peek_head_len(net, sock->sk))) {
+		sock_len += sock_hlen;
+		vhost_len = sock_len + vhost_hlen;
+		headcount = get_rx_bufs(vq, vq->heads, vhost_len,
+					&in, vq_log, &log,
+					likely(mergeable) ? UIO_MAXIOV : 1);
+		/* On error, stop handling until the next kick. */
+		if (unlikely(headcount < 0))
+			goto out;
+		/* OK, now we need to know about added descriptors. */
+		if (!headcount) {
+			if (unlikely(vhost_enable_notify(&net->dev, vq))) {
+				/* They have slipped one in as we were
+				 * doing that: check again. */
+				vhost_disable_notify(&net->dev, vq);
+				continue;
+			}
+			/* Nothing new?  Wait for eventfd to tell us
+			 * they refilled. */
+			goto out;
+		}
+		if (nvq->rx_ring)
+			msg.msg_control = vhost_net_buf_consume(&nvq->rxq);
+		/* On overrun, truncate and discard */
+		if (unlikely(headcount > UIO_MAXIOV)) {
+			iov_iter_init(&msg.msg_iter, READ, vq->iov, 1, 1);
+			err = sock->ops->recvmsg(sock, &msg,
+						 1, MSG_DONTWAIT | MSG_TRUNC);
+			pr_debug("Discarded rx packet: len %zd\n", sock_len);
+			continue;
+		}
+		/* We don't need to be notified again. */
+		iov_iter_init(&msg.msg_iter, READ, vq->iov, in, vhost_len);
+		fixup = msg.msg_iter;
+		if (unlikely((vhost_hlen))) {
+			/* We will supply the header ourselves
+			 * TODO: support TSO.
+			 */
+			iov_iter_advance(&msg.msg_iter, vhost_hlen);
+		}
+		err = sock->ops->recvmsg(sock, &msg,
+					 sock_len, MSG_DONTWAIT | MSG_TRUNC);
+		/* Userspace might have consumed the packet meanwhile:
+		 * it's not supposed to do this usually, but might be hard
+		 * to prevent. Discard data we got (if any) and keep going. */
+		if (unlikely(err != sock_len)) {
+			pr_debug("Discarded rx packet: "
+				 " len %d, expected %zd\n", err, sock_len);
+			vhost_discard_vq_desc(vq, headcount);
+			continue;
+		}
+		/* Supply virtio_net_hdr if VHOST_NET_F_VIRTIO_NET_HDR */
+		if (unlikely(vhost_hlen)) {
+			if (copy_to_iter(&hdr, sizeof(hdr),
+					 &fixup) != sizeof(hdr)) {
+				vq_err(vq, "Unable to write vnet_hdr "
+				       "at addr %p\n", vq->iov->iov_base);
+				goto out;
+			}
+		} else {
+			/* Header came from socket; we'll need to patch
+			 * ->num_buffers over if VIRTIO_NET_F_MRG_RXBUF
+			 */
+			iov_iter_advance(&fixup, sizeof(hdr));
+		}
+		/* TODO: Should check and handle checksum. */
+
+		num_buffers = cpu_to_vhost16(vq, headcount);
+		if (likely(mergeable) &&
+		    copy_to_iter(&num_buffers, sizeof num_buffers,
+				 &fixup) != sizeof num_buffers) {
+			vq_err(vq, "Failed num_buffers write");
+			vhost_discard_vq_desc(vq, headcount);
+			goto out;
+		}
+		vhost_add_used_and_signal_n(&net->dev, vq, vq->heads,
+					    headcount);
+		if (unlikely(vq_log))
+			vhost_log_write(vq, vq_log, log, vhost_len);
+		total_len += vhost_len;
+		if (unlikely(total_len >= VHOST_NET_WEIGHT)) {
+			vhost_poll_queue(&vq->poll);
+			goto out;
+		}
+	}
+	vhost_net_enable_vq(net, vq);
+out:
+	mutex_unlock(&vq->mutex);
+}
+
+
+
+The corrected function:
+static void handle_rx(struct vhost_net *net)
+{
+	struct vhost_net_virtqueue *nvq = &net->vqs[VHOST_NET_VQ_RX];
+	struct vhost_virtqueue *vq = &nvq->vq;
+	unsigned uninitialized_var(in), log;
+	struct vhost_log *vq_log;
+	struct msghdr msg = {
+		.msg_name = NULL,
+		.msg_namelen = 0,
+		.msg_control = NULL, /* FIXME: get and handle RX aux data. */
+		.msg_controllen = 0,
+		.msg_flags = MSG_DONTWAIT,
+	};
+	struct virtio_net_hdr hdr = {
+		.flags = 0,
+		.gso_type = VIRTIO_NET_HDR_GSO_NONE
+	};
+	size_t total_len = 0;
+	int err, mergeable;
+	s16 headcount, nheads = 0;
+	size_t vhost_hlen, sock_hlen;
+	size_t vhost_len, sock_len;
+	struct socket *sock;
+	struct iov_iter fixup;
+	__virtio16 num_buffers;
+
+	mutex_lock(&vq->mutex);
+	sock = vq->private_data;
+	if (!sock)
+		goto out;
+
+	if (!vq_iotlb_prefetch(vq))
+		goto out;
+
+	vhost_disable_notify(&net->dev, vq);
+	vhost_net_disable_vq(net, vq);
+
+	vhost_hlen = nvq->vhost_hlen;
+	sock_hlen = nvq->sock_hlen;
+
+	vq_log = unlikely(vhost_has_feature(vq, VHOST_F_LOG_ALL)) ?
+		vq->log : NULL;
+	mergeable = vhost_has_feature(vq, VIRTIO_NET_F_MRG_RXBUF);
+
+	while ((sock_len = vhost_net_rx_peek_head_len(net, sock->sk))) {
+		sock_len += sock_hlen;
+		vhost_len = sock_len + vhost_hlen;
+		headcount = get_rx_bufs(vq, vq->heads + nheads, vhost_len,
+					&in, vq_log, &log,
+					likely(mergeable) ? UIO_MAXIOV : 1);
+		/* On error, stop handling until the next kick. */
+		if (unlikely(headcount < 0))
+			goto out;
+		/* OK, now we need to know about added descriptors. */
+		if (!headcount) {
+			if (unlikely(vhost_enable_notify(&net->dev, vq))) {
+				/* They have slipped one in as we were
+				 * doing that: check again. */
+				vhost_disable_notify(&net->dev, vq);
+				continue;
+			}
+			/* Nothing new?  Wait for eventfd to tell us
+			 * they refilled. */
+			goto out;
+		}
+		if (nvq->rx_ring)
+			msg.msg_control = vhost_net_buf_consume(&nvq->rxq);
+		/* On overrun, truncate and discard */
+		if (unlikely(headcount > UIO_MAXIOV)) {
+			iov_iter_init(&msg.msg_iter, READ, vq->iov, 1, 1);
+			err = sock->ops->recvmsg(sock, &msg,
+						 1, MSG_DONTWAIT | MSG_TRUNC);
+			pr_debug("Discarded rx packet: len %zd\n", sock_len);
+			continue;
+		}
+		/* We don't need to be notified again. */
+		iov_iter_init(&msg.msg_iter, READ, vq->iov, in, vhost_len);
+		fixup = msg.msg_iter;
+		if (unlikely((vhost_hlen))) {
+			/* We will supply the header ourselves
+			 * TODO: support TSO.
+			 */
+			iov_iter_advance(&msg.msg_iter, vhost_hlen);
+		}
+		err = sock->ops->recvmsg(sock, &msg,
+					 sock_len, MSG_DONTWAIT | MSG_TRUNC);
+		/* Userspace might have consumed the packet meanwhile:
+		 * it's not supposed to do this usually, but might be hard
+		 * to prevent. Discard data we got (if any) and keep going. */
+		if (unlikely(err != sock_len)) {
+			pr_debug("Discarded rx packet: "
+				 " len %d, expected %zd\n", err, sock_len);
+			vhost_discard_vq_desc(vq, headcount);
+			continue;
+		}
+		/* Supply virtio_net_hdr if VHOST_NET_F_VIRTIO_NET_HDR */
+		if (unlikely(vhost_hlen)) {
+			if (copy_to_iter(&hdr, sizeof(hdr),
+					 &fixup) != sizeof(hdr)) {
+				vq_err(vq, "Unable to write vnet_hdr "
+				       "at addr %p\n", vq->iov->iov_base);
+				goto out;
+			}
+		} else {
+			/* Header came from socket; we'll need to patch
+			 * ->num_buffers over if VIRTIO_NET_F_MRG_RXBUF
+			 */
+			iov_iter_advance(&fixup, sizeof(hdr));
+		}
+		/* TODO: Should check and handle checksum. */
+
+		num_buffers = cpu_to_vhost16(vq, headcount);
+		if (likely(mergeable) &&
+		    copy_to_iter(&num_buffers, sizeof num_buffers,
+				 &fixup) != sizeof num_buffers) {
+			vq_err(vq, "Failed num_buffers write");
+			vhost_discard_vq_desc(vq, headcount);
+			goto out;
+		}
+		nheads += headcount;
+		if (nheads > VHOST_RX_BATCH) {
+			vhost_add_used_and_signal_n(&net->dev, vq, vq->heads,
+						    nheads);
+			nheads = 0;
+		}
+		if (unlikely(vq_log))
+			vhost_log_write(vq, vq_log, log, vhost_len);
+		total_len += vhost_len;
+		if (unlikely(total_len >= VHOST_NET_WEIGHT)) {
+			vhost_poll_queue(&vq->poll);
+			goto out;
+		}
+	}
+	vhost_net_enable_vq(net, vq);
+out:
+	if (nheads)
+		vhost_add_used_and_signal_n(&net->dev, vq, vq->heads,
+					    nheads);
+	mutex_unlock(&vq->mutex);
+}

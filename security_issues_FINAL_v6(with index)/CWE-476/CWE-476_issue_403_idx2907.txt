@@ -1,0 +1,293 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+KVM: x86: nSVM: fix potential NULL derefernce on nested migration
+
+Turns out that due to review feedback and/or rebases
+I accidentally moved the call to nested_svm_load_cr3 to be too early,
+before the NPT is enabled, which is very wrong to do.
+
+KVM can't even access guest memory at that point as nested NPT
+is needed for that, and of course it won't initialize the walk_mmu,
+which is main issue the patch was addressing.
+
+Fix this for real.
+
+Fixes: 232f75d3b4b5 ("KVM: nSVM: call nested_svm_load_cr3 on nested state load")
+Cc: stable@vger.kernel.org
+
+Signed-off-by: Maxim Levitsky <mlevitsk@redhat.com>
+Message-Id: <20220207155447.840194-3-mlevitsk@redhat.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+
+
+The vulnerable function:
+static int svm_set_nested_state(struct kvm_vcpu *vcpu,
+				struct kvm_nested_state __user *user_kvm_nested_state,
+				struct kvm_nested_state *kvm_state)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+	struct vmcb __user *user_vmcb = (struct vmcb __user *)
+		&user_kvm_nested_state->data.svm[0];
+	struct vmcb_control_area *ctl;
+	struct vmcb_save_area *save;
+	struct vmcb_save_area_cached save_cached;
+	struct vmcb_ctrl_area_cached ctl_cached;
+	unsigned long cr0;
+	int ret;
+
+	BUILD_BUG_ON(sizeof(struct vmcb_control_area) + sizeof(struct vmcb_save_area) >
+		     KVM_STATE_NESTED_SVM_VMCB_SIZE);
+
+	if (kvm_state->format != KVM_STATE_NESTED_FORMAT_SVM)
+		return -EINVAL;
+
+	if (kvm_state->flags & ~(KVM_STATE_NESTED_GUEST_MODE |
+				 KVM_STATE_NESTED_RUN_PENDING |
+				 KVM_STATE_NESTED_GIF_SET))
+		return -EINVAL;
+
+	/*
+	 * If in guest mode, vcpu->arch.efer actually refers to the L2 guest's
+	 * EFER.SVME, but EFER.SVME still has to be 1 for VMRUN to succeed.
+	 */
+	if (!(vcpu->arch.efer & EFER_SVME)) {
+		/* GIF=1 and no guest mode are required if SVME=0.  */
+		if (kvm_state->flags != KVM_STATE_NESTED_GIF_SET)
+			return -EINVAL;
+	}
+
+	/* SMM temporarily disables SVM, so we cannot be in guest mode.  */
+	if (is_smm(vcpu) && (kvm_state->flags & KVM_STATE_NESTED_GUEST_MODE))
+		return -EINVAL;
+
+	if (!(kvm_state->flags & KVM_STATE_NESTED_GUEST_MODE)) {
+		svm_leave_nested(vcpu);
+		svm_set_gif(svm, !!(kvm_state->flags & KVM_STATE_NESTED_GIF_SET));
+		return 0;
+	}
+
+	if (!page_address_valid(vcpu, kvm_state->hdr.svm.vmcb_pa))
+		return -EINVAL;
+	if (kvm_state->size < sizeof(*kvm_state) + KVM_STATE_NESTED_SVM_VMCB_SIZE)
+		return -EINVAL;
+
+	ret  = -ENOMEM;
+	ctl  = kzalloc(sizeof(*ctl),  GFP_KERNEL_ACCOUNT);
+	save = kzalloc(sizeof(*save), GFP_KERNEL_ACCOUNT);
+	if (!ctl || !save)
+		goto out_free;
+
+	ret = -EFAULT;
+	if (copy_from_user(ctl, &user_vmcb->control, sizeof(*ctl)))
+		goto out_free;
+	if (copy_from_user(save, &user_vmcb->save, sizeof(*save)))
+		goto out_free;
+
+	ret = -EINVAL;
+	__nested_copy_vmcb_control_to_cache(&ctl_cached, ctl);
+	if (!__nested_vmcb_check_controls(vcpu, &ctl_cached))
+		goto out_free;
+
+	/*
+	 * Processor state contains L2 state.  Check that it is
+	 * valid for guest mode (see nested_vmcb_check_save).
+	 */
+	cr0 = kvm_read_cr0(vcpu);
+        if (((cr0 & X86_CR0_CD) == 0) && (cr0 & X86_CR0_NW))
+		goto out_free;
+
+	/*
+	 * Validate host state saved from before VMRUN (see
+	 * nested_svm_check_permissions).
+	 */
+	__nested_copy_vmcb_save_to_cache(&save_cached, save);
+	if (!(save->cr0 & X86_CR0_PG) ||
+	    !(save->cr0 & X86_CR0_PE) ||
+	    (save->rflags & X86_EFLAGS_VM) ||
+	    !__nested_vmcb_check_save(vcpu, &save_cached))
+		goto out_free;
+
+	/*
+	 * While the nested guest CR3 is already checked and set by
+	 * KVM_SET_SREGS, it was set when nested state was yet loaded,
+	 * thus MMU might not be initialized correctly.
+	 * Set it again to fix this.
+	 */
+
+	ret = nested_svm_load_cr3(&svm->vcpu, vcpu->arch.cr3,
+				  nested_npt_enabled(svm), false);
+	if (WARN_ON_ONCE(ret))
+		goto out_free;
+
+
+	/*
+	 * All checks done, we can enter guest mode. Userspace provides
+	 * vmcb12.control, which will be combined with L1 and stored into
+	 * vmcb02, and the L1 save state which we store in vmcb01.
+	 * L2 registers if needed are moved from the current VMCB to VMCB02.
+	 */
+
+	if (is_guest_mode(vcpu))
+		svm_leave_nested(vcpu);
+	else
+		svm->nested.vmcb02.ptr->save = svm->vmcb01.ptr->save;
+
+	svm_set_gif(svm, !!(kvm_state->flags & KVM_STATE_NESTED_GIF_SET));
+
+	svm->nested.nested_run_pending =
+		!!(kvm_state->flags & KVM_STATE_NESTED_RUN_PENDING);
+
+	svm->nested.vmcb12_gpa = kvm_state->hdr.svm.vmcb_pa;
+
+	svm_copy_vmrun_state(&svm->vmcb01.ptr->save, save);
+	nested_copy_vmcb_control_to_cache(svm, ctl);
+
+	svm_switch_vmcb(svm, &svm->nested.vmcb02);
+	nested_vmcb02_prepare_control(svm);
+	kvm_make_request(KVM_REQ_GET_NESTED_STATE_PAGES, vcpu);
+	ret = 0;
+out_free:
+	kfree(save);
+	kfree(ctl);
+
+	return ret;
+}
+
+
+
+The corrected function:
+static int svm_set_nested_state(struct kvm_vcpu *vcpu,
+				struct kvm_nested_state __user *user_kvm_nested_state,
+				struct kvm_nested_state *kvm_state)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+	struct vmcb __user *user_vmcb = (struct vmcb __user *)
+		&user_kvm_nested_state->data.svm[0];
+	struct vmcb_control_area *ctl;
+	struct vmcb_save_area *save;
+	struct vmcb_save_area_cached save_cached;
+	struct vmcb_ctrl_area_cached ctl_cached;
+	unsigned long cr0;
+	int ret;
+
+	BUILD_BUG_ON(sizeof(struct vmcb_control_area) + sizeof(struct vmcb_save_area) >
+		     KVM_STATE_NESTED_SVM_VMCB_SIZE);
+
+	if (kvm_state->format != KVM_STATE_NESTED_FORMAT_SVM)
+		return -EINVAL;
+
+	if (kvm_state->flags & ~(KVM_STATE_NESTED_GUEST_MODE |
+				 KVM_STATE_NESTED_RUN_PENDING |
+				 KVM_STATE_NESTED_GIF_SET))
+		return -EINVAL;
+
+	/*
+	 * If in guest mode, vcpu->arch.efer actually refers to the L2 guest's
+	 * EFER.SVME, but EFER.SVME still has to be 1 for VMRUN to succeed.
+	 */
+	if (!(vcpu->arch.efer & EFER_SVME)) {
+		/* GIF=1 and no guest mode are required if SVME=0.  */
+		if (kvm_state->flags != KVM_STATE_NESTED_GIF_SET)
+			return -EINVAL;
+	}
+
+	/* SMM temporarily disables SVM, so we cannot be in guest mode.  */
+	if (is_smm(vcpu) && (kvm_state->flags & KVM_STATE_NESTED_GUEST_MODE))
+		return -EINVAL;
+
+	if (!(kvm_state->flags & KVM_STATE_NESTED_GUEST_MODE)) {
+		svm_leave_nested(vcpu);
+		svm_set_gif(svm, !!(kvm_state->flags & KVM_STATE_NESTED_GIF_SET));
+		return 0;
+	}
+
+	if (!page_address_valid(vcpu, kvm_state->hdr.svm.vmcb_pa))
+		return -EINVAL;
+	if (kvm_state->size < sizeof(*kvm_state) + KVM_STATE_NESTED_SVM_VMCB_SIZE)
+		return -EINVAL;
+
+	ret  = -ENOMEM;
+	ctl  = kzalloc(sizeof(*ctl),  GFP_KERNEL_ACCOUNT);
+	save = kzalloc(sizeof(*save), GFP_KERNEL_ACCOUNT);
+	if (!ctl || !save)
+		goto out_free;
+
+	ret = -EFAULT;
+	if (copy_from_user(ctl, &user_vmcb->control, sizeof(*ctl)))
+		goto out_free;
+	if (copy_from_user(save, &user_vmcb->save, sizeof(*save)))
+		goto out_free;
+
+	ret = -EINVAL;
+	__nested_copy_vmcb_control_to_cache(&ctl_cached, ctl);
+	if (!__nested_vmcb_check_controls(vcpu, &ctl_cached))
+		goto out_free;
+
+	/*
+	 * Processor state contains L2 state.  Check that it is
+	 * valid for guest mode (see nested_vmcb_check_save).
+	 */
+	cr0 = kvm_read_cr0(vcpu);
+        if (((cr0 & X86_CR0_CD) == 0) && (cr0 & X86_CR0_NW))
+		goto out_free;
+
+	/*
+	 * Validate host state saved from before VMRUN (see
+	 * nested_svm_check_permissions).
+	 */
+	__nested_copy_vmcb_save_to_cache(&save_cached, save);
+	if (!(save->cr0 & X86_CR0_PG) ||
+	    !(save->cr0 & X86_CR0_PE) ||
+	    (save->rflags & X86_EFLAGS_VM) ||
+	    !__nested_vmcb_check_save(vcpu, &save_cached))
+		goto out_free;
+
+
+	/*
+	 * All checks done, we can enter guest mode. Userspace provides
+	 * vmcb12.control, which will be combined with L1 and stored into
+	 * vmcb02, and the L1 save state which we store in vmcb01.
+	 * L2 registers if needed are moved from the current VMCB to VMCB02.
+	 */
+
+	if (is_guest_mode(vcpu))
+		svm_leave_nested(vcpu);
+	else
+		svm->nested.vmcb02.ptr->save = svm->vmcb01.ptr->save;
+
+	svm_set_gif(svm, !!(kvm_state->flags & KVM_STATE_NESTED_GIF_SET));
+
+	svm->nested.nested_run_pending =
+		!!(kvm_state->flags & KVM_STATE_NESTED_RUN_PENDING);
+
+	svm->nested.vmcb12_gpa = kvm_state->hdr.svm.vmcb_pa;
+
+	svm_copy_vmrun_state(&svm->vmcb01.ptr->save, save);
+	nested_copy_vmcb_control_to_cache(svm, ctl);
+
+	svm_switch_vmcb(svm, &svm->nested.vmcb02);
+	nested_vmcb02_prepare_control(svm);
+
+	/*
+	 * While the nested guest CR3 is already checked and set by
+	 * KVM_SET_SREGS, it was set when nested state was yet loaded,
+	 * thus MMU might not be initialized correctly.
+	 * Set it again to fix this.
+	 */
+
+	ret = nested_svm_load_cr3(&svm->vcpu, vcpu->arch.cr3,
+				  nested_npt_enabled(svm), false);
+	if (WARN_ON_ONCE(ret))
+		goto out_free;
+
+
+	kvm_make_request(KVM_REQ_GET_NESTED_STATE_PAGES, vcpu);
+	ret = 0;
+out_free:
+	kfree(save);
+	kfree(ctl);
+
+	return ret;
+}

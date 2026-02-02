@@ -1,0 +1,142 @@
+The vulnerable issue:
+net/sctp: Validate parameter size for SCTP_GET_ASSOC_STATS
+
+Building sctp may fail with:
+
+In function ‘copy_from_user’,
+    inlined from ‘sctp_getsockopt_assoc_stats’ at
+    net/sctp/socket.c:5656:20:
+arch/x86/include/asm/uaccess_32.h:211:26: error: call to
+    ‘copy_from_user_overflow’ declared with attribute error: copy_from_user()
+    buffer size is not provably correct
+
+if built with W=1 due to a missing parameter size validation
+before the call to copy_from_user.
+
+Signed-off-by: Guenter Roeck <linux@roeck-us.net>
+Acked-by: Vlad Yasevich <vyasevich@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static int sctp_getsockopt_assoc_stats(struct sock *sk, int len,
+				       char __user *optval,
+				       int __user *optlen)
+{
+	struct sctp_assoc_stats sas;
+	struct sctp_association *asoc = NULL;
+
+	/* User must provide at least the assoc id */
+	if (len < sizeof(sctp_assoc_t))
+		return -EINVAL;
+
+	if (copy_from_user(&sas, optval, len))
+		return -EFAULT;
+
+	asoc = sctp_id2assoc(sk, sas.sas_assoc_id);
+	if (!asoc)
+		return -EINVAL;
+
+	sas.sas_rtxchunks = asoc->stats.rtxchunks;
+	sas.sas_gapcnt = asoc->stats.gapcnt;
+	sas.sas_outofseqtsns = asoc->stats.outofseqtsns;
+	sas.sas_osacks = asoc->stats.osacks;
+	sas.sas_isacks = asoc->stats.isacks;
+	sas.sas_octrlchunks = asoc->stats.octrlchunks;
+	sas.sas_ictrlchunks = asoc->stats.ictrlchunks;
+	sas.sas_oodchunks = asoc->stats.oodchunks;
+	sas.sas_iodchunks = asoc->stats.iodchunks;
+	sas.sas_ouodchunks = asoc->stats.ouodchunks;
+	sas.sas_iuodchunks = asoc->stats.iuodchunks;
+	sas.sas_idupchunks = asoc->stats.idupchunks;
+	sas.sas_opackets = asoc->stats.opackets;
+	sas.sas_ipackets = asoc->stats.ipackets;
+
+	/* New high max rto observed, will return 0 if not a single
+	 * RTO update took place. obs_rto_ipaddr will be bogus
+	 * in such a case
+	 */
+	sas.sas_maxrto = asoc->stats.max_obs_rto;
+	memcpy(&sas.sas_obs_rto_ipaddr, &asoc->stats.obs_rto_ipaddr,
+		sizeof(struct sockaddr_storage));
+
+	/* Mark beginning of a new observation period */
+	asoc->stats.max_obs_rto = asoc->rto_min;
+
+	/* Allow the struct to grow and fill in as much as possible */
+	len = min_t(size_t, len, sizeof(sas));
+
+	if (put_user(len, optlen))
+		return -EFAULT;
+
+	SCTP_DEBUG_PRINTK("sctp_getsockopt_assoc_stat(%d): %d\n",
+			  len, sas.sas_assoc_id);
+
+	if (copy_to_user(optval, &sas, len))
+		return -EFAULT;
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int sctp_getsockopt_assoc_stats(struct sock *sk, int len,
+				       char __user *optval,
+				       int __user *optlen)
+{
+	struct sctp_assoc_stats sas;
+	struct sctp_association *asoc = NULL;
+
+	/* User must provide at least the assoc id */
+	if (len < sizeof(sctp_assoc_t))
+		return -EINVAL;
+
+	/* Allow the struct to grow and fill in as much as possible */
+	len = min_t(size_t, len, sizeof(sas));
+
+	if (copy_from_user(&sas, optval, len))
+		return -EFAULT;
+
+	asoc = sctp_id2assoc(sk, sas.sas_assoc_id);
+	if (!asoc)
+		return -EINVAL;
+
+	sas.sas_rtxchunks = asoc->stats.rtxchunks;
+	sas.sas_gapcnt = asoc->stats.gapcnt;
+	sas.sas_outofseqtsns = asoc->stats.outofseqtsns;
+	sas.sas_osacks = asoc->stats.osacks;
+	sas.sas_isacks = asoc->stats.isacks;
+	sas.sas_octrlchunks = asoc->stats.octrlchunks;
+	sas.sas_ictrlchunks = asoc->stats.ictrlchunks;
+	sas.sas_oodchunks = asoc->stats.oodchunks;
+	sas.sas_iodchunks = asoc->stats.iodchunks;
+	sas.sas_ouodchunks = asoc->stats.ouodchunks;
+	sas.sas_iuodchunks = asoc->stats.iuodchunks;
+	sas.sas_idupchunks = asoc->stats.idupchunks;
+	sas.sas_opackets = asoc->stats.opackets;
+	sas.sas_ipackets = asoc->stats.ipackets;
+
+	/* New high max rto observed, will return 0 if not a single
+	 * RTO update took place. obs_rto_ipaddr will be bogus
+	 * in such a case
+	 */
+	sas.sas_maxrto = asoc->stats.max_obs_rto;
+	memcpy(&sas.sas_obs_rto_ipaddr, &asoc->stats.obs_rto_ipaddr,
+		sizeof(struct sockaddr_storage));
+
+	/* Mark beginning of a new observation period */
+	asoc->stats.max_obs_rto = asoc->rto_min;
+
+	if (put_user(len, optlen))
+		return -EFAULT;
+
+	SCTP_DEBUG_PRINTK("sctp_getsockopt_assoc_stat(%d): %d\n",
+			  len, sas.sas_assoc_id);
+
+	if (copy_to_user(optval, &sas, len))
+		return -EFAULT;
+
+	return 0;
+}

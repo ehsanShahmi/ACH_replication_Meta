@@ -1,0 +1,96 @@
+The vulnerable issue:
+drm/amd/display: fix a NULL pointer dereference in amdgpu_dm_i2c_xfer()
+
+When ddc_service_construct() is called, it explicitly checks both the
+link type and whether there is something on the link which will
+dictate whether the pin is marked as hw_supported.
+
+If the pin isn't set or the link is not set (such as from
+unloading/reloading amdgpu in an IGT test) then fail the
+amdgpu_dm_i2c_xfer() call.
+
+Cc: stable@vger.kernel.org
+Fixes: 22676bc500c2 ("drm/amd/display: Fix dmub soft hang for PSR 1")
+Link: https://github.com/fwupd/fwupd/issues/6327
+Signed-off-by: Mario Limonciello <mario.limonciello@amd.com>
+Reviewed-by: Harry Wentland <harry.wentland@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+
+
+
+The vulnerable function:
+static int amdgpu_dm_i2c_xfer(struct i2c_adapter *i2c_adap,
+			      struct i2c_msg *msgs, int num)
+{
+	struct amdgpu_i2c_adapter *i2c = i2c_get_adapdata(i2c_adap);
+	struct ddc_service *ddc_service = i2c->ddc_service;
+	struct i2c_command cmd;
+	int i;
+	int result = -EIO;
+
+	cmd.payloads = kcalloc(num, sizeof(struct i2c_payload), GFP_KERNEL);
+
+	if (!cmd.payloads)
+		return result;
+
+	cmd.number_of_payloads = num;
+	cmd.engine = I2C_COMMAND_ENGINE_DEFAULT;
+	cmd.speed = 100;
+
+	for (i = 0; i < num; i++) {
+		cmd.payloads[i].write = !(msgs[i].flags & I2C_M_RD);
+		cmd.payloads[i].address = msgs[i].addr;
+		cmd.payloads[i].length = msgs[i].len;
+		cmd.payloads[i].data = msgs[i].buf;
+	}
+
+	if (dc_submit_i2c(
+			ddc_service->ctx->dc,
+			ddc_service->link->link_index,
+			&cmd))
+		result = num;
+
+	kfree(cmd.payloads);
+	return result;
+}
+
+
+
+The corrected function:
+static int amdgpu_dm_i2c_xfer(struct i2c_adapter *i2c_adap,
+			      struct i2c_msg *msgs, int num)
+{
+	struct amdgpu_i2c_adapter *i2c = i2c_get_adapdata(i2c_adap);
+	struct ddc_service *ddc_service = i2c->ddc_service;
+	struct i2c_command cmd;
+	int i;
+	int result = -EIO;
+
+	if (!ddc_service->ddc_pin || !ddc_service->ddc_pin->hw_info.hw_supported)
+		return result;
+
+	cmd.payloads = kcalloc(num, sizeof(struct i2c_payload), GFP_KERNEL);
+
+	if (!cmd.payloads)
+		return result;
+
+	cmd.number_of_payloads = num;
+	cmd.engine = I2C_COMMAND_ENGINE_DEFAULT;
+	cmd.speed = 100;
+
+	for (i = 0; i < num; i++) {
+		cmd.payloads[i].write = !(msgs[i].flags & I2C_M_RD);
+		cmd.payloads[i].address = msgs[i].addr;
+		cmd.payloads[i].length = msgs[i].len;
+		cmd.payloads[i].data = msgs[i].buf;
+	}
+
+	if (dc_submit_i2c(
+			ddc_service->ctx->dc,
+			ddc_service->link->link_index,
+			&cmd))
+		result = num;
+
+	kfree(cmd.payloads);
+	return result;
+}

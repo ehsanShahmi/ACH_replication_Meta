@@ -1,0 +1,189 @@
+The vulnerable issue:
+net: qlogic: qlcnic: Fix a NULL pointer dereference in qlcnic_83xx_add_rings()
+
+In qlcnic_83xx_add_rings(), the indirect function of
+ahw->hw_ops->alloc_mbx_args will be called to allocate memory for
+cmd.req.arg, and there is a dereference of it in qlcnic_83xx_add_rings(),
+which could lead to a NULL pointer dereference on failure of the
+indirect function like qlcnic_83xx_alloc_mbx_args().
+
+Fix this bug by adding a check of alloc_mbx_args(), this patch
+imitates the logic of mbx_cmd()'s failure handling.
+
+This bug was found by a static analyzer. The analysis employs
+differential checking to identify inconsistent security operations
+(e.g., checks or kfrees) between two code paths and confirms that the
+inconsistent operations are not recovered in the current function or
+the callers, so they constitute bugs.
+
+Note that, as a bug found by static analysis, it can be a false
+positive or hard to trigger. Multiple researchers have cross-reviewed
+the bug.
+
+Builds with CONFIG_QLCNIC=m show no new warnings, and our
+static analyzer no longer warns about this code.
+
+Fixes: 7f9664525f9c ("qlcnic: 83xx memory map and HW access routine")
+Signed-off-by: Zhou Qingyang <zhou1615@umn.edu>
+Link: https://lore.kernel.org/r/20211130110848.109026-1-zhou1615@umn.edu
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+
+
+The vulnerable function:
+static int qlcnic_83xx_add_rings(struct qlcnic_adapter *adapter)
+{
+	int index, i, err, sds_mbx_size;
+	u32 *buf, intrpt_id, intr_mask;
+	u16 context_id;
+	u8 num_sds;
+	struct qlcnic_cmd_args cmd;
+	struct qlcnic_host_sds_ring *sds;
+	struct qlcnic_sds_mbx sds_mbx;
+	struct qlcnic_add_rings_mbx_out *mbx_out;
+	struct qlcnic_recv_context *recv_ctx = adapter->recv_ctx;
+	struct qlcnic_hardware_context *ahw = adapter->ahw;
+
+	sds_mbx_size = sizeof(struct qlcnic_sds_mbx);
+	context_id = recv_ctx->context_id;
+	num_sds = adapter->drv_sds_rings - QLCNIC_MAX_SDS_RINGS;
+	ahw->hw_ops->alloc_mbx_args(&cmd, adapter,
+				    QLCNIC_CMD_ADD_RCV_RINGS);
+	cmd.req.arg[1] = 0 | (num_sds << 8) | (context_id << 16);
+
+	/* set up status rings, mbx 2-81 */
+	index = 2;
+	for (i = 8; i < adapter->drv_sds_rings; i++) {
+		memset(&sds_mbx, 0, sds_mbx_size);
+		sds = &recv_ctx->sds_rings[i];
+		sds->consumer = 0;
+		memset(sds->desc_head, 0, STATUS_DESC_RINGSIZE(sds));
+		sds_mbx.phy_addr_low = LSD(sds->phys_addr);
+		sds_mbx.phy_addr_high = MSD(sds->phys_addr);
+		sds_mbx.sds_ring_size = sds->num_desc;
+
+		if (adapter->flags & QLCNIC_MSIX_ENABLED)
+			intrpt_id = ahw->intr_tbl[i].id;
+		else
+			intrpt_id = QLCRDX(ahw, QLCNIC_DEF_INT_ID);
+
+		if (adapter->ahw->diag_test != QLCNIC_LOOPBACK_TEST)
+			sds_mbx.intrpt_id = intrpt_id;
+		else
+			sds_mbx.intrpt_id = 0xffff;
+		sds_mbx.intrpt_val = 0;
+		buf = &cmd.req.arg[index];
+		memcpy(buf, &sds_mbx, sds_mbx_size);
+		index += sds_mbx_size / sizeof(u32);
+	}
+
+	/* send the mailbox command */
+	err = ahw->hw_ops->mbx_cmd(adapter, &cmd);
+	if (err) {
+		dev_err(&adapter->pdev->dev,
+			"Failed to add rings %d\n", err);
+		goto out;
+	}
+
+	mbx_out = (struct qlcnic_add_rings_mbx_out *)&cmd.rsp.arg[1];
+	index = 0;
+	/* status descriptor ring */
+	for (i = 8; i < adapter->drv_sds_rings; i++) {
+		sds = &recv_ctx->sds_rings[i];
+		sds->crb_sts_consumer = ahw->pci_base0 +
+					mbx_out->host_csmr[index];
+		if (adapter->flags & QLCNIC_MSIX_ENABLED)
+			intr_mask = ahw->intr_tbl[i].src;
+		else
+			intr_mask = QLCRDX(ahw, QLCNIC_DEF_INT_MASK);
+
+		sds->crb_intr_mask = ahw->pci_base0 + intr_mask;
+		index++;
+	}
+out:
+	qlcnic_free_mbx_args(&cmd);
+	return err;
+}
+
+
+
+The corrected function:
+static int qlcnic_83xx_add_rings(struct qlcnic_adapter *adapter)
+{
+	int index, i, err, sds_mbx_size;
+	u32 *buf, intrpt_id, intr_mask;
+	u16 context_id;
+	u8 num_sds;
+	struct qlcnic_cmd_args cmd;
+	struct qlcnic_host_sds_ring *sds;
+	struct qlcnic_sds_mbx sds_mbx;
+	struct qlcnic_add_rings_mbx_out *mbx_out;
+	struct qlcnic_recv_context *recv_ctx = adapter->recv_ctx;
+	struct qlcnic_hardware_context *ahw = adapter->ahw;
+
+	sds_mbx_size = sizeof(struct qlcnic_sds_mbx);
+	context_id = recv_ctx->context_id;
+	num_sds = adapter->drv_sds_rings - QLCNIC_MAX_SDS_RINGS;
+	err = ahw->hw_ops->alloc_mbx_args(&cmd, adapter,
+					QLCNIC_CMD_ADD_RCV_RINGS);
+	if (err) {
+		dev_err(&adapter->pdev->dev,
+			"Failed to alloc mbx args %d\n", err);
+		return err;
+	}
+
+	cmd.req.arg[1] = 0 | (num_sds << 8) | (context_id << 16);
+
+	/* set up status rings, mbx 2-81 */
+	index = 2;
+	for (i = 8; i < adapter->drv_sds_rings; i++) {
+		memset(&sds_mbx, 0, sds_mbx_size);
+		sds = &recv_ctx->sds_rings[i];
+		sds->consumer = 0;
+		memset(sds->desc_head, 0, STATUS_DESC_RINGSIZE(sds));
+		sds_mbx.phy_addr_low = LSD(sds->phys_addr);
+		sds_mbx.phy_addr_high = MSD(sds->phys_addr);
+		sds_mbx.sds_ring_size = sds->num_desc;
+
+		if (adapter->flags & QLCNIC_MSIX_ENABLED)
+			intrpt_id = ahw->intr_tbl[i].id;
+		else
+			intrpt_id = QLCRDX(ahw, QLCNIC_DEF_INT_ID);
+
+		if (adapter->ahw->diag_test != QLCNIC_LOOPBACK_TEST)
+			sds_mbx.intrpt_id = intrpt_id;
+		else
+			sds_mbx.intrpt_id = 0xffff;
+		sds_mbx.intrpt_val = 0;
+		buf = &cmd.req.arg[index];
+		memcpy(buf, &sds_mbx, sds_mbx_size);
+		index += sds_mbx_size / sizeof(u32);
+	}
+
+	/* send the mailbox command */
+	err = ahw->hw_ops->mbx_cmd(adapter, &cmd);
+	if (err) {
+		dev_err(&adapter->pdev->dev,
+			"Failed to add rings %d\n", err);
+		goto out;
+	}
+
+	mbx_out = (struct qlcnic_add_rings_mbx_out *)&cmd.rsp.arg[1];
+	index = 0;
+	/* status descriptor ring */
+	for (i = 8; i < adapter->drv_sds_rings; i++) {
+		sds = &recv_ctx->sds_rings[i];
+		sds->crb_sts_consumer = ahw->pci_base0 +
+					mbx_out->host_csmr[index];
+		if (adapter->flags & QLCNIC_MSIX_ENABLED)
+			intr_mask = ahw->intr_tbl[i].src;
+		else
+			intr_mask = QLCRDX(ahw, QLCNIC_DEF_INT_MASK);
+
+		sds->crb_intr_mask = ahw->pci_base0 + intr_mask;
+		index++;
+	}
+out:
+	qlcnic_free_mbx_args(&cmd);
+	return err;
+}

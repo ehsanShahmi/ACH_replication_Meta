@@ -1,0 +1,117 @@
+The vulnerable issue:
+ptrace: ensure arch_ptrace/ptrace_request can never race with SIGKILL
+
+putreg() assumes that the tracee is not running and pt_regs_access() can
+safely play with its stack.  However a killed tracee can return from
+ptrace_stop() to the low-level asm code and do RESTORE_REST, this means
+that debugger can actually read/modify the kernel stack until the tracee
+does SAVE_REST again.
+
+set_task_blockstep() can race with SIGKILL too and in some sense this
+race is even worse, the very fact the tracee can be woken up breaks the
+logic.
+
+As Linus suggested we can clear TASK_WAKEKILL around the arch_ptrace()
+call, this ensures that nobody can ever wakeup the tracee while the
+debugger looks at it.  Not only this fixes the mentioned problems, we
+can do some cleanups/simplifications in arch_ptrace() paths.
+
+Probably ptrace_unfreeze_traced() needs more callers, for example it
+makes sense to make the tracee killable for oom-killer before
+access_process_vm().
+
+While at it, add the comment into may_ptrace_stop() to explain why
+ptrace_stop() still can't rely on SIGKILL and signal_pending_state().
+
+Reported-by: Salman Qazi <sqazi@google.com>
+Reported-by: Suleiman Souhlal <suleiman@google.com>
+Suggested-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Oleg Nesterov <oleg@redhat.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+asmlinkage long compat_sys_ptrace(compat_long_t request, compat_long_t pid,
+				  compat_long_t addr, compat_long_t data)
+{
+	struct task_struct *child;
+	long ret;
+
+	if (request == PTRACE_TRACEME) {
+		ret = ptrace_traceme();
+		goto out;
+	}
+
+	child = ptrace_get_task_struct(pid);
+	if (IS_ERR(child)) {
+		ret = PTR_ERR(child);
+		goto out;
+	}
+
+	if (request == PTRACE_ATTACH || request == PTRACE_SEIZE) {
+		ret = ptrace_attach(child, request, addr, data);
+		/*
+		 * Some architectures need to do book-keeping after
+		 * a ptrace attach.
+		 */
+		if (!ret)
+			arch_ptrace_attach(child);
+		goto out_put_task_struct;
+	}
+
+	ret = ptrace_check_attach(child, request == PTRACE_KILL ||
+				  request == PTRACE_INTERRUPT);
+	if (!ret)
+		ret = compat_arch_ptrace(child, request, addr, data);
+
+ out_put_task_struct:
+	put_task_struct(child);
+ out:
+	return ret;
+}
+
+
+
+The corrected function:
+asmlinkage long compat_sys_ptrace(compat_long_t request, compat_long_t pid,
+				  compat_long_t addr, compat_long_t data)
+{
+	struct task_struct *child;
+	long ret;
+
+	if (request == PTRACE_TRACEME) {
+		ret = ptrace_traceme();
+		goto out;
+	}
+
+	child = ptrace_get_task_struct(pid);
+	if (IS_ERR(child)) {
+		ret = PTR_ERR(child);
+		goto out;
+	}
+
+	if (request == PTRACE_ATTACH || request == PTRACE_SEIZE) {
+		ret = ptrace_attach(child, request, addr, data);
+		/*
+		 * Some architectures need to do book-keeping after
+		 * a ptrace attach.
+		 */
+		if (!ret)
+			arch_ptrace_attach(child);
+		goto out_put_task_struct;
+	}
+
+	ret = ptrace_check_attach(child, request == PTRACE_KILL ||
+				  request == PTRACE_INTERRUPT);
+	if (!ret) {
+		ret = compat_arch_ptrace(child, request, addr, data);
+		if (ret || request != PTRACE_DETACH)
+			ptrace_unfreeze_traced(child);
+	}
+
+ out_put_task_struct:
+	put_task_struct(child);
+ out:
+	return ret;
+}

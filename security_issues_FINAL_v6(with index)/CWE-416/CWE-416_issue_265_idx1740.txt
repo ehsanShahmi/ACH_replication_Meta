@@ -1,0 +1,303 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+btrfs: fix extent map use-after-free when adding pages to compressed bio
+
+At add_ra_bio_pages() we are accessing the extent map to calculate
+'add_size' after we dropped our reference on the extent map, resulting
+in a use-after-free. Fix this by computing 'add_size' before dropping our
+extent map reference.
+
+Reported-by: syzbot+853d80cba98ce1157ae6@syzkaller.appspotmail.com
+Link: https://lore.kernel.org/linux-btrfs/000000000000038144061c6d18f2@google.com/
+Fixes: 6a4049102055 ("btrfs: subpage: make add_ra_bio_pages() compatible")
+CC: stable@vger.kernel.org # 6.1+
+Signed-off-by: Filipe Manana <fdmanana@suse.com>
+Reviewed-by: David Sterba <dsterba@suse.com>
+Signed-off-by: David Sterba <dsterba@suse.com>
+
+
+
+The vulnerable function:
+static noinline int add_ra_bio_pages(struct inode *inode,
+				     u64 compressed_end,
+				     struct compressed_bio *cb,
+				     int *memstall, unsigned long *pflags)
+{
+	struct btrfs_fs_info *fs_info = inode_to_fs_info(inode);
+	unsigned long end_index;
+	struct bio *orig_bio = &cb->orig_bbio->bio;
+	u64 cur = cb->orig_bbio->file_offset + orig_bio->bi_iter.bi_size;
+	u64 isize = i_size_read(inode);
+	int ret;
+	struct page *page;
+	struct extent_map *em;
+	struct address_space *mapping = inode->i_mapping;
+	struct extent_map_tree *em_tree;
+	struct extent_io_tree *tree;
+	int sectors_missed = 0;
+
+	em_tree = &BTRFS_I(inode)->extent_tree;
+	tree = &BTRFS_I(inode)->io_tree;
+
+	if (isize == 0)
+		return 0;
+
+	/*
+	 * For current subpage support, we only support 64K page size,
+	 * which means maximum compressed extent size (128K) is just 2x page
+	 * size.
+	 * This makes readahead less effective, so here disable readahead for
+	 * subpage for now, until full compressed write is supported.
+	 */
+	if (fs_info->sectorsize < PAGE_SIZE)
+		return 0;
+
+	end_index = (i_size_read(inode) - 1) >> PAGE_SHIFT;
+
+	while (cur < compressed_end) {
+		u64 page_end;
+		u64 pg_index = cur >> PAGE_SHIFT;
+		u32 add_size;
+
+		if (pg_index > end_index)
+			break;
+
+		page = xa_load(&mapping->i_pages, pg_index);
+		if (page && !xa_is_value(page)) {
+			sectors_missed += (PAGE_SIZE - offset_in_page(cur)) >>
+					  fs_info->sectorsize_bits;
+
+			/* Beyond threshold, no need to continue */
+			if (sectors_missed > 4)
+				break;
+
+			/*
+			 * Jump to next page start as we already have page for
+			 * current offset.
+			 */
+			cur = (pg_index << PAGE_SHIFT) + PAGE_SIZE;
+			continue;
+		}
+
+		page = __page_cache_alloc(mapping_gfp_constraint(mapping,
+								 ~__GFP_FS));
+		if (!page)
+			break;
+
+		if (add_to_page_cache_lru(page, mapping, pg_index, GFP_NOFS)) {
+			put_page(page);
+			/* There is already a page, skip to page end */
+			cur = (pg_index << PAGE_SHIFT) + PAGE_SIZE;
+			continue;
+		}
+
+		if (!*memstall && PageWorkingset(page)) {
+			psi_memstall_enter(pflags);
+			*memstall = 1;
+		}
+
+		ret = set_page_extent_mapped(page);
+		if (ret < 0) {
+			unlock_page(page);
+			put_page(page);
+			break;
+		}
+
+		page_end = (pg_index << PAGE_SHIFT) + PAGE_SIZE - 1;
+		lock_extent(tree, cur, page_end, NULL);
+		read_lock(&em_tree->lock);
+		em = lookup_extent_mapping(em_tree, cur, page_end + 1 - cur);
+		read_unlock(&em_tree->lock);
+
+		/*
+		 * At this point, we have a locked page in the page cache for
+		 * these bytes in the file.  But, we have to make sure they map
+		 * to this compressed extent on disk.
+		 */
+		if (!em || cur < em->start ||
+		    (cur + fs_info->sectorsize > extent_map_end(em)) ||
+		    (extent_map_block_start(em) >> SECTOR_SHIFT) !=
+		    orig_bio->bi_iter.bi_sector) {
+			free_extent_map(em);
+			unlock_extent(tree, cur, page_end, NULL);
+			unlock_page(page);
+			put_page(page);
+			break;
+		}
+		free_extent_map(em);
+
+		if (page->index == end_index) {
+			size_t zero_offset = offset_in_page(isize);
+
+			if (zero_offset) {
+				int zeros;
+				zeros = PAGE_SIZE - zero_offset;
+				memzero_page(page, zero_offset, zeros);
+			}
+		}
+
+		add_size = min(em->start + em->len, page_end + 1) - cur;
+		ret = bio_add_page(orig_bio, page, add_size, offset_in_page(cur));
+		if (ret != add_size) {
+			unlock_extent(tree, cur, page_end, NULL);
+			unlock_page(page);
+			put_page(page);
+			break;
+		}
+		/*
+		 * If it's subpage, we also need to increase its
+		 * subpage::readers number, as at endio we will decrease
+		 * subpage::readers and to unlock the page.
+		 */
+		if (fs_info->sectorsize < PAGE_SIZE)
+			btrfs_subpage_start_reader(fs_info, page_folio(page),
+						   cur, add_size);
+		put_page(page);
+		cur += add_size;
+	}
+	return 0;
+}
+
+
+
+The corrected function:
+static noinline int add_ra_bio_pages(struct inode *inode,
+				     u64 compressed_end,
+				     struct compressed_bio *cb,
+				     int *memstall, unsigned long *pflags)
+{
+	struct btrfs_fs_info *fs_info = inode_to_fs_info(inode);
+	unsigned long end_index;
+	struct bio *orig_bio = &cb->orig_bbio->bio;
+	u64 cur = cb->orig_bbio->file_offset + orig_bio->bi_iter.bi_size;
+	u64 isize = i_size_read(inode);
+	int ret;
+	struct page *page;
+	struct extent_map *em;
+	struct address_space *mapping = inode->i_mapping;
+	struct extent_map_tree *em_tree;
+	struct extent_io_tree *tree;
+	int sectors_missed = 0;
+
+	em_tree = &BTRFS_I(inode)->extent_tree;
+	tree = &BTRFS_I(inode)->io_tree;
+
+	if (isize == 0)
+		return 0;
+
+	/*
+	 * For current subpage support, we only support 64K page size,
+	 * which means maximum compressed extent size (128K) is just 2x page
+	 * size.
+	 * This makes readahead less effective, so here disable readahead for
+	 * subpage for now, until full compressed write is supported.
+	 */
+	if (fs_info->sectorsize < PAGE_SIZE)
+		return 0;
+
+	end_index = (i_size_read(inode) - 1) >> PAGE_SHIFT;
+
+	while (cur < compressed_end) {
+		u64 page_end;
+		u64 pg_index = cur >> PAGE_SHIFT;
+		u32 add_size;
+
+		if (pg_index > end_index)
+			break;
+
+		page = xa_load(&mapping->i_pages, pg_index);
+		if (page && !xa_is_value(page)) {
+			sectors_missed += (PAGE_SIZE - offset_in_page(cur)) >>
+					  fs_info->sectorsize_bits;
+
+			/* Beyond threshold, no need to continue */
+			if (sectors_missed > 4)
+				break;
+
+			/*
+			 * Jump to next page start as we already have page for
+			 * current offset.
+			 */
+			cur = (pg_index << PAGE_SHIFT) + PAGE_SIZE;
+			continue;
+		}
+
+		page = __page_cache_alloc(mapping_gfp_constraint(mapping,
+								 ~__GFP_FS));
+		if (!page)
+			break;
+
+		if (add_to_page_cache_lru(page, mapping, pg_index, GFP_NOFS)) {
+			put_page(page);
+			/* There is already a page, skip to page end */
+			cur = (pg_index << PAGE_SHIFT) + PAGE_SIZE;
+			continue;
+		}
+
+		if (!*memstall && PageWorkingset(page)) {
+			psi_memstall_enter(pflags);
+			*memstall = 1;
+		}
+
+		ret = set_page_extent_mapped(page);
+		if (ret < 0) {
+			unlock_page(page);
+			put_page(page);
+			break;
+		}
+
+		page_end = (pg_index << PAGE_SHIFT) + PAGE_SIZE - 1;
+		lock_extent(tree, cur, page_end, NULL);
+		read_lock(&em_tree->lock);
+		em = lookup_extent_mapping(em_tree, cur, page_end + 1 - cur);
+		read_unlock(&em_tree->lock);
+
+		/*
+		 * At this point, we have a locked page in the page cache for
+		 * these bytes in the file.  But, we have to make sure they map
+		 * to this compressed extent on disk.
+		 */
+		if (!em || cur < em->start ||
+		    (cur + fs_info->sectorsize > extent_map_end(em)) ||
+		    (extent_map_block_start(em) >> SECTOR_SHIFT) !=
+		    orig_bio->bi_iter.bi_sector) {
+			free_extent_map(em);
+			unlock_extent(tree, cur, page_end, NULL);
+			unlock_page(page);
+			put_page(page);
+			break;
+		}
+		add_size = min(em->start + em->len, page_end + 1) - cur;
+		free_extent_map(em);
+
+		if (page->index == end_index) {
+			size_t zero_offset = offset_in_page(isize);
+
+			if (zero_offset) {
+				int zeros;
+				zeros = PAGE_SIZE - zero_offset;
+				memzero_page(page, zero_offset, zeros);
+			}
+		}
+
+		ret = bio_add_page(orig_bio, page, add_size, offset_in_page(cur));
+		if (ret != add_size) {
+			unlock_extent(tree, cur, page_end, NULL);
+			unlock_page(page);
+			put_page(page);
+			break;
+		}
+		/*
+		 * If it's subpage, we also need to increase its
+		 * subpage::readers number, as at endio we will decrease
+		 * subpage::readers and to unlock the page.
+		 */
+		if (fs_info->sectorsize < PAGE_SIZE)
+			btrfs_subpage_start_reader(fs_info, page_folio(page),
+						   cur, add_size);
+		put_page(page);
+		cur += add_size;
+	}
+	return 0;
+}

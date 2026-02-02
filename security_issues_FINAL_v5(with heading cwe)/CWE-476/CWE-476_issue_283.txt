@@ -1,0 +1,80 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+bonding: fix null pointer deref in bond_ipsec_offload_ok
+
+We must check if there is an active slave before dereferencing the pointer.
+
+Fixes: 18cb261afd7b ("bonding: support hardware encryption offload to slaves")
+Signed-off-by: Nikolay Aleksandrov <razor@blackwall.org>
+Reviewed-by: Hangbin Liu <liuhangbin@gmail.com>
+Reviewed-by: Eric Dumazet <edumazet@google.com>
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+
+
+
+The vulnerable function:
+static bool bond_ipsec_offload_ok(struct sk_buff *skb, struct xfrm_state *xs)
+{
+	struct net_device *bond_dev = xs->xso.dev;
+	struct net_device *real_dev;
+	struct slave *curr_active;
+	struct bonding *bond;
+	bool ok = false;
+
+	bond = netdev_priv(bond_dev);
+	rcu_read_lock();
+	curr_active = rcu_dereference(bond->curr_active_slave);
+	real_dev = curr_active->dev;
+
+	if (BOND_MODE(bond) != BOND_MODE_ACTIVEBACKUP)
+		goto out;
+
+	if (!xs->xso.real_dev)
+		goto out;
+
+	if (!real_dev->xfrmdev_ops ||
+	    !real_dev->xfrmdev_ops->xdo_dev_offload_ok ||
+	    netif_is_bond_master(real_dev))
+		goto out;
+
+	ok = real_dev->xfrmdev_ops->xdo_dev_offload_ok(skb, xs);
+out:
+	rcu_read_unlock();
+	return ok;
+}
+
+
+
+The corrected function:
+static bool bond_ipsec_offload_ok(struct sk_buff *skb, struct xfrm_state *xs)
+{
+	struct net_device *bond_dev = xs->xso.dev;
+	struct net_device *real_dev;
+	struct slave *curr_active;
+	struct bonding *bond;
+	bool ok = false;
+
+	bond = netdev_priv(bond_dev);
+	rcu_read_lock();
+	curr_active = rcu_dereference(bond->curr_active_slave);
+	if (!curr_active)
+		goto out;
+	real_dev = curr_active->dev;
+
+	if (BOND_MODE(bond) != BOND_MODE_ACTIVEBACKUP)
+		goto out;
+
+	if (!xs->xso.real_dev)
+		goto out;
+
+	if (!real_dev->xfrmdev_ops ||
+	    !real_dev->xfrmdev_ops->xdo_dev_offload_ok ||
+	    netif_is_bond_master(real_dev))
+		goto out;
+
+	ok = real_dev->xfrmdev_ops->xdo_dev_offload_ok(skb, xs);
+out:
+	rcu_read_unlock();
+	return ok;
+}

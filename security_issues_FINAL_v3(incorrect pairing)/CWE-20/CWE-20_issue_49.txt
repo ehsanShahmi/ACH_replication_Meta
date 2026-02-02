@@ -1,0 +1,339 @@
+The vulnerable issue:
+net: sctp: fix skb_over_panic when receiving malformed ASCONF chunks
+
+Commit 6f4c618ddb0 ("SCTP : Add paramters validity check for
+ASCONF chunk") added basic verification of ASCONF chunks, however,
+it is still possible to remotely crash a server by sending a
+special crafted ASCONF chunk, even up to pre 2.6.12 kernels:
+
+skb_over_panic: text:ffffffffa01ea1c3 len:31056 put:30768
+ head:ffff88011bd81800 data:ffff88011bd81800 tail:0x7950
+ end:0x440 dev:<NULL>
+ ------------[ cut here ]------------
+kernel BUG at net/core/skbuff.c:129!
+[...]
+Call Trace:
+ <IRQ>
+ [<ffffffff8144fb1c>] skb_put+0x5c/0x70
+ [<ffffffffa01ea1c3>] sctp_addto_chunk+0x63/0xd0 [sctp]
+ [<ffffffffa01eadaf>] sctp_process_asconf+0x1af/0x540 [sctp]
+ [<ffffffff8152d025>] ? _read_unlock_bh+0x15/0x20
+ [<ffffffffa01e0038>] sctp_sf_do_asconf+0x168/0x240 [sctp]
+ [<ffffffffa01e3751>] sctp_do_sm+0x71/0x1210 [sctp]
+ [<ffffffff8147645d>] ? fib_rules_lookup+0xad/0xf0
+ [<ffffffffa01e6b22>] ? sctp_cmp_addr_exact+0x32/0x40 [sctp]
+ [<ffffffffa01e8393>] sctp_assoc_bh_rcv+0xd3/0x180 [sctp]
+ [<ffffffffa01ee986>] sctp_inq_push+0x56/0x80 [sctp]
+ [<ffffffffa01fcc42>] sctp_rcv+0x982/0xa10 [sctp]
+ [<ffffffffa01d5123>] ? ipt_local_in_hook+0x23/0x28 [iptable_filter]
+ [<ffffffff8148bdc9>] ? nf_iterate+0x69/0xb0
+ [<ffffffff81496d10>] ? ip_local_deliver_finish+0x0/0x2d0
+ [<ffffffff8148bf86>] ? nf_hook_slow+0x76/0x120
+ [<ffffffff81496d10>] ? ip_local_deliver_finish+0x0/0x2d0
+ [<ffffffff81496ded>] ip_local_deliver_finish+0xdd/0x2d0
+ [<ffffffff81497078>] ip_local_deliver+0x98/0xa0
+ [<ffffffff8149653d>] ip_rcv_finish+0x12d/0x440
+ [<ffffffff81496ac5>] ip_rcv+0x275/0x350
+ [<ffffffff8145c88b>] __netif_receive_skb+0x4ab/0x750
+ [<ffffffff81460588>] netif_receive_skb+0x58/0x60
+
+This can be triggered e.g., through a simple scripted nmap
+connection scan injecting the chunk after the handshake, for
+example, ...
+
+  -------------- INIT[ASCONF; ASCONF_ACK] ------------->
+  <----------- INIT-ACK[ASCONF; ASCONF_ACK] ------------
+  -------------------- COOKIE-ECHO -------------------->
+  <-------------------- COOKIE-ACK ---------------------
+  ------------------ ASCONF; UNKNOWN ------------------>
+
+... where ASCONF chunk of length 280 contains 2 parameters ...
+
+  1) Add IP address parameter (param length: 16)
+  2) Add/del IP address parameter (param length: 255)
+
+... followed by an UNKNOWN chunk of e.g. 4 bytes. Here, the
+Address Parameter in the ASCONF chunk is even missing, too.
+This is just an example and similarly-crafted ASCONF chunks
+could be used just as well.
+
+The ASCONF chunk passes through sctp_verify_asconf() as all
+parameters passed sanity checks, and after walking, we ended
+up successfully at the chunk end boundary, and thus may invoke
+sctp_process_asconf(). Parameter walking is done with
+WORD_ROUND() to take padding into account.
+
+In sctp_process_asconf()'s TLV processing, we may fail in
+sctp_process_asconf_param() e.g., due to removal of the IP
+address that is also the source address of the packet containing
+the ASCONF chunk, and thus we need to add all TLVs after the
+failure to our ASCONF response to remote via helper function
+sctp_add_asconf_response(), which basically invokes a
+sctp_addto_chunk() adding the error parameters to the given
+skb.
+
+When walking to the next parameter this time, we proceed
+with ...
+
+  length = ntohs(asconf_param->param_hdr.length);
+  asconf_param = (void *)asconf_param + length;
+
+... instead of the WORD_ROUND()'ed length, thus resulting here
+in an off-by-one that leads to reading the follow-up garbage
+parameter length of 12336, and thus throwing an skb_over_panic
+for the reply when trying to sctp_addto_chunk() next time,
+which implicitly calls the skb_put() with that length.
+
+Fix it by using sctp_walk_params() [ which is also used in
+INIT parameter processing ] macro in the verification *and*
+in ASCONF processing: it will make sure we don't spill over,
+that we walk parameters WORD_ROUND()'ed. Moreover, we're being
+more defensive and guard against unknown parameter types and
+missized addresses.
+
+Joint work with Vlad Yasevich.
+
+Fixes: b896b82be4ae ("[SCTP] ADDIP: Support for processing incoming ASCONF_ACK chunks.")
+Signed-off-by: Daniel Borkmann <dborkman@redhat.com>
+Signed-off-by: Vlad Yasevich <vyasevich@gmail.com>
+Acked-by: Neil Horman <nhorman@tuxdriver.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+sctp_disposition_t sctp_sf_do_asconf(struct net *net,
+				     const struct sctp_endpoint *ep,
+				     const struct sctp_association *asoc,
+				     const sctp_subtype_t type, void *arg,
+				     sctp_cmd_seq_t *commands)
+{
+	struct sctp_chunk	*chunk = arg;
+	struct sctp_chunk	*asconf_ack = NULL;
+	struct sctp_paramhdr	*err_param = NULL;
+	sctp_addiphdr_t		*hdr;
+	union sctp_addr_param	*addr_param;
+	__u32			serial;
+	int			length;
+
+	if (!sctp_vtag_verify(chunk, asoc)) {
+		sctp_add_cmd_sf(commands, SCTP_CMD_REPORT_BAD_TAG,
+				SCTP_NULL());
+		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
+	}
+
+	/* ADD-IP: Section 4.1.1
+	 * This chunk MUST be sent in an authenticated way by using
+	 * the mechanism defined in [I-D.ietf-tsvwg-sctp-auth]. If this chunk
+	 * is received unauthenticated it MUST be silently discarded as
+	 * described in [I-D.ietf-tsvwg-sctp-auth].
+	 */
+	if (!net->sctp.addip_noauth && !chunk->auth)
+		return sctp_sf_discard_chunk(net, ep, asoc, type, arg, commands);
+
+	/* Make sure that the ASCONF ADDIP chunk has a valid length.  */
+	if (!sctp_chunk_length_valid(chunk, sizeof(sctp_addip_chunk_t)))
+		return sctp_sf_violation_chunklen(net, ep, asoc, type, arg,
+						  commands);
+
+	hdr = (sctp_addiphdr_t *)chunk->skb->data;
+	serial = ntohl(hdr->serial);
+
+	addr_param = (union sctp_addr_param *)hdr->params;
+	length = ntohs(addr_param->p.length);
+	if (length < sizeof(sctp_paramhdr_t))
+		return sctp_sf_violation_paramlen(net, ep, asoc, type, arg,
+			   (void *)addr_param, commands);
+
+	/* Verify the ASCONF chunk before processing it. */
+	if (!sctp_verify_asconf(asoc,
+			    (sctp_paramhdr_t *)((void *)addr_param + length),
+			    (void *)chunk->chunk_end,
+			    &err_param))
+		return sctp_sf_violation_paramlen(net, ep, asoc, type, arg,
+						  (void *)err_param, commands);
+
+	/* ADDIP 5.2 E1) Compare the value of the serial number to the value
+	 * the endpoint stored in a new association variable
+	 * 'Peer-Serial-Number'.
+	 */
+	if (serial == asoc->peer.addip_serial + 1) {
+		/* If this is the first instance of ASCONF in the packet,
+		 * we can clean our old ASCONF-ACKs.
+		 */
+		if (!chunk->has_asconf)
+			sctp_assoc_clean_asconf_ack_cache(asoc);
+
+		/* ADDIP 5.2 E4) When the Sequence Number matches the next one
+		 * expected, process the ASCONF as described below and after
+		 * processing the ASCONF Chunk, append an ASCONF-ACK Chunk to
+		 * the response packet and cache a copy of it (in the event it
+		 * later needs to be retransmitted).
+		 *
+		 * Essentially, do V1-V5.
+		 */
+		asconf_ack = sctp_process_asconf((struct sctp_association *)
+						 asoc, chunk);
+		if (!asconf_ack)
+			return SCTP_DISPOSITION_NOMEM;
+	} else if (serial < asoc->peer.addip_serial + 1) {
+		/* ADDIP 5.2 E2)
+		 * If the value found in the Sequence Number is less than the
+		 * ('Peer- Sequence-Number' + 1), simply skip to the next
+		 * ASCONF, and include in the outbound response packet
+		 * any previously cached ASCONF-ACK response that was
+		 * sent and saved that matches the Sequence Number of the
+		 * ASCONF.  Note: It is possible that no cached ASCONF-ACK
+		 * Chunk exists.  This will occur when an older ASCONF
+		 * arrives out of order.  In such a case, the receiver
+		 * should skip the ASCONF Chunk and not include ASCONF-ACK
+		 * Chunk for that chunk.
+		 */
+		asconf_ack = sctp_assoc_lookup_asconf_ack(asoc, hdr->serial);
+		if (!asconf_ack)
+			return SCTP_DISPOSITION_DISCARD;
+
+		/* Reset the transport so that we select the correct one
+		 * this time around.  This is to make sure that we don't
+		 * accidentally use a stale transport that's been removed.
+		 */
+		asconf_ack->transport = NULL;
+	} else {
+		/* ADDIP 5.2 E5) Otherwise, the ASCONF Chunk is discarded since
+		 * it must be either a stale packet or from an attacker.
+		 */
+		return SCTP_DISPOSITION_DISCARD;
+	}
+
+	/* ADDIP 5.2 E6)  The destination address of the SCTP packet
+	 * containing the ASCONF-ACK Chunks MUST be the source address of
+	 * the SCTP packet that held the ASCONF Chunks.
+	 *
+	 * To do this properly, we'll set the destination address of the chunk
+	 * and at the transmit time, will try look up the transport to use.
+	 * Since ASCONFs may be bundled, the correct transport may not be
+	 * created until we process the entire packet, thus this workaround.
+	 */
+	asconf_ack->dest = chunk->source;
+	sctp_add_cmd_sf(commands, SCTP_CMD_REPLY, SCTP_CHUNK(asconf_ack));
+	if (asoc->new_transport) {
+		sctp_sf_heartbeat(ep, asoc, type, asoc->new_transport, commands);
+		((struct sctp_association *)asoc)->new_transport = NULL;
+	}
+
+	return SCTP_DISPOSITION_CONSUME;
+}
+
+
+
+The corrected function:
+sctp_disposition_t sctp_sf_do_asconf(struct net *net,
+				     const struct sctp_endpoint *ep,
+				     const struct sctp_association *asoc,
+				     const sctp_subtype_t type, void *arg,
+				     sctp_cmd_seq_t *commands)
+{
+	struct sctp_chunk	*chunk = arg;
+	struct sctp_chunk	*asconf_ack = NULL;
+	struct sctp_paramhdr	*err_param = NULL;
+	sctp_addiphdr_t		*hdr;
+	__u32			serial;
+
+	if (!sctp_vtag_verify(chunk, asoc)) {
+		sctp_add_cmd_sf(commands, SCTP_CMD_REPORT_BAD_TAG,
+				SCTP_NULL());
+		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
+	}
+
+	/* ADD-IP: Section 4.1.1
+	 * This chunk MUST be sent in an authenticated way by using
+	 * the mechanism defined in [I-D.ietf-tsvwg-sctp-auth]. If this chunk
+	 * is received unauthenticated it MUST be silently discarded as
+	 * described in [I-D.ietf-tsvwg-sctp-auth].
+	 */
+	if (!net->sctp.addip_noauth && !chunk->auth)
+		return sctp_sf_discard_chunk(net, ep, asoc, type, arg, commands);
+
+	/* Make sure that the ASCONF ADDIP chunk has a valid length.  */
+	if (!sctp_chunk_length_valid(chunk, sizeof(sctp_addip_chunk_t)))
+		return sctp_sf_violation_chunklen(net, ep, asoc, type, arg,
+						  commands);
+
+	hdr = (sctp_addiphdr_t *)chunk->skb->data;
+	serial = ntohl(hdr->serial);
+
+	/* Verify the ASCONF chunk before processing it. */
+	if (!sctp_verify_asconf(asoc, chunk, true, &err_param))
+		return sctp_sf_violation_paramlen(net, ep, asoc, type, arg,
+						  (void *)err_param, commands);
+
+	/* ADDIP 5.2 E1) Compare the value of the serial number to the value
+	 * the endpoint stored in a new association variable
+	 * 'Peer-Serial-Number'.
+	 */
+	if (serial == asoc->peer.addip_serial + 1) {
+		/* If this is the first instance of ASCONF in the packet,
+		 * we can clean our old ASCONF-ACKs.
+		 */
+		if (!chunk->has_asconf)
+			sctp_assoc_clean_asconf_ack_cache(asoc);
+
+		/* ADDIP 5.2 E4) When the Sequence Number matches the next one
+		 * expected, process the ASCONF as described below and after
+		 * processing the ASCONF Chunk, append an ASCONF-ACK Chunk to
+		 * the response packet and cache a copy of it (in the event it
+		 * later needs to be retransmitted).
+		 *
+		 * Essentially, do V1-V5.
+		 */
+		asconf_ack = sctp_process_asconf((struct sctp_association *)
+						 asoc, chunk);
+		if (!asconf_ack)
+			return SCTP_DISPOSITION_NOMEM;
+	} else if (serial < asoc->peer.addip_serial + 1) {
+		/* ADDIP 5.2 E2)
+		 * If the value found in the Sequence Number is less than the
+		 * ('Peer- Sequence-Number' + 1), simply skip to the next
+		 * ASCONF, and include in the outbound response packet
+		 * any previously cached ASCONF-ACK response that was
+		 * sent and saved that matches the Sequence Number of the
+		 * ASCONF.  Note: It is possible that no cached ASCONF-ACK
+		 * Chunk exists.  This will occur when an older ASCONF
+		 * arrives out of order.  In such a case, the receiver
+		 * should skip the ASCONF Chunk and not include ASCONF-ACK
+		 * Chunk for that chunk.
+		 */
+		asconf_ack = sctp_assoc_lookup_asconf_ack(asoc, hdr->serial);
+		if (!asconf_ack)
+			return SCTP_DISPOSITION_DISCARD;
+
+		/* Reset the transport so that we select the correct one
+		 * this time around.  This is to make sure that we don't
+		 * accidentally use a stale transport that's been removed.
+		 */
+		asconf_ack->transport = NULL;
+	} else {
+		/* ADDIP 5.2 E5) Otherwise, the ASCONF Chunk is discarded since
+		 * it must be either a stale packet or from an attacker.
+		 */
+		return SCTP_DISPOSITION_DISCARD;
+	}
+
+	/* ADDIP 5.2 E6)  The destination address of the SCTP packet
+	 * containing the ASCONF-ACK Chunks MUST be the source address of
+	 * the SCTP packet that held the ASCONF Chunks.
+	 *
+	 * To do this properly, we'll set the destination address of the chunk
+	 * and at the transmit time, will try look up the transport to use.
+	 * Since ASCONFs may be bundled, the correct transport may not be
+	 * created until we process the entire packet, thus this workaround.
+	 */
+	asconf_ack->dest = chunk->source;
+	sctp_add_cmd_sf(commands, SCTP_CMD_REPLY, SCTP_CHUNK(asconf_ack));
+	if (asoc->new_transport) {
+		sctp_sf_heartbeat(ep, asoc, type, asoc->new_transport, commands);
+		((struct sctp_association *)asoc)->new_transport = NULL;
+	}
+
+	return SCTP_DISPOSITION_CONSUME;
+}

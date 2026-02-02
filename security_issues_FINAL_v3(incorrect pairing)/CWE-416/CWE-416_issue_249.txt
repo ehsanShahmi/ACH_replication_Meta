@@ -1,0 +1,82 @@
+The vulnerable issue:
+drm/i915: Introduce a mutex for file_priv->context_idr
+
+Define a mutex for the exclusive use of interacting with the per-file
+context-idr, that was previously guarded by struct_mutex. This allows us
+to reduce the coverage of struct_mutex, with a view to removing the last
+bits coordinating GEM context later. (In the short term, we avoid taking
+struct_mutex while using the extended constructor functions, preventing
+some nasty recursion.)
+
+v2: s/context_lock/context_idr_lock/
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190321140711.11190-2-chris@chris-wilson.co.uk
+
+
+
+The vulnerable function:
+int i915_gem_context_destroy_ioctl(struct drm_device *dev, void *data,
+				   struct drm_file *file)
+{
+	struct drm_i915_gem_context_destroy *args = data;
+	struct drm_i915_file_private *file_priv = file->driver_priv;
+	struct i915_gem_context *ctx;
+	int ret;
+
+	if (args->pad != 0)
+		return -EINVAL;
+
+	if (args->ctx_id == DEFAULT_CONTEXT_HANDLE)
+		return -ENOENT;
+
+	ctx = i915_gem_context_lookup(file_priv, args->ctx_id);
+	if (!ctx)
+		return -ENOENT;
+
+	ret = mutex_lock_interruptible(&dev->struct_mutex);
+	if (ret)
+		goto out;
+
+	idr_remove(&file_priv->context_idr, ctx->user_handle);
+	context_close(ctx);
+
+	mutex_unlock(&dev->struct_mutex);
+
+out:
+	i915_gem_context_put(ctx);
+	return 0;
+}
+
+
+
+The corrected function:
+int i915_gem_context_destroy_ioctl(struct drm_device *dev, void *data,
+				   struct drm_file *file)
+{
+	struct drm_i915_gem_context_destroy *args = data;
+	struct drm_i915_file_private *file_priv = file->driver_priv;
+	struct i915_gem_context *ctx;
+
+	if (args->pad != 0)
+		return -EINVAL;
+
+	if (args->ctx_id == DEFAULT_CONTEXT_HANDLE)
+		return -ENOENT;
+
+	if (mutex_lock_interruptible(&file_priv->context_idr_lock))
+		return -EINTR;
+
+	ctx = idr_remove(&file_priv->context_idr, args->ctx_id);
+	mutex_unlock(&file_priv->context_idr_lock);
+	if (!ctx)
+		return -ENOENT;
+
+	mutex_lock(&dev->struct_mutex);
+	context_close(ctx);
+	mutex_unlock(&dev->struct_mutex);
+
+	return 0;
+}

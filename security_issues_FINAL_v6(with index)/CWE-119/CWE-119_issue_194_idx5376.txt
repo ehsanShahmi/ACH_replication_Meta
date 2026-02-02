@@ -1,0 +1,58 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+ieee802154: atusb: do not use the stack for buffers to make them DMA able
+
+From 4.9 we should really avoid using the stack here as this will not be DMA
+able on various platforms. This changes the buffers already being present in
+time of 4.9 being released. This should go into stable as well.
+
+Reported-by: Dan Carpenter <dan.carpenter@oracle.com>
+Cc: stable@vger.kernel.org
+Signed-off-by: Stefan Schmidt <stefan@osg.samsung.com>
+Signed-off-by: Marcel Holtmann <marcel@holtmann.org>
+
+
+
+The vulnerable function:
+static int atusb_get_and_show_build(struct atusb *atusb)
+{
+	struct usb_device *usb_dev = atusb->usb_dev;
+	char build[ATUSB_BUILD_SIZE + 1];
+	int ret;
+
+	ret = atusb_control_msg(atusb, usb_rcvctrlpipe(usb_dev, 0),
+				ATUSB_BUILD, ATUSB_REQ_FROM_DEV, 0, 0,
+				build, ATUSB_BUILD_SIZE, 1000);
+	if (ret >= 0) {
+		build[ret] = 0;
+		dev_info(&usb_dev->dev, "Firmware: build %s\n", build);
+	}
+
+	return ret;
+}
+
+
+
+The corrected function:
+static int atusb_get_and_show_build(struct atusb *atusb)
+{
+	struct usb_device *usb_dev = atusb->usb_dev;
+	char *build;
+	int ret;
+
+	build = kmalloc(ATUSB_BUILD_SIZE + 1, GFP_KERNEL);
+	if (!build)
+		return -ENOMEM;
+
+	ret = atusb_control_msg(atusb, usb_rcvctrlpipe(usb_dev, 0),
+				ATUSB_BUILD, ATUSB_REQ_FROM_DEV, 0, 0,
+				build, ATUSB_BUILD_SIZE, 1000);
+	if (ret >= 0) {
+		build[ret] = 0;
+		dev_info(&usb_dev->dev, "Firmware: build %s\n", build);
+	}
+
+	kfree(build);
+	return ret;
+}

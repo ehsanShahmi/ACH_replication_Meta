@@ -1,0 +1,94 @@
+This issue file has CWE-22. Your task is to create this CWE-22 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+scsi: target: Fix XCOPY NAA identifier lookup
+
+When attempting to match EXTENDED COPY CSCD descriptors with corresponding
+se_devices, target_xcopy_locate_se_dev_e4() currently iterates over LIO's
+global devices list which includes all configured backstores.
+
+This change ensures that only initiator-accessible backstores are
+considered during CSCD descriptor lookup, according to the session's
+se_node_acl LUN list.
+
+To avoid LUN removal race conditions, device pinning is changed from being
+configfs based to instead using the se_node_acl lun_ref.
+
+Reference: CVE-2020-28374
+Fixes: cbf031f425fd ("target: Add support for EXTENDED_COPY copy offload emulation")
+Reviewed-by: Lee Duncan <lduncan@suse.com>
+Signed-off-by: David Disseldorp <ddiss@suse.de>
+Signed-off-by: Mike Christie <michael.christie@oracle.com>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+
+
+The vulnerable function:
+static int target_xcopy_locate_se_dev_e4(const unsigned char *dev_wwn,
+					struct se_device **found_dev)
+{
+	struct xcopy_dev_search_info info;
+	int ret;
+
+	memset(&info, 0, sizeof(info));
+	info.dev_wwn = dev_wwn;
+
+	ret = target_for_each_device(target_xcopy_locate_se_dev_e4_iter, &info);
+	if (ret == 1) {
+		*found_dev = info.found_dev;
+		return 0;
+	} else {
+		pr_debug_ratelimited("Unable to locate 0xe4 descriptor for EXTENDED_COPY\n");
+		return -EINVAL;
+	}
+}
+
+
+
+The corrected function:
+static int target_xcopy_locate_se_dev_e4(struct se_session *sess,
+					const unsigned char *dev_wwn,
+					struct se_device **_found_dev,
+					struct percpu_ref **_found_lun_ref)
+{
+	struct se_dev_entry *deve;
+	struct se_node_acl *nacl;
+	struct se_lun *this_lun = NULL;
+	struct se_device *found_dev = NULL;
+
+	/* cmd with NULL sess indicates no associated $FABRIC_MOD */
+	if (!sess)
+		goto err_out;
+
+	pr_debug("XCOPY 0xe4: searching for: %*ph\n",
+		 XCOPY_NAA_IEEE_REGEX_LEN, dev_wwn);
+
+	nacl = sess->se_node_acl;
+	rcu_read_lock();
+	hlist_for_each_entry_rcu(deve, &nacl->lun_entry_hlist, link) {
+		struct se_device *this_dev;
+		int rc;
+
+		this_lun = rcu_dereference(deve->se_lun);
+		this_dev = rcu_dereference_raw(this_lun->lun_se_dev);
+
+		rc = target_xcopy_locate_se_dev_e4_iter(this_dev, dev_wwn);
+		if (rc) {
+			if (percpu_ref_tryget_live(&this_lun->lun_ref))
+				found_dev = this_dev;
+			break;
+		}
+	}
+	rcu_read_unlock();
+	if (found_dev == NULL)
+		goto err_out;
+
+	pr_debug("lun_ref held for se_dev: %p se_dev->se_dev_group: %p\n",
+		 found_dev, &found_dev->dev_group);
+	*_found_dev = found_dev;
+	*_found_lun_ref = &this_lun->lun_ref;
+	return 0;
+err_out:
+	pr_debug_ratelimited("Unable to locate 0xe4 descriptor for EXTENDED_COPY\n");
+	return -EINVAL;
+}

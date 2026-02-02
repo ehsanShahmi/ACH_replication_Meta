@@ -1,0 +1,106 @@
+This issue file has CWE-190. Your task is to create this CWE-190 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+usb: gadget: rndis: prevent integer overflow in rndis_set_response()
+
+If "BufOffset" is very large the "BufOffset + 8" operation can have an
+integer overflow.
+
+Cc: stable@kernel.org
+Fixes: 38ea1eac7d88 ("usb: gadget: rndis: check size of RNDIS_MSG_SET command")
+Signed-off-by: Dan Carpenter <dan.carpenter@oracle.com>
+Link: https://lore.kernel.org/r/20220301080424.GA17208@kili
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+
+
+The vulnerable function:
+static int rndis_set_response(struct rndis_params *params,
+			      rndis_set_msg_type *buf)
+{
+	u32 BufLength, BufOffset;
+	rndis_set_cmplt_type *resp;
+	rndis_resp_t *r;
+
+	BufLength = le32_to_cpu(buf->InformationBufferLength);
+	BufOffset = le32_to_cpu(buf->InformationBufferOffset);
+	if ((BufLength > RNDIS_MAX_TOTAL_SIZE) ||
+	    (BufOffset + 8 >= RNDIS_MAX_TOTAL_SIZE))
+		    return -EINVAL;
+
+	r = rndis_add_response(params, sizeof(rndis_set_cmplt_type));
+	if (!r)
+		return -ENOMEM;
+	resp = (rndis_set_cmplt_type *)r->buf;
+
+// #ifdef	VERBOSE_DEBUG
+	pr_debug("%s: Length: %d\n", __func__, BufLength);
+	pr_debug("%s: Offset: %d\n", __func__, BufOffset);
+	pr_debug("%s: InfoBuffer: ", __func__);
+
+	for (i = 0; i < BufLength; i++) {
+		pr_debug("%02x ", *(((u8 *) buf) + i + 8 + BufOffset));
+	}
+
+	pr_debug("\n");
+#endif
+
+	resp->MessageType = cpu_to_le32(RNDIS_MSG_SET_C);
+	resp->MessageLength = cpu_to_le32(16);
+	resp->RequestID = buf->RequestID; /* Still LE in msg buffer */
+	if (gen_ndis_set_resp(params, le32_to_cpu(buf->OID),
+			((u8 *)buf) + 8 + BufOffset, BufLength, r))
+		resp->Status = cpu_to_le32(RNDIS_STATUS_NOT_SUPPORTED);
+	else
+		resp->Status = cpu_to_le32(RNDIS_STATUS_SUCCESS);
+
+	params->resp_avail(params->v);
+	return 0;
+}
+
+
+
+The corrected function:
+static int rndis_set_response(struct rndis_params *params,
+			      rndis_set_msg_type *buf)
+{
+	u32 BufLength, BufOffset;
+	rndis_set_cmplt_type *resp;
+	rndis_resp_t *r;
+
+	BufLength = le32_to_cpu(buf->InformationBufferLength);
+	BufOffset = le32_to_cpu(buf->InformationBufferOffset);
+	if ((BufLength > RNDIS_MAX_TOTAL_SIZE) ||
+	    (BufOffset > RNDIS_MAX_TOTAL_SIZE) ||
+	    (BufOffset + 8 >= RNDIS_MAX_TOTAL_SIZE))
+		    return -EINVAL;
+
+	r = rndis_add_response(params, sizeof(rndis_set_cmplt_type));
+	if (!r)
+		return -ENOMEM;
+	resp = (rndis_set_cmplt_type *)r->buf;
+
+// #ifdef	VERBOSE_DEBUG
+	pr_debug("%s: Length: %d\n", __func__, BufLength);
+	pr_debug("%s: Offset: %d\n", __func__, BufOffset);
+	pr_debug("%s: InfoBuffer: ", __func__);
+
+	for (i = 0; i < BufLength; i++) {
+		pr_debug("%02x ", *(((u8 *) buf) + i + 8 + BufOffset));
+	}
+
+	pr_debug("\n");
+#endif
+
+	resp->MessageType = cpu_to_le32(RNDIS_MSG_SET_C);
+	resp->MessageLength = cpu_to_le32(16);
+	resp->RequestID = buf->RequestID; /* Still LE in msg buffer */
+	if (gen_ndis_set_resp(params, le32_to_cpu(buf->OID),
+			((u8 *)buf) + 8 + BufOffset, BufLength, r))
+		resp->Status = cpu_to_le32(RNDIS_STATUS_NOT_SUPPORTED);
+	else
+		resp->Status = cpu_to_le32(RNDIS_STATUS_SUCCESS);
+
+	params->resp_avail(params->v);
+	return 0;
+}

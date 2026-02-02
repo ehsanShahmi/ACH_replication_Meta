@@ -1,0 +1,67 @@
+The vulnerable issue:
+inet: add RCU protection to inet->opt
+
+We lack proper synchronization to manipulate inet->opt ip_options
+
+Problem is ip_make_skb() calls ip_setup_cork() and
+ip_setup_cork() possibly makes a copy of ipc->opt (struct ip_options),
+without any protection against another thread manipulating inet->opt.
+
+Another thread can change inet->opt pointer and free old one under us.
+
+Use RCU to protect inet->opt (changed to inet->inet_opt).
+
+Instead of handling atomic refcounts, just copy ip_options when
+necessary, to avoid cache line dirtying.
+
+We cant insert an rcu_head in struct ip_options since its included in
+skb->cb[], so this patch is large because I had to introduce a new
+ip_options_rcu structure.
+
+Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+Cc: Herbert Xu <herbert@gondor.apana.org.au>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+void cipso_v4_sock_delattr(struct sock *sk)
+{
+	int hdr_delta;
+	struct ip_options *opt;
+	struct inet_sock *sk_inet;
+
+	sk_inet = inet_sk(sk);
+	opt = sk_inet->opt;
+	if (opt == NULL || opt->cipso == 0)
+		return;
+
+	hdr_delta = cipso_v4_delopt(&sk_inet->opt);
+	if (sk_inet->is_icsk && hdr_delta > 0) {
+		struct inet_connection_sock *sk_conn = inet_csk(sk);
+		sk_conn->icsk_ext_hdr_len -= hdr_delta;
+		sk_conn->icsk_sync_mss(sk, sk_conn->icsk_pmtu_cookie);
+	}
+}
+
+
+
+The corrected function:
+void cipso_v4_sock_delattr(struct sock *sk)
+{
+	int hdr_delta;
+	struct ip_options_rcu *opt;
+	struct inet_sock *sk_inet;
+
+	sk_inet = inet_sk(sk);
+	opt = rcu_dereference_protected(sk_inet->inet_opt, 1);
+	if (opt == NULL || opt->opt.cipso == 0)
+		return;
+
+	hdr_delta = cipso_v4_delopt(&sk_inet->inet_opt);
+	if (sk_inet->is_icsk && hdr_delta > 0) {
+		struct inet_connection_sock *sk_conn = inet_csk(sk);
+		sk_conn->icsk_ext_hdr_len -= hdr_delta;
+		sk_conn->icsk_sync_mss(sk, sk_conn->icsk_pmtu_cookie);
+	}
+}

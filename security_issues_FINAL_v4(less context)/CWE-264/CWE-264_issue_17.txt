@@ -1,0 +1,91 @@
+The vulnerable issue:
+ARM: 7735/2: Preserve the user r/w register TPIDRURW on context switch and fork
+
+Since commit 6a1c53124aa1 the user writeable TLS register was zeroed to
+prevent it from being used as a covert channel between two tasks.
+
+There are more and more applications coming to Windows RT,
+Wine could support them, but mostly they expect to have
+the thread environment block (TEB) in TPIDRURW.
+
+This patch preserves that register per thread instead of clearing it.
+Unlike the TPIDRURO, which is already switched, the TPIDRURW
+can be updated from userspace so needs careful treatment in the case that we
+modify TPIDRURW and call fork(). To avoid this we must always read
+TPIDRURW in copy_thread.
+
+Signed-off-by: André Hentschel <nerv@dawncrow.de>
+Signed-off-by: Will Deacon <will.deacon@arm.com>
+Signed-off-by: Jonathan Austin <jonathan.austin@arm.com>
+Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>
+
+
+
+The vulnerable function:
+copy_thread(unsigned long clone_flags, unsigned long stack_start,
+	    unsigned long stk_sz, struct task_struct *p)
+{
+	struct thread_info *thread = task_thread_info(p);
+	struct pt_regs *childregs = task_pt_regs(p);
+
+	memset(&thread->cpu_context, 0, sizeof(struct cpu_context_save));
+
+	if (likely(!(p->flags & PF_KTHREAD))) {
+		*childregs = *current_pt_regs();
+		childregs->ARM_r0 = 0;
+		if (stack_start)
+			childregs->ARM_sp = stack_start;
+	} else {
+		memset(childregs, 0, sizeof(struct pt_regs));
+		thread->cpu_context.r4 = stk_sz;
+		thread->cpu_context.r5 = stack_start;
+		childregs->ARM_cpsr = SVC_MODE;
+	}
+	thread->cpu_context.pc = (unsigned long)ret_from_fork;
+	thread->cpu_context.sp = (unsigned long)childregs;
+
+	clear_ptrace_hw_breakpoint(p);
+
+	if (clone_flags & CLONE_SETTLS)
+		thread->tp_value = childregs->ARM_r3;
+
+	thread_notify(THREAD_NOTIFY_COPY, thread);
+
+	return 0;
+}
+
+
+
+The corrected function:
+copy_thread(unsigned long clone_flags, unsigned long stack_start,
+	    unsigned long stk_sz, struct task_struct *p)
+{
+	struct thread_info *thread = task_thread_info(p);
+	struct pt_regs *childregs = task_pt_regs(p);
+
+	memset(&thread->cpu_context, 0, sizeof(struct cpu_context_save));
+
+	if (likely(!(p->flags & PF_KTHREAD))) {
+		*childregs = *current_pt_regs();
+		childregs->ARM_r0 = 0;
+		if (stack_start)
+			childregs->ARM_sp = stack_start;
+	} else {
+		memset(childregs, 0, sizeof(struct pt_regs));
+		thread->cpu_context.r4 = stk_sz;
+		thread->cpu_context.r5 = stack_start;
+		childregs->ARM_cpsr = SVC_MODE;
+	}
+	thread->cpu_context.pc = (unsigned long)ret_from_fork;
+	thread->cpu_context.sp = (unsigned long)childregs;
+
+	clear_ptrace_hw_breakpoint(p);
+
+	if (clone_flags & CLONE_SETTLS)
+		thread->tp_value[0] = childregs->ARM_r3;
+	thread->tp_value[1] = get_tpuser();
+
+	thread_notify(THREAD_NOTIFY_COPY, thread);
+
+	return 0;
+}

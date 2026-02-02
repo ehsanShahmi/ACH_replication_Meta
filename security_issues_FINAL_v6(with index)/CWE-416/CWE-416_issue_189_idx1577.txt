@@ -1,0 +1,111 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+misc: fastrpc: Don't remove map on creater_process and device_release
+
+Do not remove the map from the list on error path in
+fastrpc_init_create_process, instead call fastrpc_map_put, to avoid
+use-after-free. Do not remove it on fastrpc_device_release either,
+call fastrpc_map_put instead.
+
+The fastrpc_free_map is the only proper place to remove the map.
+This is called only after the reference count is 0.
+
+Fixes: b49f6d83e290 ("misc: fastrpc: Fix a possible double free")
+Cc: stable <stable@kernel.org>
+Co-developed-by: Ola Jeppsson <ola@snap.com>
+Signed-off-by: Ola Jeppsson <ola@snap.com>
+Signed-off-by: Abel Vesa <abel.vesa@linaro.org>
+Signed-off-by: Srinivas Kandagatla <srinivas.kandagatla@linaro.org>
+Link: https://lore.kernel.org/r/20221124174941.418450-3-srinivas.kandagatla@linaro.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+
+
+The vulnerable function:
+static int fastrpc_device_release(struct inode *inode, struct file *file)
+{
+	struct fastrpc_user *fl = (struct fastrpc_user *)file->private_data;
+	struct fastrpc_channel_ctx *cctx = fl->cctx;
+	struct fastrpc_invoke_ctx *ctx, *n;
+	struct fastrpc_map *map, *m;
+	struct fastrpc_buf *buf, *b;
+	unsigned long flags;
+
+	fastrpc_release_current_dsp_process(fl);
+
+	spin_lock_irqsave(&cctx->lock, flags);
+	list_del(&fl->user);
+	spin_unlock_irqrestore(&cctx->lock, flags);
+
+	if (fl->init_mem)
+		fastrpc_buf_free(fl->init_mem);
+
+	list_for_each_entry_safe(ctx, n, &fl->pending, node) {
+		list_del(&ctx->node);
+		fastrpc_context_put(ctx);
+	}
+
+	list_for_each_entry_safe(map, m, &fl->maps, node) {
+		list_del(&map->node);
+		fastrpc_map_put(map);
+	}
+
+	list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
+		list_del(&buf->node);
+		fastrpc_buf_free(buf);
+	}
+
+	fastrpc_session_free(cctx, fl->sctx);
+	fastrpc_channel_ctx_put(cctx);
+
+	mutex_destroy(&fl->mutex);
+	kfree(fl);
+	file->private_data = NULL;
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int fastrpc_device_release(struct inode *inode, struct file *file)
+{
+	struct fastrpc_user *fl = (struct fastrpc_user *)file->private_data;
+	struct fastrpc_channel_ctx *cctx = fl->cctx;
+	struct fastrpc_invoke_ctx *ctx, *n;
+	struct fastrpc_map *map, *m;
+	struct fastrpc_buf *buf, *b;
+	unsigned long flags;
+
+	fastrpc_release_current_dsp_process(fl);
+
+	spin_lock_irqsave(&cctx->lock, flags);
+	list_del(&fl->user);
+	spin_unlock_irqrestore(&cctx->lock, flags);
+
+	if (fl->init_mem)
+		fastrpc_buf_free(fl->init_mem);
+
+	list_for_each_entry_safe(ctx, n, &fl->pending, node) {
+		list_del(&ctx->node);
+		fastrpc_context_put(ctx);
+	}
+
+	list_for_each_entry_safe(map, m, &fl->maps, node)
+		fastrpc_map_put(map);
+
+	list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
+		list_del(&buf->node);
+		fastrpc_buf_free(buf);
+	}
+
+	fastrpc_session_free(cctx, fl->sctx);
+	fastrpc_channel_ctx_put(cctx);
+
+	mutex_destroy(&fl->mutex);
+	kfree(fl);
+	file->private_data = NULL;
+
+	return 0;
+}

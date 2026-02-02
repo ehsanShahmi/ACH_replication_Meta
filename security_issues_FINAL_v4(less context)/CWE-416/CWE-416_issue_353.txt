@@ -1,0 +1,161 @@
+The vulnerable issue:
+tty: Fix ->session locking
+
+Currently, locking of ->session is very inconsistent; most places
+protect it using the legacy tty mutex, but disassociate_ctty(),
+__do_SAK(), tiocspgrp() and tiocgsid() don't.
+Two of the writers hold the ctrl_lock (because they already need it for
+->pgrp), but __proc_set_tty() doesn't do that yet.
+
+On a PREEMPT=y system, an unprivileged user can theoretically abuse
+this broken locking to read 4 bytes of freed memory via TIOCGSID if
+tiocgsid() is preempted long enough at the right point. (Other things
+might also go wrong, especially if root-only ioctls are involved; I'm
+not sure about that.)
+
+Change the locking on ->session such that:
+
+ - tty_lock() is held by all writers: By making disassociate_ctty()
+   hold it. This should be fine because the same lock can already be
+   taken through the call to tty_vhangup_session().
+   The tricky part is that we need to shorten the area covered by
+   siglock to be able to take tty_lock() without ugly retry logic; as
+   far as I can tell, this should be fine, since nothing in the
+   signal_struct is touched in the `if (tty)` branch.
+ - ctrl_lock is held by all writers: By changing __proc_set_tty() to
+   hold the lock a little longer.
+ - All readers that aren't holding tty_lock() hold ctrl_lock: By
+   adding locking to tiocgsid() and __do_SAK(), and expanding the area
+   covered by ctrl_lock in tiocspgrp().
+
+Cc: stable@kernel.org
+Signed-off-by: Jann Horn <jannh@google.com>
+Reviewed-by: Jiri Slaby <jirislaby@kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+
+
+The vulnerable function:
+void disassociate_ctty(int on_exit)
+{
+	struct tty_struct *tty;
+
+	if (!current->signal->leader)
+		return;
+
+	tty = get_current_tty();
+	if (tty) {
+		if (on_exit && tty->driver->type != TTY_DRIVER_TYPE_PTY) {
+			tty_vhangup_session(tty);
+		} else {
+			struct pid *tty_pgrp = tty_get_pgrp(tty);
+			if (tty_pgrp) {
+				kill_pgrp(tty_pgrp, SIGHUP, on_exit);
+				if (!on_exit)
+					kill_pgrp(tty_pgrp, SIGCONT, on_exit);
+				put_pid(tty_pgrp);
+			}
+		}
+		tty_kref_put(tty);
+
+	} else if (on_exit) {
+		struct pid *old_pgrp;
+		spin_lock_irq(&current->sighand->siglock);
+		old_pgrp = current->signal->tty_old_pgrp;
+		current->signal->tty_old_pgrp = NULL;
+		spin_unlock_irq(&current->sighand->siglock);
+		if (old_pgrp) {
+			kill_pgrp(old_pgrp, SIGHUP, on_exit);
+			kill_pgrp(old_pgrp, SIGCONT, on_exit);
+			put_pid(old_pgrp);
+		}
+		return;
+	}
+
+	spin_lock_irq(&current->sighand->siglock);
+	put_pid(current->signal->tty_old_pgrp);
+	current->signal->tty_old_pgrp = NULL;
+
+	tty = tty_kref_get(current->signal->tty);
+	if (tty) {
+		unsigned long flags;
+		spin_lock_irqsave(&tty->ctrl_lock, flags);
+		put_pid(tty->session);
+		put_pid(tty->pgrp);
+		tty->session = NULL;
+		tty->pgrp = NULL;
+		spin_unlock_irqrestore(&tty->ctrl_lock, flags);
+		tty_kref_put(tty);
+	}
+
+	spin_unlock_irq(&current->sighand->siglock);
+	/* Now clear signal->tty under the lock */
+	read_lock(&tasklist_lock);
+	session_clear_tty(task_session(current));
+	read_unlock(&tasklist_lock);
+}
+
+
+
+The corrected function:
+void disassociate_ctty(int on_exit)
+{
+	struct tty_struct *tty;
+
+	if (!current->signal->leader)
+		return;
+
+	tty = get_current_tty();
+	if (tty) {
+		if (on_exit && tty->driver->type != TTY_DRIVER_TYPE_PTY) {
+			tty_vhangup_session(tty);
+		} else {
+			struct pid *tty_pgrp = tty_get_pgrp(tty);
+			if (tty_pgrp) {
+				kill_pgrp(tty_pgrp, SIGHUP, on_exit);
+				if (!on_exit)
+					kill_pgrp(tty_pgrp, SIGCONT, on_exit);
+				put_pid(tty_pgrp);
+			}
+		}
+		tty_kref_put(tty);
+
+	} else if (on_exit) {
+		struct pid *old_pgrp;
+		spin_lock_irq(&current->sighand->siglock);
+		old_pgrp = current->signal->tty_old_pgrp;
+		current->signal->tty_old_pgrp = NULL;
+		spin_unlock_irq(&current->sighand->siglock);
+		if (old_pgrp) {
+			kill_pgrp(old_pgrp, SIGHUP, on_exit);
+			kill_pgrp(old_pgrp, SIGCONT, on_exit);
+			put_pid(old_pgrp);
+		}
+		return;
+	}
+
+	spin_lock_irq(&current->sighand->siglock);
+	put_pid(current->signal->tty_old_pgrp);
+	current->signal->tty_old_pgrp = NULL;
+	tty = tty_kref_get(current->signal->tty);
+	spin_unlock_irq(&current->sighand->siglock);
+
+	if (tty) {
+		unsigned long flags;
+
+		tty_lock(tty);
+		spin_lock_irqsave(&tty->ctrl_lock, flags);
+		put_pid(tty->session);
+		put_pid(tty->pgrp);
+		tty->session = NULL;
+		tty->pgrp = NULL;
+		spin_unlock_irqrestore(&tty->ctrl_lock, flags);
+		tty_unlock(tty);
+		tty_kref_put(tty);
+	}
+
+	/* Now clear signal->tty under the lock */
+	read_lock(&tasklist_lock);
+	session_clear_tty(task_session(current));
+	read_unlock(&tasklist_lock);
+}

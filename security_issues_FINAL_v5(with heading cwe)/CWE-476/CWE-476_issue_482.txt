@@ -1,0 +1,111 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+nf_tables: fix NULL pointer dereference in nft_expr_inner_parse()
+
+We should check whether the NFTA_EXPR_NAME netlink attribute is present
+before accessing it, otherwise a null pointer deference error will occur.
+
+Call Trace:
+ <TASK>
+ dump_stack_lvl+0x4f/0x90
+ print_report+0x3f0/0x620
+ kasan_report+0xcd/0x110
+ __asan_load2+0x7d/0xa0
+ nla_strcmp+0x2f/0x90
+ __nft_expr_type_get+0x41/0xb0
+ nft_expr_inner_parse+0xe3/0x200
+ nft_inner_init+0x1be/0x2e0
+ nf_tables_newrule+0x813/0x1230
+ nfnetlink_rcv_batch+0xec3/0x1170
+ nfnetlink_rcv+0x1e4/0x220
+ netlink_unicast+0x34e/0x4b0
+ netlink_sendmsg+0x45c/0x7e0
+ __sys_sendto+0x355/0x370
+ __x64_sys_sendto+0x84/0xa0
+ do_syscall_64+0x3f/0x90
+ entry_SYSCALL_64_after_hwframe+0x6e/0xd8
+
+Fixes: 3a07327d10a0 ("netfilter: nft_inner: support for inner tunnel header matching")
+Signed-off-by: Xingyuan Mo <hdthky0@gmail.com>
+Signed-off-by: Florian Westphal <fw@strlen.de>
+
+
+
+The vulnerable function:
+int nft_expr_inner_parse(const struct nft_ctx *ctx, const struct nlattr *nla,
+			 struct nft_expr_info *info)
+{
+	struct nlattr *tb[NFTA_EXPR_MAX + 1];
+	const struct nft_expr_type *type;
+	int err;
+
+	err = nla_parse_nested_deprecated(tb, NFTA_EXPR_MAX, nla,
+					  nft_expr_policy, NULL);
+	if (err < 0)
+		return err;
+
+	if (!tb[NFTA_EXPR_DATA])
+		return -EINVAL;
+
+	type = __nft_expr_type_get(ctx->family, tb[NFTA_EXPR_NAME]);
+	if (!type)
+		return -ENOENT;
+
+	if (!type->inner_ops)
+		return -EOPNOTSUPP;
+
+	err = nla_parse_nested_deprecated(info->tb, type->maxattr,
+					  tb[NFTA_EXPR_DATA],
+					  type->policy, NULL);
+	if (err < 0)
+		goto err_nla_parse;
+
+	info->attr = nla;
+	info->ops = type->inner_ops;
+
+	return 0;
+
+err_nla_parse:
+	return err;
+}
+
+
+
+The corrected function:
+int nft_expr_inner_parse(const struct nft_ctx *ctx, const struct nlattr *nla,
+			 struct nft_expr_info *info)
+{
+	struct nlattr *tb[NFTA_EXPR_MAX + 1];
+	const struct nft_expr_type *type;
+	int err;
+
+	err = nla_parse_nested_deprecated(tb, NFTA_EXPR_MAX, nla,
+					  nft_expr_policy, NULL);
+	if (err < 0)
+		return err;
+
+	if (!tb[NFTA_EXPR_DATA] || !tb[NFTA_EXPR_NAME])
+		return -EINVAL;
+
+	type = __nft_expr_type_get(ctx->family, tb[NFTA_EXPR_NAME]);
+	if (!type)
+		return -ENOENT;
+
+	if (!type->inner_ops)
+		return -EOPNOTSUPP;
+
+	err = nla_parse_nested_deprecated(info->tb, type->maxattr,
+					  tb[NFTA_EXPR_DATA],
+					  type->policy, NULL);
+	if (err < 0)
+		goto err_nla_parse;
+
+	info->attr = nla;
+	info->ops = type->inner_ops;
+
+	return 0;
+
+err_nla_parse:
+	return err;
+}

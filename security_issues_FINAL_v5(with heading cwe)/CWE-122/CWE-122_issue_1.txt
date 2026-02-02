@@ -1,0 +1,76 @@
+This issue file has CWE-122. Your task is to create this CWE-122 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+mwifiex: Fix three heap overflow at parsing element in cfg80211_ap_settings
+
+mwifiex_update_vs_ie(),mwifiex_set_uap_rates() and
+mwifiex_set_wmm_params() call memcpy() without checking
+the destination size.Since the source is given from
+user-space, this may trigger a heap buffer overflow.
+
+Fix them by putting the length check before performing memcpy().
+
+This fix addresses CVE-2019-14814,CVE-2019-14815,CVE-2019-14816.
+
+Signed-off-by: Wen Huang <huangwenabc@gmail.com>
+Acked-by: Ganapathi Bhat <gbhat@marvell.comg>
+Signed-off-by: Kalle Valo <kvalo@codeaurora.org>
+
+
+
+The vulnerable function:
+mwifiex_set_uap_rates(struct mwifiex_uap_bss_param *bss_cfg,
+		      struct cfg80211_ap_settings *params)
+{
+	struct ieee_types_header *rate_ie;
+	int var_offset = offsetof(struct ieee80211_mgmt, u.beacon.variable);
+	const u8 *var_pos = params->beacon.head + var_offset;
+	int len = params->beacon.head_len - var_offset;
+	u8 rate_len = 0;
+
+	rate_ie = (void *)cfg80211_find_ie(WLAN_EID_SUPP_RATES, var_pos, len);
+	if (rate_ie) {
+		memcpy(bss_cfg->rates, rate_ie + 1, rate_ie->len);
+		rate_len = rate_ie->len;
+	}
+
+	rate_ie = (void *)cfg80211_find_ie(WLAN_EID_EXT_SUPP_RATES,
+					   params->beacon.tail,
+					   params->beacon.tail_len);
+	if (rate_ie)
+		memcpy(bss_cfg->rates + rate_len, rate_ie + 1, rate_ie->len);
+
+	return;
+}
+
+
+
+The corrected function:
+mwifiex_set_uap_rates(struct mwifiex_uap_bss_param *bss_cfg,
+		      struct cfg80211_ap_settings *params)
+{
+	struct ieee_types_header *rate_ie;
+	int var_offset = offsetof(struct ieee80211_mgmt, u.beacon.variable);
+	const u8 *var_pos = params->beacon.head + var_offset;
+	int len = params->beacon.head_len - var_offset;
+	u8 rate_len = 0;
+
+	rate_ie = (void *)cfg80211_find_ie(WLAN_EID_SUPP_RATES, var_pos, len);
+	if (rate_ie) {
+		if (rate_ie->len > MWIFIEX_SUPPORTED_RATES)
+			return;
+		memcpy(bss_cfg->rates, rate_ie + 1, rate_ie->len);
+		rate_len = rate_ie->len;
+	}
+
+	rate_ie = (void *)cfg80211_find_ie(WLAN_EID_EXT_SUPP_RATES,
+					   params->beacon.tail,
+					   params->beacon.tail_len);
+	if (rate_ie) {
+		if (rate_ie->len > MWIFIEX_SUPPORTED_RATES - rate_len)
+			return;
+		memcpy(bss_cfg->rates + rate_len, rate_ie + 1, rate_ie->len);
+	}
+
+	return;
+}

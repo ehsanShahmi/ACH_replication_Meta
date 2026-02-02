@@ -1,0 +1,112 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+drm/amd/display: Add null check before access structs
+
+In enable_phantom_plane, we should better check null pointer before
+accessing various structs.
+
+Fixes: 09a4ec5da92c ("drm/amd/display: Refactor dc_state interface")
+Signed-off-by: Ma Ke <make24@iscas.ac.cn>
+Reviewed-by: Aurabindo Pillai <aurabindo.pillai@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+
+
+
+The vulnerable function:
+static void enable_phantom_plane(struct dml2_context *ctx,
+		struct dc_state *state,
+		struct dc_stream_state *phantom_stream,
+		unsigned int dc_pipe_idx)
+{
+	struct dc_plane_state *phantom_plane = NULL;
+	struct dc_plane_state *prev_phantom_plane = NULL;
+	struct pipe_ctx *curr_pipe = &state->res_ctx.pipe_ctx[dc_pipe_idx];
+
+	while (curr_pipe) {
+		if (curr_pipe->top_pipe && curr_pipe->top_pipe->plane_state == curr_pipe->plane_state) {
+			phantom_plane = prev_phantom_plane;
+		} else {
+			phantom_plane = ctx->config.svp_pstate.callbacks.create_phantom_plane(
+					ctx->config.svp_pstate.callbacks.dc,
+					state,
+					curr_pipe->plane_state);
+		}
+
+		memcpy(&phantom_plane->address, &curr_pipe->plane_state->address, sizeof(phantom_plane->address));
+		memcpy(&phantom_plane->scaling_quality, &curr_pipe->plane_state->scaling_quality,
+				sizeof(phantom_plane->scaling_quality));
+		memcpy(&phantom_plane->src_rect, &curr_pipe->plane_state->src_rect, sizeof(phantom_plane->src_rect));
+		memcpy(&phantom_plane->dst_rect, &curr_pipe->plane_state->dst_rect, sizeof(phantom_plane->dst_rect));
+		memcpy(&phantom_plane->clip_rect, &curr_pipe->plane_state->clip_rect, sizeof(phantom_plane->clip_rect));
+		memcpy(&phantom_plane->plane_size, &curr_pipe->plane_state->plane_size,
+				sizeof(phantom_plane->plane_size));
+		memcpy(&phantom_plane->tiling_info, &curr_pipe->plane_state->tiling_info,
+				sizeof(phantom_plane->tiling_info));
+		memcpy(&phantom_plane->dcc, &curr_pipe->plane_state->dcc, sizeof(phantom_plane->dcc));
+		//phantom_plane->tiling_info.gfx10compatible.compat_level = curr_pipe->plane_state->tiling_info.gfx10compatible.compat_level;
+		phantom_plane->format = curr_pipe->plane_state->format;
+		phantom_plane->rotation = curr_pipe->plane_state->rotation;
+		phantom_plane->visible = curr_pipe->plane_state->visible;
+
+		/* Shadow pipe has small viewport. */
+		phantom_plane->clip_rect.y = 0;
+		phantom_plane->clip_rect.height = phantom_stream->timing.v_addressable;
+
+		ctx->config.svp_pstate.callbacks.add_phantom_plane(ctx->config.svp_pstate.callbacks.dc, phantom_stream, phantom_plane, state);
+
+		curr_pipe = curr_pipe->bottom_pipe;
+		prev_phantom_plane = phantom_plane;
+	}
+}
+
+
+
+The corrected function:
+static void enable_phantom_plane(struct dml2_context *ctx,
+		struct dc_state *state,
+		struct dc_stream_state *phantom_stream,
+		unsigned int dc_pipe_idx)
+{
+	struct dc_plane_state *phantom_plane = NULL;
+	struct dc_plane_state *prev_phantom_plane = NULL;
+	struct pipe_ctx *curr_pipe = &state->res_ctx.pipe_ctx[dc_pipe_idx];
+
+	while (curr_pipe) {
+		if (curr_pipe->top_pipe && curr_pipe->top_pipe->plane_state == curr_pipe->plane_state) {
+			phantom_plane = prev_phantom_plane;
+		} else {
+			phantom_plane = ctx->config.svp_pstate.callbacks.create_phantom_plane(
+					ctx->config.svp_pstate.callbacks.dc,
+					state,
+					curr_pipe->plane_state);
+			if (!phantom_plane)
+				return;
+		}
+
+		memcpy(&phantom_plane->address, &curr_pipe->plane_state->address, sizeof(phantom_plane->address));
+		memcpy(&phantom_plane->scaling_quality, &curr_pipe->plane_state->scaling_quality,
+				sizeof(phantom_plane->scaling_quality));
+		memcpy(&phantom_plane->src_rect, &curr_pipe->plane_state->src_rect, sizeof(phantom_plane->src_rect));
+		memcpy(&phantom_plane->dst_rect, &curr_pipe->plane_state->dst_rect, sizeof(phantom_plane->dst_rect));
+		memcpy(&phantom_plane->clip_rect, &curr_pipe->plane_state->clip_rect, sizeof(phantom_plane->clip_rect));
+		memcpy(&phantom_plane->plane_size, &curr_pipe->plane_state->plane_size,
+				sizeof(phantom_plane->plane_size));
+		memcpy(&phantom_plane->tiling_info, &curr_pipe->plane_state->tiling_info,
+				sizeof(phantom_plane->tiling_info));
+		memcpy(&phantom_plane->dcc, &curr_pipe->plane_state->dcc, sizeof(phantom_plane->dcc));
+		//phantom_plane->tiling_info.gfx10compatible.compat_level = curr_pipe->plane_state->tiling_info.gfx10compatible.compat_level;
+		phantom_plane->format = curr_pipe->plane_state->format;
+		phantom_plane->rotation = curr_pipe->plane_state->rotation;
+		phantom_plane->visible = curr_pipe->plane_state->visible;
+
+		/* Shadow pipe has small viewport. */
+		phantom_plane->clip_rect.y = 0;
+		phantom_plane->clip_rect.height = phantom_stream->timing.v_addressable;
+
+		ctx->config.svp_pstate.callbacks.add_phantom_plane(ctx->config.svp_pstate.callbacks.dc, phantom_stream, phantom_plane, state);
+
+		curr_pipe = curr_pipe->bottom_pipe;
+		prev_phantom_plane = phantom_plane;
+	}
+}

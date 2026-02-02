@@ -1,0 +1,58 @@
+This issue file has CWE-399. Your task is to create this CWE-399 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+veth: Dont kfree_skb() after dev_forward_skb()
+
+In case of congestion, netif_rx() frees the skb, so we must assume
+dev_forward_skb() also consume skb.
+
+Bug introduced by commit 445409602c092
+(veth: move loopback logic to common location)
+
+We must change dev_forward_skb() to always consume skb, and veth to not
+double free it.
+
+Bug report : http://marc.info/?l=linux-netdev&m=127310770900442&w=3
+
+Reported-by: Martín Ferrari <martin.ferrari@gmail.com>
+Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+int dev_forward_skb(struct net_device *dev, struct sk_buff *skb)
+{
+	skb_orphan(skb);
+
+	if (!(dev->flags & IFF_UP))
+		return NET_RX_DROP;
+
+	if (skb->len > (dev->mtu + dev->hard_header_len))
+		return NET_RX_DROP;
+
+	skb_set_dev(skb, dev);
+	skb->tstamp.tv64 = 0;
+	skb->pkt_type = PACKET_HOST;
+	skb->protocol = eth_type_trans(skb, dev);
+	return netif_rx(skb);
+}
+
+
+
+The corrected function:
+int dev_forward_skb(struct net_device *dev, struct sk_buff *skb)
+{
+	skb_orphan(skb);
+
+	if (!(dev->flags & IFF_UP) ||
+	    (skb->len > (dev->mtu + dev->hard_header_len))) {
+		kfree_skb(skb);
+		return NET_RX_DROP;
+	}
+	skb_set_dev(skb, dev);
+	skb->tstamp.tv64 = 0;
+	skb->pkt_type = PACKET_HOST;
+	skb->protocol = eth_type_trans(skb, dev);
+	return netif_rx(skb);
+}

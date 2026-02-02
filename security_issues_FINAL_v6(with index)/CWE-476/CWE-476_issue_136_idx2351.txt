@@ -1,0 +1,69 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+drm/amdgpu: Fix the null pointer dereference to ras_manager
+
+Check ras_manager before using it
+
+Signed-off-by: Ma Jun <Jun.Ma2@amd.com>
+Reviewed-by: Lijo Lazar <lijo.lazar@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+
+
+
+The vulnerable function:
+int amdgpu_ras_interrupt_dispatch(struct amdgpu_device *adev,
+		struct ras_dispatch_if *info)
+{
+	struct ras_manager *obj = amdgpu_ras_find_obj(adev, &info->head);
+	struct ras_ih_data *data = &obj->ih_data;
+
+	if (!obj)
+		return -EINVAL;
+
+	if (data->inuse == 0)
+		return 0;
+
+	/* Might be overflow... */
+	memcpy(&data->ring[data->wptr], info->entry,
+			data->element_size);
+
+	wmb();
+	data->wptr = (data->aligned_element_size +
+			data->wptr) % data->ring_size;
+
+	schedule_work(&data->ih_work);
+
+	return 0;
+}
+
+
+
+The corrected function:
+int amdgpu_ras_interrupt_dispatch(struct amdgpu_device *adev,
+		struct ras_dispatch_if *info)
+{
+	struct ras_manager *obj;
+	struct ras_ih_data *data;
+
+	obj = amdgpu_ras_find_obj(adev, &info->head);
+	if (!obj)
+		return -EINVAL;
+
+	data = &obj->ih_data;
+
+	if (data->inuse == 0)
+		return 0;
+
+	/* Might be overflow... */
+	memcpy(&data->ring[data->wptr], info->entry,
+			data->element_size);
+
+	wmb();
+	data->wptr = (data->aligned_element_size +
+			data->wptr) % data->ring_size;
+
+	schedule_work(&data->ih_work);
+
+	return 0;
+}

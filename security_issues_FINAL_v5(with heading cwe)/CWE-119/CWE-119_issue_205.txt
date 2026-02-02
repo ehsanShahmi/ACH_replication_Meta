@@ -1,0 +1,344 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+userfaultfd: non-cooperative: fix fork use after free
+
+When reading the event from the uffd, we put it on a temporary
+fork_event list to detect if we can still access it after releasing and
+retaking the event_wqh.lock.
+
+If fork aborts and removes the event from the fork_event all is fine as
+long as we're still in the userfault read context and fork_event head is
+still alive.
+
+We've to put the event allocated in the fork kernel stack, back from
+fork_event list-head to the event_wqh head, before returning from
+userfaultfd_ctx_read, because the fork_event head lifetime is limited to
+the userfaultfd_ctx_read stack lifetime.
+
+Forgetting to move the event back to its event_wqh place then results in
+__remove_wait_queue(&ctx->event_wqh, &ewq->wq); in
+userfaultfd_event_wait_completion to remove it from a head that has been
+already freed from the reader stack.
+
+This could only happen if resolve_userfault_fork failed (for example if
+there are no file descriptors available to allocate the fork uffd).  If
+it succeeded it was put back correctly.
+
+Furthermore, after find_userfault_evt receives a fork event, the forked
+userfault context in fork_nctx and uwq->msg.arg.reserved.reserved1 can
+be released by the fork thread as soon as the event_wqh.lock is
+released.  Taking a reference on the fork_nctx before dropping the lock
+prevents an use after free in resolve_userfault_fork().
+
+If the fork side aborted and it already released everything, we still
+try to succeed resolve_userfault_fork(), if possible.
+
+Fixes: 893e26e61d04eac9 ("userfaultfd: non-cooperative: Add fork() event")
+Link: http://lkml.kernel.org/r/20170920180413.26713-1-aarcange@redhat.com
+Signed-off-by: Andrea Arcangeli <aarcange@redhat.com>
+Reported-by: Mark Rutland <mark.rutland@arm.com>
+Tested-by: Mark Rutland <mark.rutland@arm.com>
+Cc: Pavel Emelyanov <xemul@virtuozzo.com>
+Cc: Mike Rapoport <rppt@linux.vnet.ibm.com>
+Cc: "Dr. David Alan Gilbert" <dgilbert@redhat.com>
+Cc: Mike Kravetz <mike.kravetz@oracle.com>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+static ssize_t userfaultfd_ctx_read(struct userfaultfd_ctx *ctx, int no_wait,
+				    struct uffd_msg *msg)
+{
+	ssize_t ret;
+	DECLARE_WAITQUEUE(wait, current);
+	struct userfaultfd_wait_queue *uwq;
+	/*
+	 * Handling fork event requires sleeping operations, so
+	 * we drop the event_wqh lock, then do these ops, then
+	 * lock it back and wake up the waiter. While the lock is
+	 * dropped the ewq may go away so we keep track of it
+	 * carefully.
+	 */
+	LIST_HEAD(fork_event);
+	struct userfaultfd_ctx *fork_nctx = NULL;
+
+	/* always take the fd_wqh lock before the fault_pending_wqh lock */
+	spin_lock(&ctx->fd_wqh.lock);
+	__add_wait_queue(&ctx->fd_wqh, &wait);
+	for (;;) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		spin_lock(&ctx->fault_pending_wqh.lock);
+		uwq = find_userfault(ctx);
+		if (uwq) {
+			/*
+			 * Use a seqcount to repeat the lockless check
+			 * in wake_userfault() to avoid missing
+			 * wakeups because during the refile both
+			 * waitqueue could become empty if this is the
+			 * only userfault.
+			 */
+			write_seqcount_begin(&ctx->refile_seq);
+
+			/*
+			 * The fault_pending_wqh.lock prevents the uwq
+			 * to disappear from under us.
+			 *
+			 * Refile this userfault from
+			 * fault_pending_wqh to fault_wqh, it's not
+			 * pending anymore after we read it.
+			 *
+			 * Use list_del() by hand (as
+			 * userfaultfd_wake_function also uses
+			 * list_del_init() by hand) to be sure nobody
+			 * changes __remove_wait_queue() to use
+			 * list_del_init() in turn breaking the
+			 * !list_empty_careful() check in
+			 * handle_userfault(). The uwq->wq.head list
+			 * must never be empty at any time during the
+			 * refile, or the waitqueue could disappear
+			 * from under us. The "wait_queue_head_t"
+			 * parameter of __remove_wait_queue() is unused
+			 * anyway.
+			 */
+			list_del(&uwq->wq.entry);
+			__add_wait_queue(&ctx->fault_wqh, &uwq->wq);
+
+			write_seqcount_end(&ctx->refile_seq);
+
+			/* careful to always initialize msg if ret == 0 */
+			*msg = uwq->msg;
+			spin_unlock(&ctx->fault_pending_wqh.lock);
+			ret = 0;
+			break;
+		}
+		spin_unlock(&ctx->fault_pending_wqh.lock);
+
+		spin_lock(&ctx->event_wqh.lock);
+		uwq = find_userfault_evt(ctx);
+		if (uwq) {
+			*msg = uwq->msg;
+
+			if (uwq->msg.event == UFFD_EVENT_FORK) {
+				fork_nctx = (struct userfaultfd_ctx *)
+					(unsigned long)
+					uwq->msg.arg.reserved.reserved1;
+				list_move(&uwq->wq.entry, &fork_event);
+				spin_unlock(&ctx->event_wqh.lock);
+				ret = 0;
+				break;
+			}
+
+			userfaultfd_event_complete(ctx, uwq);
+			spin_unlock(&ctx->event_wqh.lock);
+			ret = 0;
+			break;
+		}
+		spin_unlock(&ctx->event_wqh.lock);
+
+		if (signal_pending(current)) {
+			ret = -ERESTARTSYS;
+			break;
+		}
+		if (no_wait) {
+			ret = -EAGAIN;
+			break;
+		}
+		spin_unlock(&ctx->fd_wqh.lock);
+		schedule();
+		spin_lock(&ctx->fd_wqh.lock);
+	}
+	__remove_wait_queue(&ctx->fd_wqh, &wait);
+	__set_current_state(TASK_RUNNING);
+	spin_unlock(&ctx->fd_wqh.lock);
+
+	if (!ret && msg->event == UFFD_EVENT_FORK) {
+		ret = resolve_userfault_fork(ctx, fork_nctx, msg);
+
+		if (!ret) {
+			spin_lock(&ctx->event_wqh.lock);
+			if (!list_empty(&fork_event)) {
+				uwq = list_first_entry(&fork_event,
+						       typeof(*uwq),
+						       wq.entry);
+				list_del(&uwq->wq.entry);
+				__add_wait_queue(&ctx->event_wqh, &uwq->wq);
+				userfaultfd_event_complete(ctx, uwq);
+			}
+			spin_unlock(&ctx->event_wqh.lock);
+		}
+	}
+
+	return ret;
+}
+
+
+
+The corrected function:
+static ssize_t userfaultfd_ctx_read(struct userfaultfd_ctx *ctx, int no_wait,
+				    struct uffd_msg *msg)
+{
+	ssize_t ret;
+	DECLARE_WAITQUEUE(wait, current);
+	struct userfaultfd_wait_queue *uwq;
+	/*
+	 * Handling fork event requires sleeping operations, so
+	 * we drop the event_wqh lock, then do these ops, then
+	 * lock it back and wake up the waiter. While the lock is
+	 * dropped the ewq may go away so we keep track of it
+	 * carefully.
+	 */
+	LIST_HEAD(fork_event);
+	struct userfaultfd_ctx *fork_nctx = NULL;
+
+	/* always take the fd_wqh lock before the fault_pending_wqh lock */
+	spin_lock(&ctx->fd_wqh.lock);
+	__add_wait_queue(&ctx->fd_wqh, &wait);
+	for (;;) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		spin_lock(&ctx->fault_pending_wqh.lock);
+		uwq = find_userfault(ctx);
+		if (uwq) {
+			/*
+			 * Use a seqcount to repeat the lockless check
+			 * in wake_userfault() to avoid missing
+			 * wakeups because during the refile both
+			 * waitqueue could become empty if this is the
+			 * only userfault.
+			 */
+			write_seqcount_begin(&ctx->refile_seq);
+
+			/*
+			 * The fault_pending_wqh.lock prevents the uwq
+			 * to disappear from under us.
+			 *
+			 * Refile this userfault from
+			 * fault_pending_wqh to fault_wqh, it's not
+			 * pending anymore after we read it.
+			 *
+			 * Use list_del() by hand (as
+			 * userfaultfd_wake_function also uses
+			 * list_del_init() by hand) to be sure nobody
+			 * changes __remove_wait_queue() to use
+			 * list_del_init() in turn breaking the
+			 * !list_empty_careful() check in
+			 * handle_userfault(). The uwq->wq.head list
+			 * must never be empty at any time during the
+			 * refile, or the waitqueue could disappear
+			 * from under us. The "wait_queue_head_t"
+			 * parameter of __remove_wait_queue() is unused
+			 * anyway.
+			 */
+			list_del(&uwq->wq.entry);
+			__add_wait_queue(&ctx->fault_wqh, &uwq->wq);
+
+			write_seqcount_end(&ctx->refile_seq);
+
+			/* careful to always initialize msg if ret == 0 */
+			*msg = uwq->msg;
+			spin_unlock(&ctx->fault_pending_wqh.lock);
+			ret = 0;
+			break;
+		}
+		spin_unlock(&ctx->fault_pending_wqh.lock);
+
+		spin_lock(&ctx->event_wqh.lock);
+		uwq = find_userfault_evt(ctx);
+		if (uwq) {
+			*msg = uwq->msg;
+
+			if (uwq->msg.event == UFFD_EVENT_FORK) {
+				fork_nctx = (struct userfaultfd_ctx *)
+					(unsigned long)
+					uwq->msg.arg.reserved.reserved1;
+				list_move(&uwq->wq.entry, &fork_event);
+				/*
+				 * fork_nctx can be freed as soon as
+				 * we drop the lock, unless we take a
+				 * reference on it.
+				 */
+				userfaultfd_ctx_get(fork_nctx);
+				spin_unlock(&ctx->event_wqh.lock);
+				ret = 0;
+				break;
+			}
+
+			userfaultfd_event_complete(ctx, uwq);
+			spin_unlock(&ctx->event_wqh.lock);
+			ret = 0;
+			break;
+		}
+		spin_unlock(&ctx->event_wqh.lock);
+
+		if (signal_pending(current)) {
+			ret = -ERESTARTSYS;
+			break;
+		}
+		if (no_wait) {
+			ret = -EAGAIN;
+			break;
+		}
+		spin_unlock(&ctx->fd_wqh.lock);
+		schedule();
+		spin_lock(&ctx->fd_wqh.lock);
+	}
+	__remove_wait_queue(&ctx->fd_wqh, &wait);
+	__set_current_state(TASK_RUNNING);
+	spin_unlock(&ctx->fd_wqh.lock);
+
+	if (!ret && msg->event == UFFD_EVENT_FORK) {
+		ret = resolve_userfault_fork(ctx, fork_nctx, msg);
+		spin_lock(&ctx->event_wqh.lock);
+		if (!list_empty(&fork_event)) {
+			/*
+			 * The fork thread didn't abort, so we can
+			 * drop the temporary refcount.
+			 */
+			userfaultfd_ctx_put(fork_nctx);
+
+			uwq = list_first_entry(&fork_event,
+					       typeof(*uwq),
+					       wq.entry);
+			/*
+			 * If fork_event list wasn't empty and in turn
+			 * the event wasn't already released by fork
+			 * (the event is allocated on fork kernel
+			 * stack), put the event back to its place in
+			 * the event_wq. fork_event head will be freed
+			 * as soon as we return so the event cannot
+			 * stay queued there no matter the current
+			 * "ret" value.
+			 */
+			list_del(&uwq->wq.entry);
+			__add_wait_queue(&ctx->event_wqh, &uwq->wq);
+
+			/*
+			 * Leave the event in the waitqueue and report
+			 * error to userland if we failed to resolve
+			 * the userfault fork.
+			 */
+			if (likely(!ret))
+				userfaultfd_event_complete(ctx, uwq);
+		} else {
+			/*
+			 * Here the fork thread aborted and the
+			 * refcount from the fork thread on fork_nctx
+			 * has already been released. We still hold
+			 * the reference we took before releasing the
+			 * lock above. If resolve_userfault_fork
+			 * failed we've to drop it because the
+			 * fork_nctx has to be freed in such case. If
+			 * it succeeded we'll hold it because the new
+			 * uffd references it.
+			 */
+			if (ret)
+				userfaultfd_ctx_put(fork_nctx);
+		}
+		spin_unlock(&ctx->event_wqh.lock);
+	}
+
+	return ret;
+}

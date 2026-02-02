@@ -1,0 +1,45 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+uwb: properly check kthread_run return value
+
+uwbd_start() calls kthread_run() and checks that the return value is
+not NULL. But the return value is not NULL in case kthread_run() fails,
+it takes the form of ERR_PTR(-EINTR).
+
+Use IS_ERR() instead.
+
+Also add a check to uwbd_stop().
+
+Signed-off-by: Andrey Konovalov <andreyknvl@google.com>
+Cc: stable <stable@vger.kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+
+
+The vulnerable function:
+void uwbd_start(struct uwb_rc *rc)
+{
+	rc->uwbd.task = kthread_run(uwbd, rc, "uwbd");
+	if (rc->uwbd.task == NULL)
+		printk(KERN_ERR "UWB: Cannot start management daemon; "
+		       "UWB won't work\n");
+	else
+		rc->uwbd.pid = rc->uwbd.task->pid;
+}
+
+
+
+The corrected function:
+void uwbd_start(struct uwb_rc *rc)
+{
+	struct task_struct *task = kthread_run(uwbd, rc, "uwbd");
+	if (IS_ERR(task)) {
+		rc->uwbd.task = NULL;
+		printk(KERN_ERR "UWB: Cannot start management daemon; "
+		       "UWB won't work\n");
+	} else {
+		rc->uwbd.task = task;
+		rc->uwbd.pid = rc->uwbd.task->pid;
+	}
+}

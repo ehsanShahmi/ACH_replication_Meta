@@ -1,0 +1,320 @@
+The vulnerable issue:
+drm: vc4: Fix possible null pointer dereference
+
+In vc4_hdmi_audio_init() of_get_address() may return
+NULL which is later dereferenced. Fix this bug by adding NULL check.
+
+Found by Linux Verification Center (linuxtesting.org) with SVACE.
+
+Fixes: bb7d78568814 ("drm/vc4: Add HDMI audio support")
+Signed-off-by: Aleksandr Mishin <amishin@t-argos.ru>
+Signed-off-by: Maxime Ripard <mripard@kernel.org>
+Link: https://patchwork.freedesktop.org/patch/msgid/20240409075622.11783-1-amishin@t-argos.ru
+
+
+
+The vulnerable function:
+static int vc4_hdmi_audio_init(struct vc4_hdmi *vc4_hdmi)
+{
+	const struct vc4_hdmi_register *mai_data =
+		&vc4_hdmi->variant->registers[HDMI_MAI_DATA];
+	struct snd_soc_dai_link *dai_link = &vc4_hdmi->audio.link;
+	struct snd_soc_card *card = &vc4_hdmi->audio.card;
+	struct device *dev = &vc4_hdmi->pdev->dev;
+	struct platform_device *codec_pdev;
+	const __be32 *addr;
+	int index, len;
+	int ret;
+
+	/*
+	 * ASoC makes it a bit hard to retrieve a pointer to the
+	 * vc4_hdmi structure. Registering the card will overwrite our
+	 * device drvdata with a pointer to the snd_soc_card structure,
+	 * which can then be used to retrieve whatever drvdata we want
+	 * to associate.
+	 *
+	 * However, that doesn't fly in the case where we wouldn't
+	 * register an ASoC card (because of an old DT that is missing
+	 * the dmas properties for example), then the card isn't
+	 * registered and the device drvdata wouldn't be set.
+	 *
+	 * We can deal with both cases by making sure a snd_soc_card
+	 * pointer and a vc4_hdmi structure are pointing to the same
+	 * memory address, so we can treat them indistinctly without any
+	 * issue.
+	 */
+	BUILD_BUG_ON(offsetof(struct vc4_hdmi_audio, card) != 0);
+	BUILD_BUG_ON(offsetof(struct vc4_hdmi, audio) != 0);
+
+	if (!of_find_property(dev->of_node, "dmas", &len) || !len) {
+		dev_warn(dev,
+			 "'dmas' DT property is missing or empty, no HDMI audio\n");
+		return 0;
+	}
+
+	if (mai_data->reg != VC4_HD) {
+		WARN_ONCE(true, "MAI isn't in the HD block\n");
+		return -EINVAL;
+	}
+
+	/*
+	 * Get the physical address of VC4_HD_MAI_DATA. We need to retrieve
+	 * the bus address specified in the DT, because the physical address
+	 * (the one returned by platform_get_resource()) is not appropriate
+	 * for DMA transfers.
+	 * This VC/MMU should probably be exposed to avoid this kind of hacks.
+	 */
+	index = of_property_match_string(dev->of_node, "reg-names", "hd");
+	/* Before BCM2711, we don't have a named register range */
+	if (index < 0)
+		index = 1;
+
+	addr = of_get_address(dev->of_node, index, NULL, NULL);
+
+	vc4_hdmi->audio.dma_data.addr = be32_to_cpup(addr) + mai_data->offset;
+	vc4_hdmi->audio.dma_data.addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
+	vc4_hdmi->audio.dma_data.maxburst = 2;
+
+	/*
+	 * NOTE: Strictly speaking, we should probably use a DRM-managed
+	 * registration there to avoid removing all the audio components
+	 * by the time the driver doesn't have any user anymore.
+	 *
+	 * However, the ASoC core uses a number of devm_kzalloc calls
+	 * when registering, even when using non-device-managed
+	 * functions (such as in snd_soc_register_component()).
+	 *
+	 * If we call snd_soc_unregister_component() in a DRM-managed
+	 * action, the device-managed actions have already been executed
+	 * and thus we would access memory that has been freed.
+	 *
+	 * Using device-managed hooks here probably leaves us open to a
+	 * bunch of issues if userspace still has a handle on the ALSA
+	 * device when the device is removed. However, this is mitigated
+	 * by the use of drm_dev_enter()/drm_dev_exit() in the audio
+	 * path to prevent the access to the device resources if it
+	 * isn't there anymore.
+	 *
+	 * Then, the vc4_hdmi structure is DRM-managed and thus only
+	 * freed whenever the last user has closed the DRM device file.
+	 * It should thus outlive ALSA in most situations.
+	 */
+	ret = devm_snd_dmaengine_pcm_register(dev, &pcm_conf, 0);
+	if (ret) {
+		dev_err(dev, "Could not register PCM component: %d\n", ret);
+		return ret;
+	}
+
+	ret = devm_snd_soc_register_component(dev, &vc4_hdmi_audio_cpu_dai_comp,
+					      &vc4_hdmi_audio_cpu_dai_drv, 1);
+	if (ret) {
+		dev_err(dev, "Could not register CPU DAI: %d\n", ret);
+		return ret;
+	}
+
+	codec_pdev = platform_device_register_data(dev, HDMI_CODEC_DRV_NAME,
+						   PLATFORM_DEVID_AUTO,
+						   &vc4_hdmi_codec_pdata,
+						   sizeof(vc4_hdmi_codec_pdata));
+	if (IS_ERR(codec_pdev)) {
+		dev_err(dev, "Couldn't register the HDMI codec: %ld\n", PTR_ERR(codec_pdev));
+		return PTR_ERR(codec_pdev);
+	}
+	vc4_hdmi->audio.codec_pdev = codec_pdev;
+
+	ret = devm_add_action_or_reset(dev, vc4_hdmi_audio_codec_release, vc4_hdmi);
+	if (ret)
+		return ret;
+
+	dai_link->cpus		= &vc4_hdmi->audio.cpu;
+	dai_link->codecs	= &vc4_hdmi->audio.codec;
+	dai_link->platforms	= &vc4_hdmi->audio.platform;
+
+	dai_link->num_cpus	= 1;
+	dai_link->num_codecs	= 1;
+	dai_link->num_platforms	= 1;
+
+	dai_link->name = "MAI";
+	dai_link->stream_name = "MAI PCM";
+	dai_link->codecs->dai_name = "i2s-hifi";
+	dai_link->cpus->dai_name = dev_name(dev);
+	dai_link->codecs->name = dev_name(&codec_pdev->dev);
+	dai_link->platforms->name = dev_name(dev);
+
+	card->dai_link = dai_link;
+	card->num_links = 1;
+	card->name = vc4_hdmi->variant->card_name;
+	card->driver_name = "vc4-hdmi";
+	card->dev = dev;
+	card->owner = THIS_MODULE;
+
+	/*
+	 * Be careful, snd_soc_register_card() calls dev_set_drvdata() and
+	 * stores a pointer to the snd card object in dev->driver_data. This
+	 * means we cannot use it for something else. The hdmi back-pointer is
+	 * now stored in card->drvdata and should be retrieved with
+	 * snd_soc_card_get_drvdata() if needed.
+	 */
+	snd_soc_card_set_drvdata(card, vc4_hdmi);
+	ret = devm_snd_soc_register_card(dev, card);
+	if (ret)
+		dev_err_probe(dev, ret, "Could not register sound card\n");
+
+	return ret;
+
+}
+
+
+
+The corrected function:
+static int vc4_hdmi_audio_init(struct vc4_hdmi *vc4_hdmi)
+{
+	const struct vc4_hdmi_register *mai_data =
+		&vc4_hdmi->variant->registers[HDMI_MAI_DATA];
+	struct snd_soc_dai_link *dai_link = &vc4_hdmi->audio.link;
+	struct snd_soc_card *card = &vc4_hdmi->audio.card;
+	struct device *dev = &vc4_hdmi->pdev->dev;
+	struct platform_device *codec_pdev;
+	const __be32 *addr;
+	int index, len;
+	int ret;
+
+	/*
+	 * ASoC makes it a bit hard to retrieve a pointer to the
+	 * vc4_hdmi structure. Registering the card will overwrite our
+	 * device drvdata with a pointer to the snd_soc_card structure,
+	 * which can then be used to retrieve whatever drvdata we want
+	 * to associate.
+	 *
+	 * However, that doesn't fly in the case where we wouldn't
+	 * register an ASoC card (because of an old DT that is missing
+	 * the dmas properties for example), then the card isn't
+	 * registered and the device drvdata wouldn't be set.
+	 *
+	 * We can deal with both cases by making sure a snd_soc_card
+	 * pointer and a vc4_hdmi structure are pointing to the same
+	 * memory address, so we can treat them indistinctly without any
+	 * issue.
+	 */
+	BUILD_BUG_ON(offsetof(struct vc4_hdmi_audio, card) != 0);
+	BUILD_BUG_ON(offsetof(struct vc4_hdmi, audio) != 0);
+
+	if (!of_find_property(dev->of_node, "dmas", &len) || !len) {
+		dev_warn(dev,
+			 "'dmas' DT property is missing or empty, no HDMI audio\n");
+		return 0;
+	}
+
+	if (mai_data->reg != VC4_HD) {
+		WARN_ONCE(true, "MAI isn't in the HD block\n");
+		return -EINVAL;
+	}
+
+	/*
+	 * Get the physical address of VC4_HD_MAI_DATA. We need to retrieve
+	 * the bus address specified in the DT, because the physical address
+	 * (the one returned by platform_get_resource()) is not appropriate
+	 * for DMA transfers.
+	 * This VC/MMU should probably be exposed to avoid this kind of hacks.
+	 */
+	index = of_property_match_string(dev->of_node, "reg-names", "hd");
+	/* Before BCM2711, we don't have a named register range */
+	if (index < 0)
+		index = 1;
+
+	addr = of_get_address(dev->of_node, index, NULL, NULL);
+	if (!addr)
+		return -EINVAL;
+
+	vc4_hdmi->audio.dma_data.addr = be32_to_cpup(addr) + mai_data->offset;
+	vc4_hdmi->audio.dma_data.addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
+	vc4_hdmi->audio.dma_data.maxburst = 2;
+
+	/*
+	 * NOTE: Strictly speaking, we should probably use a DRM-managed
+	 * registration there to avoid removing all the audio components
+	 * by the time the driver doesn't have any user anymore.
+	 *
+	 * However, the ASoC core uses a number of devm_kzalloc calls
+	 * when registering, even when using non-device-managed
+	 * functions (such as in snd_soc_register_component()).
+	 *
+	 * If we call snd_soc_unregister_component() in a DRM-managed
+	 * action, the device-managed actions have already been executed
+	 * and thus we would access memory that has been freed.
+	 *
+	 * Using device-managed hooks here probably leaves us open to a
+	 * bunch of issues if userspace still has a handle on the ALSA
+	 * device when the device is removed. However, this is mitigated
+	 * by the use of drm_dev_enter()/drm_dev_exit() in the audio
+	 * path to prevent the access to the device resources if it
+	 * isn't there anymore.
+	 *
+	 * Then, the vc4_hdmi structure is DRM-managed and thus only
+	 * freed whenever the last user has closed the DRM device file.
+	 * It should thus outlive ALSA in most situations.
+	 */
+	ret = devm_snd_dmaengine_pcm_register(dev, &pcm_conf, 0);
+	if (ret) {
+		dev_err(dev, "Could not register PCM component: %d\n", ret);
+		return ret;
+	}
+
+	ret = devm_snd_soc_register_component(dev, &vc4_hdmi_audio_cpu_dai_comp,
+					      &vc4_hdmi_audio_cpu_dai_drv, 1);
+	if (ret) {
+		dev_err(dev, "Could not register CPU DAI: %d\n", ret);
+		return ret;
+	}
+
+	codec_pdev = platform_device_register_data(dev, HDMI_CODEC_DRV_NAME,
+						   PLATFORM_DEVID_AUTO,
+						   &vc4_hdmi_codec_pdata,
+						   sizeof(vc4_hdmi_codec_pdata));
+	if (IS_ERR(codec_pdev)) {
+		dev_err(dev, "Couldn't register the HDMI codec: %ld\n", PTR_ERR(codec_pdev));
+		return PTR_ERR(codec_pdev);
+	}
+	vc4_hdmi->audio.codec_pdev = codec_pdev;
+
+	ret = devm_add_action_or_reset(dev, vc4_hdmi_audio_codec_release, vc4_hdmi);
+	if (ret)
+		return ret;
+
+	dai_link->cpus		= &vc4_hdmi->audio.cpu;
+	dai_link->codecs	= &vc4_hdmi->audio.codec;
+	dai_link->platforms	= &vc4_hdmi->audio.platform;
+
+	dai_link->num_cpus	= 1;
+	dai_link->num_codecs	= 1;
+	dai_link->num_platforms	= 1;
+
+	dai_link->name = "MAI";
+	dai_link->stream_name = "MAI PCM";
+	dai_link->codecs->dai_name = "i2s-hifi";
+	dai_link->cpus->dai_name = dev_name(dev);
+	dai_link->codecs->name = dev_name(&codec_pdev->dev);
+	dai_link->platforms->name = dev_name(dev);
+
+	card->dai_link = dai_link;
+	card->num_links = 1;
+	card->name = vc4_hdmi->variant->card_name;
+	card->driver_name = "vc4-hdmi";
+	card->dev = dev;
+	card->owner = THIS_MODULE;
+
+	/*
+	 * Be careful, snd_soc_register_card() calls dev_set_drvdata() and
+	 * stores a pointer to the snd card object in dev->driver_data. This
+	 * means we cannot use it for something else. The hdmi back-pointer is
+	 * now stored in card->drvdata and should be retrieved with
+	 * snd_soc_card_get_drvdata() if needed.
+	 */
+	snd_soc_card_set_drvdata(card, vc4_hdmi);
+	ret = devm_snd_soc_register_card(dev, card);
+	if (ret)
+		dev_err_probe(dev, ret, "Could not register sound card\n");
+
+	return ret;
+
+}

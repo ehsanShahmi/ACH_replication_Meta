@@ -1,0 +1,270 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+drm/client: fix null pointer dereference in drm_client_modeset_probe
+
+In drm_client_modeset_probe(), the return value of drm_mode_duplicate() is
+assigned to modeset->mode, which will lead to a possible NULL pointer
+dereference on failure of drm_mode_duplicate(). Add a check to avoid npd.
+
+Cc: stable@vger.kernel.org
+Fixes: cf13909aee05 ("drm/fb-helper: Move out modeset config code")
+Signed-off-by: Ma Ke <make24@iscas.ac.cn>
+Reviewed-by: Thomas Zimmermann <tzimmermann@suse.de>
+Signed-off-by: Thomas Zimmermann <tzimmermann@suse.de>
+Link: https://patchwork.freedesktop.org/patch/msgid/20240802044736.1570345-1-make24@iscas.ac.cn
+
+
+
+The vulnerable function:
+int drm_client_modeset_probe(struct drm_client_dev *client, unsigned int width, unsigned int height)
+{
+	struct drm_connector *connector, **connectors = NULL;
+	struct drm_connector_list_iter conn_iter;
+	struct drm_device *dev = client->dev;
+	unsigned int total_modes_count = 0;
+	struct drm_client_offset *offsets;
+	unsigned int connector_count = 0;
+	/* points to modes protected by mode_config.mutex */
+	struct drm_display_mode **modes;
+	struct drm_crtc **crtcs;
+	int i, ret = 0;
+	bool *enabled;
+
+	drm_dbg_kms(dev, "\n");
+
+	if (!width)
+		width = dev->mode_config.max_width;
+	if (!height)
+		height = dev->mode_config.max_height;
+
+	drm_connector_list_iter_begin(dev, &conn_iter);
+	drm_client_for_each_connector_iter(connector, &conn_iter) {
+		struct drm_connector **tmp;
+
+		tmp = krealloc(connectors, (connector_count + 1) * sizeof(*connectors), GFP_KERNEL);
+		if (!tmp) {
+			ret = -ENOMEM;
+			goto free_connectors;
+		}
+
+		connectors = tmp;
+		drm_connector_get(connector);
+		connectors[connector_count++] = connector;
+	}
+	drm_connector_list_iter_end(&conn_iter);
+
+	if (!connector_count)
+		return 0;
+
+	crtcs = kcalloc(connector_count, sizeof(*crtcs), GFP_KERNEL);
+	modes = kcalloc(connector_count, sizeof(*modes), GFP_KERNEL);
+	offsets = kcalloc(connector_count, sizeof(*offsets), GFP_KERNEL);
+	enabled = kcalloc(connector_count, sizeof(bool), GFP_KERNEL);
+	if (!crtcs || !modes || !enabled || !offsets) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	mutex_lock(&client->modeset_mutex);
+
+	mutex_lock(&dev->mode_config.mutex);
+	for (i = 0; i < connector_count; i++)
+		total_modes_count += connectors[i]->funcs->fill_modes(connectors[i], width, height);
+	if (!total_modes_count)
+		drm_dbg_kms(dev, "No connectors reported connected with modes\n");
+	drm_client_connectors_enabled(connectors, connector_count, enabled);
+
+	if (!drm_client_firmware_config(client, connectors, connector_count, crtcs,
+					modes, offsets, enabled, width, height)) {
+		memset(modes, 0, connector_count * sizeof(*modes));
+		memset(crtcs, 0, connector_count * sizeof(*crtcs));
+		memset(offsets, 0, connector_count * sizeof(*offsets));
+
+		if (!drm_client_target_cloned(dev, connectors, connector_count, modes,
+					      offsets, enabled, width, height) &&
+		    !drm_client_target_preferred(dev, connectors, connector_count, modes,
+						 offsets, enabled, width, height))
+			drm_err(dev, "Unable to find initial modes\n");
+
+		drm_dbg_kms(dev, "picking CRTCs for %dx%d config\n",
+			    width, height);
+
+		drm_client_pick_crtcs(client, connectors, connector_count,
+				      crtcs, modes, 0, width, height);
+	}
+
+	drm_client_modeset_release(client);
+
+	for (i = 0; i < connector_count; i++) {
+		struct drm_display_mode *mode = modes[i];
+		struct drm_crtc *crtc = crtcs[i];
+		struct drm_client_offset *offset = &offsets[i];
+
+		if (mode && crtc) {
+			struct drm_mode_set *modeset = drm_client_find_modeset(client, crtc);
+			struct drm_connector *connector = connectors[i];
+
+			drm_dbg_kms(dev, "[CRTC:%d:%s] desired mode %s set (%d,%d)\n",
+				    crtc->base.id, crtc->name,
+				    mode->name, offset->x, offset->y);
+
+			if (drm_WARN_ON_ONCE(dev, modeset->num_connectors == DRM_CLIENT_MAX_CLONED_CONNECTORS ||
+					     (dev->mode_config.num_crtc > 1 && modeset->num_connectors == 1))) {
+				ret = -EINVAL;
+				break;
+			}
+
+			kfree(modeset->mode);
+			modeset->mode = drm_mode_duplicate(dev, mode);
+			drm_connector_get(connector);
+			modeset->connectors[modeset->num_connectors++] = connector;
+			modeset->x = offset->x;
+			modeset->y = offset->y;
+		}
+	}
+	mutex_unlock(&dev->mode_config.mutex);
+
+	mutex_unlock(&client->modeset_mutex);
+out:
+	kfree(crtcs);
+	kfree(modes);
+	kfree(offsets);
+	kfree(enabled);
+free_connectors:
+	for (i = 0; i < connector_count; i++)
+		drm_connector_put(connectors[i]);
+	kfree(connectors);
+
+	return ret;
+}
+
+
+
+The corrected function:
+int drm_client_modeset_probe(struct drm_client_dev *client, unsigned int width, unsigned int height)
+{
+	struct drm_connector *connector, **connectors = NULL;
+	struct drm_connector_list_iter conn_iter;
+	struct drm_device *dev = client->dev;
+	unsigned int total_modes_count = 0;
+	struct drm_client_offset *offsets;
+	unsigned int connector_count = 0;
+	/* points to modes protected by mode_config.mutex */
+	struct drm_display_mode **modes;
+	struct drm_crtc **crtcs;
+	int i, ret = 0;
+	bool *enabled;
+
+	drm_dbg_kms(dev, "\n");
+
+	if (!width)
+		width = dev->mode_config.max_width;
+	if (!height)
+		height = dev->mode_config.max_height;
+
+	drm_connector_list_iter_begin(dev, &conn_iter);
+	drm_client_for_each_connector_iter(connector, &conn_iter) {
+		struct drm_connector **tmp;
+
+		tmp = krealloc(connectors, (connector_count + 1) * sizeof(*connectors), GFP_KERNEL);
+		if (!tmp) {
+			ret = -ENOMEM;
+			goto free_connectors;
+		}
+
+		connectors = tmp;
+		drm_connector_get(connector);
+		connectors[connector_count++] = connector;
+	}
+	drm_connector_list_iter_end(&conn_iter);
+
+	if (!connector_count)
+		return 0;
+
+	crtcs = kcalloc(connector_count, sizeof(*crtcs), GFP_KERNEL);
+	modes = kcalloc(connector_count, sizeof(*modes), GFP_KERNEL);
+	offsets = kcalloc(connector_count, sizeof(*offsets), GFP_KERNEL);
+	enabled = kcalloc(connector_count, sizeof(bool), GFP_KERNEL);
+	if (!crtcs || !modes || !enabled || !offsets) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	mutex_lock(&client->modeset_mutex);
+
+	mutex_lock(&dev->mode_config.mutex);
+	for (i = 0; i < connector_count; i++)
+		total_modes_count += connectors[i]->funcs->fill_modes(connectors[i], width, height);
+	if (!total_modes_count)
+		drm_dbg_kms(dev, "No connectors reported connected with modes\n");
+	drm_client_connectors_enabled(connectors, connector_count, enabled);
+
+	if (!drm_client_firmware_config(client, connectors, connector_count, crtcs,
+					modes, offsets, enabled, width, height)) {
+		memset(modes, 0, connector_count * sizeof(*modes));
+		memset(crtcs, 0, connector_count * sizeof(*crtcs));
+		memset(offsets, 0, connector_count * sizeof(*offsets));
+
+		if (!drm_client_target_cloned(dev, connectors, connector_count, modes,
+					      offsets, enabled, width, height) &&
+		    !drm_client_target_preferred(dev, connectors, connector_count, modes,
+						 offsets, enabled, width, height))
+			drm_err(dev, "Unable to find initial modes\n");
+
+		drm_dbg_kms(dev, "picking CRTCs for %dx%d config\n",
+			    width, height);
+
+		drm_client_pick_crtcs(client, connectors, connector_count,
+				      crtcs, modes, 0, width, height);
+	}
+
+	drm_client_modeset_release(client);
+
+	for (i = 0; i < connector_count; i++) {
+		struct drm_display_mode *mode = modes[i];
+		struct drm_crtc *crtc = crtcs[i];
+		struct drm_client_offset *offset = &offsets[i];
+
+		if (mode && crtc) {
+			struct drm_mode_set *modeset = drm_client_find_modeset(client, crtc);
+			struct drm_connector *connector = connectors[i];
+
+			drm_dbg_kms(dev, "[CRTC:%d:%s] desired mode %s set (%d,%d)\n",
+				    crtc->base.id, crtc->name,
+				    mode->name, offset->x, offset->y);
+
+			if (drm_WARN_ON_ONCE(dev, modeset->num_connectors == DRM_CLIENT_MAX_CLONED_CONNECTORS ||
+					     (dev->mode_config.num_crtc > 1 && modeset->num_connectors == 1))) {
+				ret = -EINVAL;
+				break;
+			}
+
+			kfree(modeset->mode);
+			modeset->mode = drm_mode_duplicate(dev, mode);
+			if (!modeset->mode) {
+				ret = -ENOMEM;
+				break;
+			}
+
+			drm_connector_get(connector);
+			modeset->connectors[modeset->num_connectors++] = connector;
+			modeset->x = offset->x;
+			modeset->y = offset->y;
+		}
+	}
+	mutex_unlock(&dev->mode_config.mutex);
+
+	mutex_unlock(&client->modeset_mutex);
+out:
+	kfree(crtcs);
+	kfree(modes);
+	kfree(offsets);
+	kfree(enabled);
+free_connectors:
+	for (i = 0; i < connector_count; i++)
+		drm_connector_put(connectors[i]);
+	kfree(connectors);
+
+	return ret;
+}

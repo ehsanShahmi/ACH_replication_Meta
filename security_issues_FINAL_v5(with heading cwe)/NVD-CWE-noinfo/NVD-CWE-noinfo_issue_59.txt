@@ -1,0 +1,48 @@
+This issue file has NVD-CWE-noinfo. Your task is to create this NVD-CWE-noinfo type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+KVM: x86: Emulator fixes for eip canonical checks on near branches
+
+Before changing rip (during jmp, call, ret, etc.) the target should be asserted
+to be canonical one, as real CPUs do.  During sysret, both target rsp and rip
+should be canonical. If any of these values is noncanonical, a #GP exception
+should occur.  The exception to this rule are syscall and sysenter instructions
+in which the assigned rip is checked during the assignment to the relevant
+MSRs.
+
+This patch fixes the emulator to behave as real CPUs do for near branches.
+Far branches are handled by the next patch.
+
+This fixes CVE-2014-3647.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Nadav Amit <namit@cs.technion.ac.il>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+
+
+The vulnerable function:
+static int em_loop(struct x86_emulate_ctxt *ctxt)
+{
+	register_address_increment(ctxt, reg_rmw(ctxt, VCPU_REGS_RCX), -1);
+	if ((address_mask(ctxt, reg_read(ctxt, VCPU_REGS_RCX)) != 0) &&
+	    (ctxt->b == 0xe2 || test_cc(ctxt->b ^ 0x5, ctxt->eflags)))
+		jmp_rel(ctxt, ctxt->src.val);
+
+	return X86EMUL_CONTINUE;
+}
+
+
+
+The corrected function:
+static int em_loop(struct x86_emulate_ctxt *ctxt)
+{
+	int rc = X86EMUL_CONTINUE;
+
+	register_address_increment(ctxt, reg_rmw(ctxt, VCPU_REGS_RCX), -1);
+	if ((address_mask(ctxt, reg_read(ctxt, VCPU_REGS_RCX)) != 0) &&
+	    (ctxt->b == 0xe2 || test_cc(ctxt->b ^ 0x5, ctxt->eflags)))
+		rc = jmp_rel(ctxt, ctxt->src.val);
+
+	return rc;
+}

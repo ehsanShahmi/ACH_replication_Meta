@@ -1,0 +1,322 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+bpf: Fix hashtab overflow check on 32-bit arches
+
+The hashtab code relies on roundup_pow_of_two() to compute the number of
+hash buckets, and contains an overflow check by checking if the
+resulting value is 0. However, on 32-bit arches, the roundup code itself
+can overflow by doing a 32-bit left-shift of an unsigned long value,
+which is undefined behaviour, so it is not guaranteed to truncate
+neatly. This was triggered by syzbot on the DEVMAP_HASH type, which
+contains the same check, copied from the hashtab code. So apply the same
+fix to hashtab, by moving the overflow check to before the roundup.
+
+Fixes: daaf427c6ab3 ("bpf: fix arraymap NULL deref and missing overflow and zero size checks")
+Signed-off-by: Toke Høiland-Jørgensen <toke@redhat.com>
+Message-ID: <20240307120340.99577-3-toke@redhat.com>
+Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+
+
+
+The vulnerable function:
+static struct bpf_map *htab_map_alloc(union bpf_attr *attr)
+{
+	bool percpu = (attr->map_type == BPF_MAP_TYPE_PERCPU_HASH ||
+		       attr->map_type == BPF_MAP_TYPE_LRU_PERCPU_HASH);
+	bool lru = (attr->map_type == BPF_MAP_TYPE_LRU_HASH ||
+		    attr->map_type == BPF_MAP_TYPE_LRU_PERCPU_HASH);
+	/* percpu_lru means each cpu has its own LRU list.
+	 * it is different from BPF_MAP_TYPE_PERCPU_HASH where
+	 * the map's value itself is percpu.  percpu_lru has
+	 * nothing to do with the map's value.
+	 */
+	bool percpu_lru = (attr->map_flags & BPF_F_NO_COMMON_LRU);
+	bool prealloc = !(attr->map_flags & BPF_F_NO_PREALLOC);
+	struct bpf_htab *htab;
+	int err, i;
+
+	htab = bpf_map_area_alloc(sizeof(*htab), NUMA_NO_NODE);
+	if (!htab)
+		return ERR_PTR(-ENOMEM);
+
+	lockdep_register_key(&htab->lockdep_key);
+
+	bpf_map_init_from_attr(&htab->map, attr);
+
+	if (percpu_lru) {
+		/* ensure each CPU's lru list has >=1 elements.
+		 * since we are at it, make each lru list has the same
+		 * number of elements.
+		 */
+		htab->map.max_entries = roundup(attr->max_entries,
+						num_possible_cpus());
+		if (htab->map.max_entries < attr->max_entries)
+			htab->map.max_entries = rounddown(attr->max_entries,
+							  num_possible_cpus());
+	}
+
+	/* hash table size must be power of 2 */
+	htab->n_buckets = roundup_pow_of_two(htab->map.max_entries);
+
+	htab->elem_size = sizeof(struct htab_elem) +
+			  round_up(htab->map.key_size, 8);
+	if (percpu)
+		htab->elem_size += sizeof(void *);
+	else
+		htab->elem_size += round_up(htab->map.value_size, 8);
+
+	err = -E2BIG;
+	/* prevent zero size kmalloc and check for u32 overflow */
+	if (htab->n_buckets == 0 ||
+	    htab->n_buckets > U32_MAX / sizeof(struct bucket))
+		goto free_htab;
+
+	err = bpf_map_init_elem_count(&htab->map);
+	if (err)
+		goto free_htab;
+
+	err = -ENOMEM;
+	htab->buckets = bpf_map_area_alloc(htab->n_buckets *
+					   sizeof(struct bucket),
+					   htab->map.numa_node);
+	if (!htab->buckets)
+		goto free_elem_count;
+
+	for (i = 0; i < HASHTAB_MAP_LOCK_COUNT; i++) {
+		htab->map_locked[i] = bpf_map_alloc_percpu(&htab->map,
+							   sizeof(int),
+							   sizeof(int),
+							   GFP_USER);
+		if (!htab->map_locked[i])
+			goto free_map_locked;
+	}
+
+	if (htab->map.map_flags & BPF_F_ZERO_SEED)
+		htab->hashrnd = 0;
+	else
+		htab->hashrnd = get_random_u32();
+
+	htab_init_buckets(htab);
+
+/* compute_batch_value() computes batch value as num_online_cpus() * 2
+ * and __percpu_counter_compare() needs
+ * htab->max_entries - cur_number_of_elems to be more than batch * num_online_cpus()
+ * for percpu_counter to be faster than atomic_t. In practice the average bpf
+ * hash map size is 10k, which means that a system with 64 cpus will fill
+ * hashmap to 20% of 10k before percpu_counter becomes ineffective. Therefore
+ * define our own batch count as 32 then 10k hash map can be filled up to 80%:
+ * 10k - 8k > 32 _batch_ * 64 _cpus_
+ * and __percpu_counter_compare() will still be fast. At that point hash map
+ * collisions will dominate its performance anyway. Assume that hash map filled
+ * to 50+% isn't going to be O(1) and use the following formula to choose
+ * between percpu_counter and atomic_t.
+ */
+#define PERCPU_COUNTER_BATCH 32
+	if (attr->max_entries / 2 > num_online_cpus() * PERCPU_COUNTER_BATCH)
+		htab->use_percpu_counter = true;
+
+	if (htab->use_percpu_counter) {
+		err = percpu_counter_init(&htab->pcount, 0, GFP_KERNEL);
+		if (err)
+			goto free_map_locked;
+	}
+
+	if (prealloc) {
+		err = prealloc_init(htab);
+		if (err)
+			goto free_map_locked;
+
+		if (!percpu && !lru) {
+			/* lru itself can remove the least used element, so
+			 * there is no need for an extra elem during map_update.
+			 */
+			err = alloc_extra_elems(htab);
+			if (err)
+				goto free_prealloc;
+		}
+	} else {
+		err = bpf_mem_alloc_init(&htab->ma, htab->elem_size, false);
+		if (err)
+			goto free_map_locked;
+		if (percpu) {
+			err = bpf_mem_alloc_init(&htab->pcpu_ma,
+						 round_up(htab->map.value_size, 8), true);
+			if (err)
+				goto free_map_locked;
+		}
+	}
+
+	return &htab->map;
+
+free_prealloc:
+	prealloc_destroy(htab);
+free_map_locked:
+	if (htab->use_percpu_counter)
+		percpu_counter_destroy(&htab->pcount);
+	for (i = 0; i < HASHTAB_MAP_LOCK_COUNT; i++)
+		free_percpu(htab->map_locked[i]);
+	bpf_map_area_free(htab->buckets);
+	bpf_mem_alloc_destroy(&htab->pcpu_ma);
+	bpf_mem_alloc_destroy(&htab->ma);
+free_elem_count:
+	bpf_map_free_elem_count(&htab->map);
+free_htab:
+	lockdep_unregister_key(&htab->lockdep_key);
+	bpf_map_area_free(htab);
+	return ERR_PTR(err);
+}
+
+
+
+The corrected function:
+static struct bpf_map *htab_map_alloc(union bpf_attr *attr)
+{
+	bool percpu = (attr->map_type == BPF_MAP_TYPE_PERCPU_HASH ||
+		       attr->map_type == BPF_MAP_TYPE_LRU_PERCPU_HASH);
+	bool lru = (attr->map_type == BPF_MAP_TYPE_LRU_HASH ||
+		    attr->map_type == BPF_MAP_TYPE_LRU_PERCPU_HASH);
+	/* percpu_lru means each cpu has its own LRU list.
+	 * it is different from BPF_MAP_TYPE_PERCPU_HASH where
+	 * the map's value itself is percpu.  percpu_lru has
+	 * nothing to do with the map's value.
+	 */
+	bool percpu_lru = (attr->map_flags & BPF_F_NO_COMMON_LRU);
+	bool prealloc = !(attr->map_flags & BPF_F_NO_PREALLOC);
+	struct bpf_htab *htab;
+	int err, i;
+
+	htab = bpf_map_area_alloc(sizeof(*htab), NUMA_NO_NODE);
+	if (!htab)
+		return ERR_PTR(-ENOMEM);
+
+	lockdep_register_key(&htab->lockdep_key);
+
+	bpf_map_init_from_attr(&htab->map, attr);
+
+	if (percpu_lru) {
+		/* ensure each CPU's lru list has >=1 elements.
+		 * since we are at it, make each lru list has the same
+		 * number of elements.
+		 */
+		htab->map.max_entries = roundup(attr->max_entries,
+						num_possible_cpus());
+		if (htab->map.max_entries < attr->max_entries)
+			htab->map.max_entries = rounddown(attr->max_entries,
+							  num_possible_cpus());
+	}
+
+	/* hash table size must be power of 2; roundup_pow_of_two() can overflow
+	 * into UB on 32-bit arches, so check that first
+	 */
+	err = -E2BIG;
+	if (htab->map.max_entries > 1UL << 31)
+		goto free_htab;
+
+	htab->n_buckets = roundup_pow_of_two(htab->map.max_entries);
+
+	htab->elem_size = sizeof(struct htab_elem) +
+			  round_up(htab->map.key_size, 8);
+	if (percpu)
+		htab->elem_size += sizeof(void *);
+	else
+		htab->elem_size += round_up(htab->map.value_size, 8);
+
+	/* check for u32 overflow */
+	if (htab->n_buckets > U32_MAX / sizeof(struct bucket))
+		goto free_htab;
+
+	err = bpf_map_init_elem_count(&htab->map);
+	if (err)
+		goto free_htab;
+
+	err = -ENOMEM;
+	htab->buckets = bpf_map_area_alloc(htab->n_buckets *
+					   sizeof(struct bucket),
+					   htab->map.numa_node);
+	if (!htab->buckets)
+		goto free_elem_count;
+
+	for (i = 0; i < HASHTAB_MAP_LOCK_COUNT; i++) {
+		htab->map_locked[i] = bpf_map_alloc_percpu(&htab->map,
+							   sizeof(int),
+							   sizeof(int),
+							   GFP_USER);
+		if (!htab->map_locked[i])
+			goto free_map_locked;
+	}
+
+	if (htab->map.map_flags & BPF_F_ZERO_SEED)
+		htab->hashrnd = 0;
+	else
+		htab->hashrnd = get_random_u32();
+
+	htab_init_buckets(htab);
+
+/* compute_batch_value() computes batch value as num_online_cpus() * 2
+ * and __percpu_counter_compare() needs
+ * htab->max_entries - cur_number_of_elems to be more than batch * num_online_cpus()
+ * for percpu_counter to be faster than atomic_t. In practice the average bpf
+ * hash map size is 10k, which means that a system with 64 cpus will fill
+ * hashmap to 20% of 10k before percpu_counter becomes ineffective. Therefore
+ * define our own batch count as 32 then 10k hash map can be filled up to 80%:
+ * 10k - 8k > 32 _batch_ * 64 _cpus_
+ * and __percpu_counter_compare() will still be fast. At that point hash map
+ * collisions will dominate its performance anyway. Assume that hash map filled
+ * to 50+% isn't going to be O(1) and use the following formula to choose
+ * between percpu_counter and atomic_t.
+ */
+#define PERCPU_COUNTER_BATCH 32
+	if (attr->max_entries / 2 > num_online_cpus() * PERCPU_COUNTER_BATCH)
+		htab->use_percpu_counter = true;
+
+	if (htab->use_percpu_counter) {
+		err = percpu_counter_init(&htab->pcount, 0, GFP_KERNEL);
+		if (err)
+			goto free_map_locked;
+	}
+
+	if (prealloc) {
+		err = prealloc_init(htab);
+		if (err)
+			goto free_map_locked;
+
+		if (!percpu && !lru) {
+			/* lru itself can remove the least used element, so
+			 * there is no need for an extra elem during map_update.
+			 */
+			err = alloc_extra_elems(htab);
+			if (err)
+				goto free_prealloc;
+		}
+	} else {
+		err = bpf_mem_alloc_init(&htab->ma, htab->elem_size, false);
+		if (err)
+			goto free_map_locked;
+		if (percpu) {
+			err = bpf_mem_alloc_init(&htab->pcpu_ma,
+						 round_up(htab->map.value_size, 8), true);
+			if (err)
+				goto free_map_locked;
+		}
+	}
+
+	return &htab->map;
+
+free_prealloc:
+	prealloc_destroy(htab);
+free_map_locked:
+	if (htab->use_percpu_counter)
+		percpu_counter_destroy(&htab->pcount);
+	for (i = 0; i < HASHTAB_MAP_LOCK_COUNT; i++)
+		free_percpu(htab->map_locked[i]);
+	bpf_map_area_free(htab->buckets);
+	bpf_mem_alloc_destroy(&htab->pcpu_ma);
+	bpf_mem_alloc_destroy(&htab->ma);
+free_elem_count:
+	bpf_map_free_elem_count(&htab->map);
+free_htab:
+	lockdep_unregister_key(&htab->lockdep_key);
+	bpf_map_area_free(htab);
+	return ERR_PTR(err);
+}

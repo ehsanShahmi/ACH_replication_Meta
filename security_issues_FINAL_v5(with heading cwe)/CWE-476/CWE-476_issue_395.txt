@@ -1,0 +1,73 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+crypto: rsa - add a check for allocation failure
+
+Static checkers insist that the mpi_alloc() allocation can fail so add
+a check to prevent a NULL dereference.  Small allocations like this
+can't actually fail in current kernels, but adding a check is very
+simple and makes the static checkers happy.
+
+Fixes: 6637e11e4ad2 ("crypto: rsa - allow only odd e and restrict value in FIPS mode")
+Signed-off-by: Dan Carpenter <dan.carpenter@linaro.org>
+Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+
+
+The vulnerable function:
+static int rsa_check_exponent_fips(MPI e)
+{
+	MPI e_max = NULL;
+
+	/* check if odd */
+	if (!mpi_test_bit(e, 0)) {
+		return -EINVAL;
+	}
+
+	/* check if 2^16 < e < 2^256. */
+	if (mpi_cmp_ui(e, 65536) <= 0) {
+		return -EINVAL;
+	}
+
+	e_max = mpi_alloc(0);
+	mpi_set_bit(e_max, 256);
+
+	if (mpi_cmp(e, e_max) >= 0) {
+		mpi_free(e_max);
+		return -EINVAL;
+	}
+
+	mpi_free(e_max);
+	return 0;
+}
+
+
+
+The corrected function:
+static int rsa_check_exponent_fips(MPI e)
+{
+	MPI e_max = NULL;
+
+	/* check if odd */
+	if (!mpi_test_bit(e, 0)) {
+		return -EINVAL;
+	}
+
+	/* check if 2^16 < e < 2^256. */
+	if (mpi_cmp_ui(e, 65536) <= 0) {
+		return -EINVAL;
+	}
+
+	e_max = mpi_alloc(0);
+	if (!e_max)
+		return -ENOMEM;
+	mpi_set_bit(e_max, 256);
+
+	if (mpi_cmp(e, e_max) >= 0) {
+		mpi_free(e_max);
+		return -EINVAL;
+	}
+
+	mpi_free(e_max);
+	return 0;
+}

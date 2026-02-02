@@ -1,0 +1,338 @@
+The vulnerable issue:
+dmaengine: idxd: Let probe fail when workqueue cannot be enabled
+
+The workqueue is enabled when the appropriate driver is loaded and
+disabled when the driver is removed. When the driver is removed it
+assumes that the workqueue was enabled successfully and proceeds to
+free allocations made during workqueue enabling.
+
+Failure during workqueue enabling does not prevent the driver from
+being loaded. This is because the error path within drv_enable_wq()
+returns success unless a second failure is encountered
+during the error path. By returning success it is possible to load
+the driver even if the workqueue cannot be enabled and
+allocations that do not exist are attempted to be freed during
+driver remove.
+
+Some examples of problematic flows:
+(a)
+
+ idxd_dmaengine_drv_probe() -> drv_enable_wq() -> idxd_wq_request_irq():
+ In above flow, if idxd_wq_request_irq() fails then
+ idxd_wq_unmap_portal() is called on error exit path, but
+ drv_enable_wq() returns 0 because idxd_wq_disable() succeeds. The
+ driver is thus loaded successfully.
+
+ idxd_dmaengine_drv_remove()->drv_disable_wq()->idxd_wq_unmap_portal()
+ Above flow on driver unload triggers the WARN in devm_iounmap() because
+ the device resource has already been removed during error path of
+ drv_enable_wq().
+
+(b)
+
+ idxd_dmaengine_drv_probe() -> drv_enable_wq() -> idxd_wq_request_irq():
+ In above flow, if idxd_wq_request_irq() fails then
+ idxd_wq_init_percpu_ref() is never called to initialize the percpu
+ counter, yet the driver loads successfully because drv_enable_wq()
+ returns 0.
+
+ idxd_dmaengine_drv_remove()->__idxd_wq_quiesce()->percpu_ref_kill():
+ Above flow on driver unload triggers a BUG when attempting to drop the
+ initial ref of the uninitialized percpu ref:
+ BUG: kernel NULL pointer dereference, address: 0000000000000010
+
+Fix the drv_enable_wq() error path by returning the original error that
+indicates failure of workqueue enabling. This ensures that the probe
+fails when an error is encountered and the driver remove paths are only
+attempted when the workqueue was enabled successfully.
+
+Fixes: 1f2bb40337f0 ("dmaengine: idxd: move wq_enable() to device.c")
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Reviewed-by: Dave Jiang <dave.jiang@intel.com>
+Reviewed-by: Fenghua Yu <fenghua.yu@intel.com>
+Cc: stable@vger.kernel.org
+Link: https://lore.kernel.org/r/e8d8116e5efa0fd14fadc5adae6ffd319f0e5ff1.1670452419.git.reinette.chatre@intel.com
+Signed-off-by: Vinod Koul <vkoul@kernel.org>
+
+
+
+The vulnerable function:
+int drv_enable_wq(struct idxd_wq *wq)
+{
+	struct idxd_device *idxd = wq->idxd;
+	struct device *dev = &idxd->pdev->dev;
+	int rc = -ENXIO;
+
+	lockdep_assert_held(&wq->wq_lock);
+
+	if (idxd->state != IDXD_DEV_ENABLED) {
+		idxd->cmd_status = IDXD_SCMD_DEV_NOT_ENABLED;
+		goto err;
+	}
+
+	if (wq->state != IDXD_WQ_DISABLED) {
+		dev_dbg(dev, "wq %d already enabled.\n", wq->id);
+		idxd->cmd_status = IDXD_SCMD_WQ_ENABLED;
+		rc = -EBUSY;
+		goto err;
+	}
+
+	if (!wq->group) {
+		dev_dbg(dev, "wq %d not attached to group.\n", wq->id);
+		idxd->cmd_status = IDXD_SCMD_WQ_NO_GRP;
+		goto err;
+	}
+
+	if (strlen(wq->name) == 0) {
+		idxd->cmd_status = IDXD_SCMD_WQ_NO_NAME;
+		dev_dbg(dev, "wq %d name not set.\n", wq->id);
+		goto err;
+	}
+
+	/* Shared WQ checks */
+	if (wq_shared(wq)) {
+		if (!wq_shared_supported(wq)) {
+			idxd->cmd_status = IDXD_SCMD_WQ_NO_SVM;
+			dev_dbg(dev, "PASID not enabled and shared wq.\n");
+			goto err;
+		}
+		/*
+		 * Shared wq with the threshold set to 0 means the user
+		 * did not set the threshold or transitioned from a
+		 * dedicated wq but did not set threshold. A value
+		 * of 0 would effectively disable the shared wq. The
+		 * driver does not allow a value of 0 to be set for
+		 * threshold via sysfs.
+		 */
+		if (wq->threshold == 0) {
+			idxd->cmd_status = IDXD_SCMD_WQ_NO_THRESH;
+			dev_dbg(dev, "Shared wq and threshold 0.\n");
+			goto err;
+		}
+	}
+
+	/*
+	 * In the event that the WQ is configurable for pasid and priv bits.
+	 * For kernel wq, the driver should setup the pasid, pasid_en, and priv bit.
+	 * However, for non-kernel wq, the driver should only set the pasid_en bit for
+	 * shared wq. A dedicated wq that is not 'kernel' type will configure pasid and
+	 * pasid_en later on so there is no need to setup.
+	 */
+	if (test_bit(IDXD_FLAG_CONFIGURABLE, &idxd->flags)) {
+		int priv = 0;
+
+		if (wq_pasid_enabled(wq)) {
+			if (is_idxd_wq_kernel(wq) || wq_shared(wq)) {
+				u32 pasid = wq_dedicated(wq) ? idxd->pasid : 0;
+
+				__idxd_wq_set_pasid_locked(wq, pasid);
+			}
+		}
+
+		if (is_idxd_wq_kernel(wq))
+			priv = 1;
+		__idxd_wq_set_priv_locked(wq, priv);
+	}
+
+	rc = 0;
+	spin_lock(&idxd->dev_lock);
+	if (test_bit(IDXD_FLAG_CONFIGURABLE, &idxd->flags))
+		rc = idxd_device_config(idxd);
+	spin_unlock(&idxd->dev_lock);
+	if (rc < 0) {
+		dev_dbg(dev, "Writing wq %d config failed: %d\n", wq->id, rc);
+		goto err;
+	}
+
+	rc = idxd_wq_enable(wq);
+	if (rc < 0) {
+		dev_dbg(dev, "wq %d enabling failed: %d\n", wq->id, rc);
+		goto err;
+	}
+
+	rc = idxd_wq_map_portal(wq);
+	if (rc < 0) {
+		idxd->cmd_status = IDXD_SCMD_WQ_PORTAL_ERR;
+		dev_dbg(dev, "wq %d portal mapping failed: %d\n", wq->id, rc);
+		goto err_map_portal;
+	}
+
+	wq->client_count = 0;
+
+	rc = idxd_wq_request_irq(wq);
+	if (rc < 0) {
+		idxd->cmd_status = IDXD_SCMD_WQ_IRQ_ERR;
+		dev_dbg(dev, "WQ %d irq setup failed: %d\n", wq->id, rc);
+		goto err_irq;
+	}
+
+	rc = idxd_wq_alloc_resources(wq);
+	if (rc < 0) {
+		idxd->cmd_status = IDXD_SCMD_WQ_RES_ALLOC_ERR;
+		dev_dbg(dev, "WQ resource alloc failed\n");
+		goto err_res_alloc;
+	}
+
+	rc = idxd_wq_init_percpu_ref(wq);
+	if (rc < 0) {
+		idxd->cmd_status = IDXD_SCMD_PERCPU_ERR;
+		dev_dbg(dev, "percpu_ref setup failed\n");
+		goto err_ref;
+	}
+
+	return 0;
+
+err_ref:
+	idxd_wq_free_resources(wq);
+err_res_alloc:
+	idxd_wq_free_irq(wq);
+err_irq:
+	idxd_wq_unmap_portal(wq);
+err_map_portal:
+	rc = idxd_wq_disable(wq, false);
+	if (rc < 0)
+		dev_dbg(dev, "wq %s disable failed\n", dev_name(wq_confdev(wq)));
+err:
+	return rc;
+}
+
+
+
+The corrected function:
+int drv_enable_wq(struct idxd_wq *wq)
+{
+	struct idxd_device *idxd = wq->idxd;
+	struct device *dev = &idxd->pdev->dev;
+	int rc = -ENXIO;
+
+	lockdep_assert_held(&wq->wq_lock);
+
+	if (idxd->state != IDXD_DEV_ENABLED) {
+		idxd->cmd_status = IDXD_SCMD_DEV_NOT_ENABLED;
+		goto err;
+	}
+
+	if (wq->state != IDXD_WQ_DISABLED) {
+		dev_dbg(dev, "wq %d already enabled.\n", wq->id);
+		idxd->cmd_status = IDXD_SCMD_WQ_ENABLED;
+		rc = -EBUSY;
+		goto err;
+	}
+
+	if (!wq->group) {
+		dev_dbg(dev, "wq %d not attached to group.\n", wq->id);
+		idxd->cmd_status = IDXD_SCMD_WQ_NO_GRP;
+		goto err;
+	}
+
+	if (strlen(wq->name) == 0) {
+		idxd->cmd_status = IDXD_SCMD_WQ_NO_NAME;
+		dev_dbg(dev, "wq %d name not set.\n", wq->id);
+		goto err;
+	}
+
+	/* Shared WQ checks */
+	if (wq_shared(wq)) {
+		if (!wq_shared_supported(wq)) {
+			idxd->cmd_status = IDXD_SCMD_WQ_NO_SVM;
+			dev_dbg(dev, "PASID not enabled and shared wq.\n");
+			goto err;
+		}
+		/*
+		 * Shared wq with the threshold set to 0 means the user
+		 * did not set the threshold or transitioned from a
+		 * dedicated wq but did not set threshold. A value
+		 * of 0 would effectively disable the shared wq. The
+		 * driver does not allow a value of 0 to be set for
+		 * threshold via sysfs.
+		 */
+		if (wq->threshold == 0) {
+			idxd->cmd_status = IDXD_SCMD_WQ_NO_THRESH;
+			dev_dbg(dev, "Shared wq and threshold 0.\n");
+			goto err;
+		}
+	}
+
+	/*
+	 * In the event that the WQ is configurable for pasid and priv bits.
+	 * For kernel wq, the driver should setup the pasid, pasid_en, and priv bit.
+	 * However, for non-kernel wq, the driver should only set the pasid_en bit for
+	 * shared wq. A dedicated wq that is not 'kernel' type will configure pasid and
+	 * pasid_en later on so there is no need to setup.
+	 */
+	if (test_bit(IDXD_FLAG_CONFIGURABLE, &idxd->flags)) {
+		int priv = 0;
+
+		if (wq_pasid_enabled(wq)) {
+			if (is_idxd_wq_kernel(wq) || wq_shared(wq)) {
+				u32 pasid = wq_dedicated(wq) ? idxd->pasid : 0;
+
+				__idxd_wq_set_pasid_locked(wq, pasid);
+			}
+		}
+
+		if (is_idxd_wq_kernel(wq))
+			priv = 1;
+		__idxd_wq_set_priv_locked(wq, priv);
+	}
+
+	rc = 0;
+	spin_lock(&idxd->dev_lock);
+	if (test_bit(IDXD_FLAG_CONFIGURABLE, &idxd->flags))
+		rc = idxd_device_config(idxd);
+	spin_unlock(&idxd->dev_lock);
+	if (rc < 0) {
+		dev_dbg(dev, "Writing wq %d config failed: %d\n", wq->id, rc);
+		goto err;
+	}
+
+	rc = idxd_wq_enable(wq);
+	if (rc < 0) {
+		dev_dbg(dev, "wq %d enabling failed: %d\n", wq->id, rc);
+		goto err;
+	}
+
+	rc = idxd_wq_map_portal(wq);
+	if (rc < 0) {
+		idxd->cmd_status = IDXD_SCMD_WQ_PORTAL_ERR;
+		dev_dbg(dev, "wq %d portal mapping failed: %d\n", wq->id, rc);
+		goto err_map_portal;
+	}
+
+	wq->client_count = 0;
+
+	rc = idxd_wq_request_irq(wq);
+	if (rc < 0) {
+		idxd->cmd_status = IDXD_SCMD_WQ_IRQ_ERR;
+		dev_dbg(dev, "WQ %d irq setup failed: %d\n", wq->id, rc);
+		goto err_irq;
+	}
+
+	rc = idxd_wq_alloc_resources(wq);
+	if (rc < 0) {
+		idxd->cmd_status = IDXD_SCMD_WQ_RES_ALLOC_ERR;
+		dev_dbg(dev, "WQ resource alloc failed\n");
+		goto err_res_alloc;
+	}
+
+	rc = idxd_wq_init_percpu_ref(wq);
+	if (rc < 0) {
+		idxd->cmd_status = IDXD_SCMD_PERCPU_ERR;
+		dev_dbg(dev, "percpu_ref setup failed\n");
+		goto err_ref;
+	}
+
+	return 0;
+
+err_ref:
+	idxd_wq_free_resources(wq);
+err_res_alloc:
+	idxd_wq_free_irq(wq);
+err_irq:
+	idxd_wq_unmap_portal(wq);
+err_map_portal:
+	if (idxd_wq_disable(wq, false))
+		dev_dbg(dev, "wq %s disable failed\n", dev_name(wq_confdev(wq)));
+err:
+	return rc;
+}

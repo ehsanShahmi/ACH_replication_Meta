@@ -1,0 +1,75 @@
+The vulnerable issue:
+Bluetooth: hci_core: Fix leaking sent_cmd skb
+
+sent_cmd memory is not freed before freeing hci_dev causing it to leak
+it contents.
+
+Signed-off-by: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Signed-off-by: Marcel Holtmann <marcel@holtmann.org>
+
+
+
+The vulnerable function:
+void hci_release_dev(struct hci_dev *hdev)
+{
+	debugfs_remove_recursive(hdev->debugfs);
+	kfree_const(hdev->hw_info);
+	kfree_const(hdev->fw_info);
+
+	destroy_workqueue(hdev->workqueue);
+	destroy_workqueue(hdev->req_workqueue);
+
+	hci_dev_lock(hdev);
+	hci_bdaddr_list_clear(&hdev->reject_list);
+	hci_bdaddr_list_clear(&hdev->accept_list);
+	hci_uuids_clear(hdev);
+	hci_link_keys_clear(hdev);
+	hci_smp_ltks_clear(hdev);
+	hci_smp_irks_clear(hdev);
+	hci_remote_oob_data_clear(hdev);
+	hci_adv_instances_clear(hdev);
+	hci_adv_monitors_clear(hdev);
+	hci_bdaddr_list_clear(&hdev->le_accept_list);
+	hci_bdaddr_list_clear(&hdev->le_resolv_list);
+	hci_conn_params_clear_all(hdev);
+	hci_discovery_filter_clear(hdev);
+	hci_blocked_keys_clear(hdev);
+	hci_dev_unlock(hdev);
+
+	ida_simple_remove(&hci_index_ida, hdev->id);
+	kfree(hdev);
+}
+
+
+
+The corrected function:
+void hci_release_dev(struct hci_dev *hdev)
+{
+	debugfs_remove_recursive(hdev->debugfs);
+	kfree_const(hdev->hw_info);
+	kfree_const(hdev->fw_info);
+
+	destroy_workqueue(hdev->workqueue);
+	destroy_workqueue(hdev->req_workqueue);
+
+	hci_dev_lock(hdev);
+	hci_bdaddr_list_clear(&hdev->reject_list);
+	hci_bdaddr_list_clear(&hdev->accept_list);
+	hci_uuids_clear(hdev);
+	hci_link_keys_clear(hdev);
+	hci_smp_ltks_clear(hdev);
+	hci_smp_irks_clear(hdev);
+	hci_remote_oob_data_clear(hdev);
+	hci_adv_instances_clear(hdev);
+	hci_adv_monitors_clear(hdev);
+	hci_bdaddr_list_clear(&hdev->le_accept_list);
+	hci_bdaddr_list_clear(&hdev->le_resolv_list);
+	hci_conn_params_clear_all(hdev);
+	hci_discovery_filter_clear(hdev);
+	hci_blocked_keys_clear(hdev);
+	hci_dev_unlock(hdev);
+
+	ida_simple_remove(&hci_index_ida, hdev->id);
+	kfree_skb(hdev->sent_cmd);
+	kfree(hdev);
+}

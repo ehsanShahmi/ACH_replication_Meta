@@ -1,0 +1,79 @@
+The vulnerable issue:
+x86/mm: Add barriers and document switch_mm()-vs-flush synchronization
+
+When switch_mm() activates a new PGD, it also sets a bit that
+tells other CPUs that the PGD is in use so that TLB flush IPIs
+will be sent.  In order for that to work correctly, the bit
+needs to be visible prior to loading the PGD and therefore
+starting to fill the local TLB.
+
+Document all the barriers that make this work correctly and add
+a couple that were missing.
+
+Signed-off-by: Andy Lutomirski <luto@kernel.org>
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Cc: Andy Lutomirski <luto@amacapital.net>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Brian Gerst <brgerst@gmail.com>
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Denys Vlasenko <dvlasenk@redhat.com>
+Cc: H. Peter Anvin <hpa@zytor.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Rik van Riel <riel@redhat.com>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: linux-mm@kvack.org
+Cc: stable@vger.kernel.org
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+
+
+The vulnerable function:
+void flush_tlb_page(struct vm_area_struct *vma, unsigned long start)
+{
+	struct mm_struct *mm = vma->vm_mm;
+
+	preempt_disable();
+
+	if (current->active_mm == mm) {
+		if (current->mm)
+			__flush_tlb_one(start);
+		else
+			leave_mm(smp_processor_id());
+	}
+
+	if (cpumask_any_but(mm_cpumask(mm), smp_processor_id()) < nr_cpu_ids)
+		flush_tlb_others(mm_cpumask(mm), mm, start, 0UL);
+
+	preempt_enable();
+}
+
+
+
+The corrected function:
+void flush_tlb_page(struct vm_area_struct *vma, unsigned long start)
+{
+	struct mm_struct *mm = vma->vm_mm;
+
+	preempt_disable();
+
+	if (current->active_mm == mm) {
+		if (current->mm) {
+			/*
+			 * Implicit full barrier (INVLPG) that synchronizes
+			 * with switch_mm.
+			 */
+			__flush_tlb_one(start);
+		} else {
+			leave_mm(smp_processor_id());
+
+			/* Synchronize with switch_mm. */
+			smp_mb();
+		}
+	}
+
+	if (cpumask_any_but(mm_cpumask(mm), smp_processor_id()) < nr_cpu_ids)
+		flush_tlb_others(mm_cpumask(mm), mm, start, 0UL);
+
+	preempt_enable();
+}

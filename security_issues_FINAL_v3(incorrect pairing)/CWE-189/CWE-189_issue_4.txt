@@ -1,0 +1,59 @@
+The vulnerable issue:
+remove div_long_long_rem
+
+x86 is the only arch right now, which provides an optimized for
+div_long_long_rem and it has the downside that one has to be very careful that
+the divide doesn't overflow.
+
+The API is a little akward, as the arguments for the unsigned divide are
+signed.  The signed version also doesn't handle a negative divisor and
+produces worse code on 64bit archs.
+
+There is little incentive to keep this API alive, so this converts the few
+users to the new API.
+
+Signed-off-by: Roman Zippel <zippel@linux-m68k.org>
+Cc: Ralf Baechle <ralf@linux-mips.org>
+Cc: Ingo Molnar <mingo@elte.hu>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: john stultz <johnstul@us.ibm.com>
+Cc: Christoph Lameter <clameter@sgi.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+static void sgi_timer_get(struct k_itimer *timr, struct itimerspec *cur_setting)
+{
+
+	if (timr->it.mmtimer.clock == TIMER_OFF) {
+		cur_setting->it_interval.tv_nsec = 0;
+		cur_setting->it_interval.tv_sec = 0;
+		cur_setting->it_value.tv_nsec = 0;
+		cur_setting->it_value.tv_sec =0;
+		return;
+	}
+
+	ns_to_timespec(cur_setting->it_interval, timr->it.mmtimer.incr * sgi_clock_period);
+	ns_to_timespec(cur_setting->it_value, (timr->it.mmtimer.expires - rtc_time())* sgi_clock_period);
+	return;
+}
+
+
+
+The corrected function:
+static void sgi_timer_get(struct k_itimer *timr, struct itimerspec *cur_setting)
+{
+
+	if (timr->it.mmtimer.clock == TIMER_OFF) {
+		cur_setting->it_interval.tv_nsec = 0;
+		cur_setting->it_interval.tv_sec = 0;
+		cur_setting->it_value.tv_nsec = 0;
+		cur_setting->it_value.tv_sec =0;
+		return;
+	}
+
+	cur_setting->it_interval = ns_to_timespec(timr->it.mmtimer.incr * sgi_clock_period);
+	cur_setting->it_value = ns_to_timespec((timr->it.mmtimer.expires - rtc_time()) * sgi_clock_period);
+}

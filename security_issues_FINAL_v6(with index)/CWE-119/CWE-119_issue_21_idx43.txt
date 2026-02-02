@@ -1,0 +1,55 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+uml: check length in exitcode_proc_write()
+
+We don't cap the size of buffer from the user so we could write past the
+end of the array here.  Only root can write to this file.
+
+Reported-by: Nico Golde <nico@ngolde.de>
+Reported-by: Fabian Yamaguchi <fabs@goesec.de>
+Signed-off-by: Dan Carpenter <dan.carpenter@oracle.com>
+Cc: stable@kernel.org
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+static ssize_t exitcode_proc_write(struct file *file,
+		const char __user *buffer, size_t count, loff_t *pos)
+{
+	char *end, buf[sizeof("nnnnn\0")];
+	int tmp;
+
+	if (copy_from_user(buf, buffer, count))
+		return -EFAULT;
+
+	tmp = simple_strtol(buf, &end, 0);
+	if ((*end != '\0') && !isspace(*end))
+		return -EINVAL;
+
+	uml_exitcode = tmp;
+	return count;
+}
+
+
+
+The corrected function:
+static ssize_t exitcode_proc_write(struct file *file,
+		const char __user *buffer, size_t count, loff_t *pos)
+{
+	char *end, buf[sizeof("nnnnn\0")];
+	size_t size;
+	int tmp;
+
+	size = min(count, sizeof(buf));
+	if (copy_from_user(buf, buffer, size))
+		return -EFAULT;
+
+	tmp = simple_strtol(buf, &end, 0);
+	if ((*end != '\0') && !isspace(*end))
+		return -EINVAL;
+
+	uml_exitcode = tmp;
+	return count;
+}

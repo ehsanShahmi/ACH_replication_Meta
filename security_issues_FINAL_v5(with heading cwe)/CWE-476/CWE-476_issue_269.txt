@@ -1,0 +1,139 @@
+This issue file has CWE-476. Your task is to create this CWE-476 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+ASoC: SOF: Intel: hda: fix null deref on system suspend entry
+
+When system enters suspend with an active stream, SOF core
+calls hw_params_upon_resume(). On Intel platforms with HDA DMA used
+to manage the link DMA, this leads to call chain of
+
+   hda_dsp_set_hw_params_upon_resume()
+ -> hda_dsp_dais_suspend()
+ -> hda_dai_suspend()
+ -> hda_ipc4_post_trigger()
+
+A bug is hit in hda_dai_suspend() as hda_link_dma_cleanup() is run first,
+which clears hext_stream->link_substream, and then hda_ipc4_post_trigger()
+is called with a NULL snd_pcm_substream pointer.
+
+Fixes: 2b009fa0823c ("ASoC: SOF: Intel: hda: Unify DAI drv ops for IPC3 and IPC4")
+Link: https://github.com/thesofproject/linux/issues/5080
+Reviewed-by: Bard Liao <yung-chuan.liao@linux.intel.com>
+Signed-off-by: Kai Vehmanen <kai.vehmanen@linux.intel.com>
+Signed-off-by: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Link: https://patch.msgid.link/20240704085708.371414-1-pierre-louis.bossart@linux.intel.com
+Signed-off-by: Mark Brown <broonie@kernel.org>
+
+
+
+The vulnerable function:
+static int hda_dai_suspend(struct hdac_bus *bus)
+{
+	struct snd_soc_pcm_runtime *rtd;
+	struct hdac_ext_stream *hext_stream;
+	struct hdac_stream *s;
+	int ret;
+
+	/* set internal flag for BE */
+	list_for_each_entry(s, &bus->stream_list, list) {
+
+		hext_stream = stream_to_hdac_ext_stream(s);
+
+		/*
+		 * clear stream. This should already be taken care for running
+		 * streams when the SUSPEND trigger is called. But paused
+		 * streams do not get suspended, so this needs to be done
+		 * explicitly during suspend.
+		 */
+		if (hext_stream->link_substream) {
+			const struct hda_dai_widget_dma_ops *ops;
+			struct snd_sof_widget *swidget;
+			struct snd_soc_dapm_widget *w;
+			struct snd_soc_dai *cpu_dai;
+			struct snd_sof_dev *sdev;
+			struct snd_sof_dai *sdai;
+
+			rtd = snd_soc_substream_to_rtd(hext_stream->link_substream);
+			cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+			w = snd_soc_dai_get_widget(cpu_dai, hdac_stream(hext_stream)->direction);
+			swidget = w->dobj.private;
+			sdev = widget_to_sdev(w);
+			sdai = swidget->private;
+			ops = sdai->platform_private;
+
+			ret = hda_link_dma_cleanup(hext_stream->link_substream,
+						   hext_stream,
+						   cpu_dai);
+			if (ret < 0)
+				return ret;
+
+			/* for consistency with TRIGGER_SUSPEND  */
+			if (ops->post_trigger) {
+				ret = ops->post_trigger(sdev, cpu_dai,
+							hext_stream->link_substream,
+							SNDRV_PCM_TRIGGER_SUSPEND);
+				if (ret < 0)
+					return ret;
+			}
+		}
+	}
+
+	return 0;
+}
+
+
+
+The corrected function:
+static int hda_dai_suspend(struct hdac_bus *bus)
+{
+	struct snd_soc_pcm_runtime *rtd;
+	struct hdac_ext_stream *hext_stream;
+	struct hdac_stream *s;
+	int ret;
+
+	/* set internal flag for BE */
+	list_for_each_entry(s, &bus->stream_list, list) {
+
+		hext_stream = stream_to_hdac_ext_stream(s);
+
+		/*
+		 * clear stream. This should already be taken care for running
+		 * streams when the SUSPEND trigger is called. But paused
+		 * streams do not get suspended, so this needs to be done
+		 * explicitly during suspend.
+		 */
+		if (hext_stream->link_substream) {
+			const struct hda_dai_widget_dma_ops *ops;
+			struct snd_sof_widget *swidget;
+			struct snd_soc_dapm_widget *w;
+			struct snd_soc_dai *cpu_dai;
+			struct snd_sof_dev *sdev;
+			struct snd_sof_dai *sdai;
+
+			rtd = snd_soc_substream_to_rtd(hext_stream->link_substream);
+			cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+			w = snd_soc_dai_get_widget(cpu_dai, hdac_stream(hext_stream)->direction);
+			swidget = w->dobj.private;
+			sdev = widget_to_sdev(w);
+			sdai = swidget->private;
+			ops = sdai->platform_private;
+
+			/* for consistency with TRIGGER_SUSPEND  */
+			if (ops->post_trigger) {
+				ret = ops->post_trigger(sdev, cpu_dai,
+							hext_stream->link_substream,
+							SNDRV_PCM_TRIGGER_SUSPEND);
+				if (ret < 0)
+					return ret;
+			}
+
+			ret = hda_link_dma_cleanup(hext_stream->link_substream,
+						   hext_stream,
+						   cpu_dai);
+			if (ret < 0)
+				return ret;
+		}
+	}
+
+	return 0;
+}

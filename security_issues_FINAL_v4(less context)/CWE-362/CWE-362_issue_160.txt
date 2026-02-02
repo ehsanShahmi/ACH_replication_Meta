@@ -1,0 +1,135 @@
+The vulnerable issue:
+tls: fix race between tx work scheduling and socket close
+
+Similarly to previous commit, the submitting thread (recvmsg/sendmsg)
+may exit as soon as the async crypto handler calls complete().
+Reorder scheduling the work before calling complete().
+This seems more logical in the first place, as it's
+the inverse order of what the submitting thread will do.
+
+Reported-by: valis <sec@valis.email>
+Fixes: a42055e8d2c3 ("net/tls: Add support for async encryption of records for performance")
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Reviewed-by: Simon Horman <horms@kernel.org>
+Reviewed-by: Sabrina Dubroca <sd@queasysnail.net>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static void tls_encrypt_done(void *data, int err)
+{
+	struct tls_sw_context_tx *ctx;
+	struct tls_context *tls_ctx;
+	struct tls_prot_info *prot;
+	struct tls_rec *rec = data;
+	struct scatterlist *sge;
+	struct sk_msg *msg_en;
+	bool ready = false;
+	struct sock *sk;
+
+	msg_en = &rec->msg_encrypted;
+
+	sk = rec->sk;
+	tls_ctx = tls_get_ctx(sk);
+	prot = &tls_ctx->prot_info;
+	ctx = tls_sw_ctx_tx(tls_ctx);
+
+	sge = sk_msg_elem(msg_en, msg_en->sg.curr);
+	sge->offset -= prot->prepend_size;
+	sge->length += prot->prepend_size;
+
+	/* Check if error is previously set on socket */
+	if (err || sk->sk_err) {
+		rec = NULL;
+
+		/* If err is already set on socket, return the same code */
+		if (sk->sk_err) {
+			ctx->async_wait.err = -sk->sk_err;
+		} else {
+			ctx->async_wait.err = err;
+			tls_err_abort(sk, err);
+		}
+	}
+
+	if (rec) {
+		struct tls_rec *first_rec;
+
+		/* Mark the record as ready for transmission */
+		smp_store_mb(rec->tx_ready, true);
+
+		/* If received record is at head of tx_list, schedule tx */
+		first_rec = list_first_entry(&ctx->tx_list,
+					     struct tls_rec, list);
+		if (rec == first_rec)
+			ready = true;
+	}
+
+	if (atomic_dec_and_test(&ctx->encrypt_pending))
+		complete(&ctx->async_wait.completion);
+
+	if (!ready)
+		return;
+
+	/* Schedule the transmission */
+	if (!test_and_set_bit(BIT_TX_SCHEDULED, &ctx->tx_bitmask))
+		schedule_delayed_work(&ctx->tx_work.work, 1);
+}
+
+
+
+The corrected function:
+static void tls_encrypt_done(void *data, int err)
+{
+	struct tls_sw_context_tx *ctx;
+	struct tls_context *tls_ctx;
+	struct tls_prot_info *prot;
+	struct tls_rec *rec = data;
+	struct scatterlist *sge;
+	struct sk_msg *msg_en;
+	struct sock *sk;
+
+	msg_en = &rec->msg_encrypted;
+
+	sk = rec->sk;
+	tls_ctx = tls_get_ctx(sk);
+	prot = &tls_ctx->prot_info;
+	ctx = tls_sw_ctx_tx(tls_ctx);
+
+	sge = sk_msg_elem(msg_en, msg_en->sg.curr);
+	sge->offset -= prot->prepend_size;
+	sge->length += prot->prepend_size;
+
+	/* Check if error is previously set on socket */
+	if (err || sk->sk_err) {
+		rec = NULL;
+
+		/* If err is already set on socket, return the same code */
+		if (sk->sk_err) {
+			ctx->async_wait.err = -sk->sk_err;
+		} else {
+			ctx->async_wait.err = err;
+			tls_err_abort(sk, err);
+		}
+	}
+
+	if (rec) {
+		struct tls_rec *first_rec;
+
+		/* Mark the record as ready for transmission */
+		smp_store_mb(rec->tx_ready, true);
+
+		/* If received record is at head of tx_list, schedule tx */
+		first_rec = list_first_entry(&ctx->tx_list,
+					     struct tls_rec, list);
+		if (rec == first_rec) {
+			/* Schedule the transmission */
+			if (!test_and_set_bit(BIT_TX_SCHEDULED,
+					      &ctx->tx_bitmask))
+				schedule_delayed_work(&ctx->tx_work.work, 1);
+		}
+	}
+
+	if (atomic_dec_and_test(&ctx->encrypt_pending))
+		complete(&ctx->async_wait.completion);
+}

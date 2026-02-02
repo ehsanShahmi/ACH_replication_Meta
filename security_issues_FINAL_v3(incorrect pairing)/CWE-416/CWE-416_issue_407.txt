@@ -1,0 +1,70 @@
+The vulnerable issue:
+media: cpia2_usb: first wake up, then free in disconnect
+
+Kasan reported a use after free in cpia2_usb_disconnect()
+It first freed everything and then woke up those waiting.
+The reverse order is correct.
+
+Fixes: 6c493f8b28c67 ("[media] cpia2: major overhaul to get it in a working state again")
+
+Signed-off-by: Oliver Neukum <oneukum@suse.com>
+Reported-by: syzbot+0c90fc937c84f97d0aa6@syzkaller.appspotmail.com
+Signed-off-by: Hans Verkuil <hverkuil-cisco@xs4all.nl>
+Signed-off-by: Mauro Carvalho Chehab <mchehab+samsung@kernel.org>
+
+
+
+The vulnerable function:
+static void cpia2_usb_disconnect(struct usb_interface *intf)
+{
+	struct camera_data *cam = usb_get_intfdata(intf);
+	usb_set_intfdata(intf, NULL);
+
+	DBG("Stopping stream\n");
+	cpia2_usb_stream_stop(cam);
+
+	mutex_lock(&cam->v4l2_lock);
+	DBG("Unregistering camera\n");
+	cpia2_unregister_camera(cam);
+	v4l2_device_disconnect(&cam->v4l2_dev);
+	mutex_unlock(&cam->v4l2_lock);
+	v4l2_device_put(&cam->v4l2_dev);
+
+	if(cam->buffers) {
+		DBG("Wakeup waiting processes\n");
+		cam->curbuff->status = FRAME_READY;
+		cam->curbuff->length = 0;
+		wake_up_interruptible(&cam->wq_stream);
+	}
+
+	LOG("CPiA2 camera disconnected.\n");
+}
+
+
+
+The corrected function:
+static void cpia2_usb_disconnect(struct usb_interface *intf)
+{
+	struct camera_data *cam = usb_get_intfdata(intf);
+	usb_set_intfdata(intf, NULL);
+
+	DBG("Stopping stream\n");
+	cpia2_usb_stream_stop(cam);
+
+	mutex_lock(&cam->v4l2_lock);
+	DBG("Unregistering camera\n");
+	cpia2_unregister_camera(cam);
+	v4l2_device_disconnect(&cam->v4l2_dev);
+	mutex_unlock(&cam->v4l2_lock);
+
+	if(cam->buffers) {
+		DBG("Wakeup waiting processes\n");
+		cam->curbuff->status = FRAME_READY;
+		cam->curbuff->length = 0;
+		wake_up_interruptible(&cam->wq_stream);
+	}
+
+	v4l2_device_put(&cam->v4l2_dev);
+
+	LOG("CPiA2 camera disconnected.\n");
+}

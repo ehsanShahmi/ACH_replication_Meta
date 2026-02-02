@@ -1,0 +1,99 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+dmaengine: idxd: Fix possible Use-After-Free in irq_process_work_list
+
+Use list_for_each_entry_safe() to allow iterating through the list and
+deleting the entry in the iteration process. The descriptor is freed via
+idxd_desc_complete() and there's a slight chance may cause issue for
+the list iterator when the descriptor is reused by another thread
+without it being deleted from the list.
+
+Fixes: 16e19e11228b ("dmaengine: idxd: Fix list corruption in description completion")
+Signed-off-by: Li RongQing <lirongqing@baidu.com>
+Reviewed-by: Dave Jiang <dave.jiang@intel.com>
+Reviewed-by: Fenghua Yu <fenghua.yu@intel.com>
+Link: https://lore.kernel.org/r/20240603012444.11902-1-lirongqing@baidu.com
+Signed-off-by: Vinod Koul <vkoul@kernel.org>
+
+
+
+The vulnerable function:
+static void irq_process_work_list(struct idxd_irq_entry *irq_entry)
+{
+	LIST_HEAD(flist);
+	struct idxd_desc *desc, *n;
+
+	/*
+	 * This lock protects list corruption from access of list outside of the irq handler
+	 * thread.
+	 */
+	spin_lock(&irq_entry->list_lock);
+	if (list_empty(&irq_entry->work_list)) {
+		spin_unlock(&irq_entry->list_lock);
+		return;
+	}
+
+	list_for_each_entry_safe(desc, n, &irq_entry->work_list, list) {
+		if (desc->completion->status) {
+			list_move_tail(&desc->list, &flist);
+		}
+	}
+
+	spin_unlock(&irq_entry->list_lock);
+
+	list_for_each_entry(desc, &flist, list) {
+		/*
+		 * Check against the original status as ABORT is software defined
+		 * and 0xff, which DSA_COMP_STATUS_MASK can mask out.
+		 */
+		if (unlikely(desc->completion->status == IDXD_COMP_DESC_ABORT)) {
+			idxd_desc_complete(desc, IDXD_COMPLETE_ABORT, true);
+			continue;
+		}
+
+		idxd_desc_complete(desc, IDXD_COMPLETE_NORMAL, true);
+	}
+}
+
+
+
+The corrected function:
+static void irq_process_work_list(struct idxd_irq_entry *irq_entry)
+{
+	LIST_HEAD(flist);
+	struct idxd_desc *desc, *n;
+
+	/*
+	 * This lock protects list corruption from access of list outside of the irq handler
+	 * thread.
+	 */
+	spin_lock(&irq_entry->list_lock);
+	if (list_empty(&irq_entry->work_list)) {
+		spin_unlock(&irq_entry->list_lock);
+		return;
+	}
+
+	list_for_each_entry_safe(desc, n, &irq_entry->work_list, list) {
+		if (desc->completion->status) {
+			list_move_tail(&desc->list, &flist);
+		}
+	}
+
+	spin_unlock(&irq_entry->list_lock);
+
+	list_for_each_entry_safe(desc, n, &flist, list) {
+		/*
+		 * Check against the original status as ABORT is software defined
+		 * and 0xff, which DSA_COMP_STATUS_MASK can mask out.
+		 */
+		list_del(&desc->list);
+
+		if (unlikely(desc->completion->status == IDXD_COMP_DESC_ABORT)) {
+			idxd_desc_complete(desc, IDXD_COMPLETE_ABORT, true);
+			continue;
+		}
+
+		idxd_desc_complete(desc, IDXD_COMPLETE_NORMAL, true);
+	}
+}

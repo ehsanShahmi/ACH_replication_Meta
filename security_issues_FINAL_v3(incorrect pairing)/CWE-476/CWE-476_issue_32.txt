@@ -1,0 +1,223 @@
+The vulnerable issue:
+nfsd: fix handling of cached open files in nfsd4_open codepath
+
+Commit fb70bf124b05 ("NFSD: Instantiate a struct file when creating a
+regular NFSv4 file") added the ability to cache an open fd over a
+compound. There are a couple of problems with the way this currently
+works:
+
+It's racy, as a newly-created nfsd_file can end up with its PENDING bit
+cleared while the nf is hashed, and the nf_file pointer is still zeroed
+out. Other tasks can find it in this state and they expect to see a
+valid nf_file, and can oops if nf_file is NULL.
+
+Also, there is no guarantee that we'll end up creating a new nfsd_file
+if one is already in the hash. If an extant entry is in the hash with a
+valid nf_file, nfs4_get_vfs_file will clobber its nf_file pointer with
+the value of op_file and the old nf_file will leak.
+
+Fix both issues by making a new nfsd_file_acquirei_opened variant that
+takes an optional file pointer. If one is present when this is called,
+we'll take a new reference to it instead of trying to open the file. If
+the nfsd_file already has a valid nf_file, we'll just ignore the
+optional file and pass the nfsd_file back as-is.
+
+Also rework the tracepoints a bit to allow for an "opened" variant and
+don't try to avoid counting acquisitions in the case where we already
+have a cached open file.
+
+Fixes: fb70bf124b05 ("NFSD: Instantiate a struct file when creating a regular NFSv4 file")
+Cc: Trond Myklebust <trondmy@hammerspace.com>
+Reported-by: Stanislav Saner <ssaner@redhat.com>
+Reported-and-Tested-by: Ruben Vestergaard <rubenv@drcmr.dk>
+Reported-and-Tested-by: Torkil Svensgaard <torkil@drcmr.dk>
+Signed-off-by: Jeff Layton <jlayton@kernel.org>
+Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+
+
+
+The vulnerable function:
+static __be32 nfs4_get_vfs_file(struct svc_rqst *rqstp, struct nfs4_file *fp,
+		struct svc_fh *cur_fh, struct nfs4_ol_stateid *stp,
+		struct nfsd4_open *open, bool new_stp)
+{
+	struct nfsd_file *nf = NULL;
+	__be32 status;
+	int oflag = nfs4_access_to_omode(open->op_share_access);
+	int access = nfs4_access_to_access(open->op_share_access);
+	unsigned char old_access_bmap, old_deny_bmap;
+
+	spin_lock(&fp->fi_lock);
+
+	/*
+	 * Are we trying to set a deny mode that would conflict with
+	 * current access?
+	 */
+	status = nfs4_file_check_deny(fp, open->op_share_deny);
+	if (status != nfs_ok) {
+		if (status != nfserr_share_denied) {
+			spin_unlock(&fp->fi_lock);
+			goto out;
+		}
+		if (nfs4_resolve_deny_conflicts_locked(fp, new_stp,
+				stp, open->op_share_deny, false))
+			status = nfserr_jukebox;
+		spin_unlock(&fp->fi_lock);
+		goto out;
+	}
+
+	/* set access to the file */
+	status = nfs4_file_get_access(fp, open->op_share_access);
+	if (status != nfs_ok) {
+		if (status != nfserr_share_denied) {
+			spin_unlock(&fp->fi_lock);
+			goto out;
+		}
+		if (nfs4_resolve_deny_conflicts_locked(fp, new_stp,
+				stp, open->op_share_access, true))
+			status = nfserr_jukebox;
+		spin_unlock(&fp->fi_lock);
+		goto out;
+	}
+
+	/* Set access bits in stateid */
+	old_access_bmap = stp->st_access_bmap;
+	set_access(open->op_share_access, stp);
+
+	/* Set new deny mask */
+	old_deny_bmap = stp->st_deny_bmap;
+	set_deny(open->op_share_deny, stp);
+	fp->fi_share_deny |= (open->op_share_deny & NFS4_SHARE_DENY_BOTH);
+
+	if (!fp->fi_fds[oflag]) {
+		spin_unlock(&fp->fi_lock);
+
+		if (!open->op_filp) {
+			status = nfsd_file_acquire(rqstp, cur_fh, access, &nf);
+			if (status != nfs_ok)
+				goto out_put_access;
+		} else {
+			status = nfsd_file_create(rqstp, cur_fh, access, &nf);
+			if (status != nfs_ok)
+				goto out_put_access;
+			nf->nf_file = open->op_filp;
+			open->op_filp = NULL;
+			trace_nfsd_file_create(rqstp, access, nf);
+		}
+
+		spin_lock(&fp->fi_lock);
+		if (!fp->fi_fds[oflag]) {
+			fp->fi_fds[oflag] = nf;
+			nf = NULL;
+		}
+	}
+	spin_unlock(&fp->fi_lock);
+	if (nf)
+		nfsd_file_put(nf);
+
+	status = nfserrno(nfsd_open_break_lease(cur_fh->fh_dentry->d_inode,
+								access));
+	if (status)
+		goto out_put_access;
+
+	status = nfsd4_truncate(rqstp, cur_fh, open);
+	if (status)
+		goto out_put_access;
+out:
+	return status;
+out_put_access:
+	stp->st_access_bmap = old_access_bmap;
+	nfs4_file_put_access(fp, open->op_share_access);
+	reset_union_bmap_deny(bmap_to_share_mode(old_deny_bmap), stp);
+	goto out;
+}
+
+
+
+The corrected function:
+static __be32 nfs4_get_vfs_file(struct svc_rqst *rqstp, struct nfs4_file *fp,
+		struct svc_fh *cur_fh, struct nfs4_ol_stateid *stp,
+		struct nfsd4_open *open, bool new_stp)
+{
+	struct nfsd_file *nf = NULL;
+	__be32 status;
+	int oflag = nfs4_access_to_omode(open->op_share_access);
+	int access = nfs4_access_to_access(open->op_share_access);
+	unsigned char old_access_bmap, old_deny_bmap;
+
+	spin_lock(&fp->fi_lock);
+
+	/*
+	 * Are we trying to set a deny mode that would conflict with
+	 * current access?
+	 */
+	status = nfs4_file_check_deny(fp, open->op_share_deny);
+	if (status != nfs_ok) {
+		if (status != nfserr_share_denied) {
+			spin_unlock(&fp->fi_lock);
+			goto out;
+		}
+		if (nfs4_resolve_deny_conflicts_locked(fp, new_stp,
+				stp, open->op_share_deny, false))
+			status = nfserr_jukebox;
+		spin_unlock(&fp->fi_lock);
+		goto out;
+	}
+
+	/* set access to the file */
+	status = nfs4_file_get_access(fp, open->op_share_access);
+	if (status != nfs_ok) {
+		if (status != nfserr_share_denied) {
+			spin_unlock(&fp->fi_lock);
+			goto out;
+		}
+		if (nfs4_resolve_deny_conflicts_locked(fp, new_stp,
+				stp, open->op_share_access, true))
+			status = nfserr_jukebox;
+		spin_unlock(&fp->fi_lock);
+		goto out;
+	}
+
+	/* Set access bits in stateid */
+	old_access_bmap = stp->st_access_bmap;
+	set_access(open->op_share_access, stp);
+
+	/* Set new deny mask */
+	old_deny_bmap = stp->st_deny_bmap;
+	set_deny(open->op_share_deny, stp);
+	fp->fi_share_deny |= (open->op_share_deny & NFS4_SHARE_DENY_BOTH);
+
+	if (!fp->fi_fds[oflag]) {
+		spin_unlock(&fp->fi_lock);
+
+		status = nfsd_file_acquire_opened(rqstp, cur_fh, access,
+						  open->op_filp, &nf);
+		if (status != nfs_ok)
+			goto out_put_access;
+
+		spin_lock(&fp->fi_lock);
+		if (!fp->fi_fds[oflag]) {
+			fp->fi_fds[oflag] = nf;
+			nf = NULL;
+		}
+	}
+	spin_unlock(&fp->fi_lock);
+	if (nf)
+		nfsd_file_put(nf);
+
+	status = nfserrno(nfsd_open_break_lease(cur_fh->fh_dentry->d_inode,
+								access));
+	if (status)
+		goto out_put_access;
+
+	status = nfsd4_truncate(rqstp, cur_fh, open);
+	if (status)
+		goto out_put_access;
+out:
+	return status;
+out_put_access:
+	stp->st_access_bmap = old_access_bmap;
+	nfs4_file_put_access(fp, open->op_share_access);
+	reset_union_bmap_deny(bmap_to_share_mode(old_deny_bmap), stp);
+	goto out;
+}

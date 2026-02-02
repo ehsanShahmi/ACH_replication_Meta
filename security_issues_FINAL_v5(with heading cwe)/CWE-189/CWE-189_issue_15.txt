@@ -1,0 +1,82 @@
+This issue file has CWE-189. Your task is to create this CWE-189 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+sound/oss: remove offset from load_patch callbacks
+
+Was: [PATCH] sound/oss/midi_synth: prevent underflow, use of
+uninitialized value, and signedness issue
+
+The offset passed to midi_synth_load_patch() can be essentially
+arbitrary.  If it's greater than the header length, this will result in
+a copy_from_user(dst, src, negative_val).  While this will just return
+-EFAULT on x86, on other architectures this may cause memory corruption.
+Additionally, the length field of the sysex_info structure may not be
+initialized prior to its use.  Finally, a signed comparison may result
+in an unintentionally large loop.
+
+On suggestion by Takashi Iwai, version two removes the offset argument
+from the load_patch callbacks entirely, which also resolves similar
+issues in opl3.  Compile tested only.
+
+v3 adjusts comments and hopefully gets copy offsets right.
+
+Signed-off-by: Dan Rosenberg <drosenberg@vsecurity.com>
+Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+
+
+The vulnerable function:
+static int opl3_load_patch(int dev, int format, const char __user *addr,
+		int offs, int count, int pmgr_flag)
+{
+	struct sbi_instrument ins;
+
+	if (count <sizeof(ins))
+	{
+		printk(KERN_WARNING "FM Error: Patch record too short\n");
+		return -EINVAL;
+	}
+
+	/*
+	 * What the fuck is going on here?  We leave junk in the beginning
+	 * of ins and then check the field pretty close to that beginning?
+	 */
+	if(copy_from_user(&((char *) &ins)[offs], addr + offs, sizeof(ins) - offs))
+		return -EFAULT;
+
+	if (ins.channel < 0 || ins.channel >= SBFM_MAXINSTR)
+	{
+		printk(KERN_WARNING "FM Error: Invalid instrument number %d\n", ins.channel);
+		return -EINVAL;
+	}
+	ins.key = format;
+
+	return store_instr(ins.channel, &ins);
+}
+
+
+
+The corrected function:
+static int opl3_load_patch(int dev, int format, const char __user *addr,
+		int count, int pmgr_flag)
+{
+	struct sbi_instrument ins;
+
+	if (count <sizeof(ins))
+	{
+		printk(KERN_WARNING "FM Error: Patch record too short\n");
+		return -EINVAL;
+	}
+
+	if (copy_from_user(&ins, addr, sizeof(ins)))
+		return -EFAULT;
+
+	if (ins.channel < 0 || ins.channel >= SBFM_MAXINSTR)
+	{
+		printk(KERN_WARNING "FM Error: Invalid instrument number %d\n", ins.channel);
+		return -EINVAL;
+	}
+	ins.key = format;
+
+	return store_instr(ins.channel, &ins);
+}

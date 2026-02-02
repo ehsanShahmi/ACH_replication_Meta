@@ -1,0 +1,109 @@
+This issue file has CWE-362. Your task is to create this CWE-362 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+ptrace: ensure arch_ptrace/ptrace_request can never race with SIGKILL
+
+putreg() assumes that the tracee is not running and pt_regs_access() can
+safely play with its stack.  However a killed tracee can return from
+ptrace_stop() to the low-level asm code and do RESTORE_REST, this means
+that debugger can actually read/modify the kernel stack until the tracee
+does SAVE_REST again.
+
+set_task_blockstep() can race with SIGKILL too and in some sense this
+race is even worse, the very fact the tracee can be woken up breaks the
+logic.
+
+As Linus suggested we can clear TASK_WAKEKILL around the arch_ptrace()
+call, this ensures that nobody can ever wakeup the tracee while the
+debugger looks at it.  Not only this fixes the mentioned problems, we
+can do some cleanups/simplifications in arch_ptrace() paths.
+
+Probably ptrace_unfreeze_traced() needs more callers, for example it
+makes sense to make the tracee killable for oom-killer before
+access_process_vm().
+
+While at it, add the comment into may_ptrace_stop() to explain why
+ptrace_stop() still can't rely on SIGKILL and signal_pending_state().
+
+Reported-by: Salman Qazi <sqazi@google.com>
+Reported-by: Suleiman Souhlal <suleiman@google.com>
+Suggested-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Oleg Nesterov <oleg@redhat.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+static int ptrace_check_attach(struct task_struct *child, bool ignore_state)
+{
+	int ret = -ESRCH;
+
+	/*
+	 * We take the read lock around doing both checks to close a
+	 * possible race where someone else was tracing our child and
+	 * detached between these two checks.  After this locked check,
+	 * we are sure that this is our traced child and that can only
+	 * be changed by us so it's not changing right after this.
+	 */
+	read_lock(&tasklist_lock);
+	if ((child->ptrace & PT_PTRACED) && child->parent == current) {
+		/*
+		 * child->sighand can't be NULL, release_task()
+		 * does ptrace_unlink() before __exit_signal().
+		 */
+		spin_lock_irq(&child->sighand->siglock);
+		WARN_ON_ONCE(task_is_stopped(child));
+		if (ignore_state || (task_is_traced(child) &&
+				     !(child->jobctl & JOBCTL_LISTENING)))
+			ret = 0;
+		spin_unlock_irq(&child->sighand->siglock);
+	}
+	read_unlock(&tasklist_lock);
+
+	if (!ret && !ignore_state)
+		ret = wait_task_inactive(child, TASK_TRACED) ? 0 : -ESRCH;
+
+	/* All systems go.. */
+	return ret;
+}
+
+
+
+The corrected function:
+static int ptrace_check_attach(struct task_struct *child, bool ignore_state)
+{
+	int ret = -ESRCH;
+
+	/*
+	 * We take the read lock around doing both checks to close a
+	 * possible race where someone else was tracing our child and
+	 * detached between these two checks.  After this locked check,
+	 * we are sure that this is our traced child and that can only
+	 * be changed by us so it's not changing right after this.
+	 */
+	read_lock(&tasklist_lock);
+	if (child->ptrace && child->parent == current) {
+		WARN_ON(child->state == __TASK_TRACED);
+		/*
+		 * child->sighand can't be NULL, release_task()
+		 * does ptrace_unlink() before __exit_signal().
+		 */
+		if (ignore_state || ptrace_freeze_traced(child))
+			ret = 0;
+	}
+	read_unlock(&tasklist_lock);
+
+	if (!ret && !ignore_state) {
+		if (!wait_task_inactive(child, __TASK_TRACED)) {
+			/*
+			 * This can only happen if may_ptrace_stop() fails and
+			 * ptrace_stop() changes ->state back to TASK_RUNNING,
+			 * so we should not worry about leaking __TASK_TRACED.
+			 */
+			WARN_ON(child->state == __TASK_TRACED);
+			ret = -ESRCH;
+		}
+	}
+
+	return ret;
+}

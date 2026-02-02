@@ -1,0 +1,153 @@
+The vulnerable issue:
+ksmbd: fix heap-based overflow in set_ntacl_dacl()
+
+The testcase use SMB2_SET_INFO_HE command to set a malformed file attribute
+under the label `security.NTACL`. SMB2_QUERY_INFO_HE command in testcase
+trigger the following overflow.
+
+[ 4712.003781] ==================================================================
+[ 4712.003790] BUG: KASAN: slab-out-of-bounds in build_sec_desc+0x842/0x1dd0 [ksmbd]
+[ 4712.003807] Write of size 1060 at addr ffff88801e34c068 by task kworker/0:0/4190
+
+[ 4712.003813] CPU: 0 PID: 4190 Comm: kworker/0:0 Not tainted 5.19.0-rc5 #1
+[ 4712.003850] Workqueue: ksmbd-io handle_ksmbd_work [ksmbd]
+[ 4712.003867] Call Trace:
+[ 4712.003870]  <TASK>
+[ 4712.003873]  dump_stack_lvl+0x49/0x5f
+[ 4712.003935]  print_report.cold+0x5e/0x5cf
+[ 4712.003972]  ? ksmbd_vfs_get_sd_xattr+0x16d/0x500 [ksmbd]
+[ 4712.003984]  ? cmp_map_id+0x200/0x200
+[ 4712.003988]  ? build_sec_desc+0x842/0x1dd0 [ksmbd]
+[ 4712.004000]  kasan_report+0xaa/0x120
+[ 4712.004045]  ? build_sec_desc+0x842/0x1dd0 [ksmbd]
+[ 4712.004056]  kasan_check_range+0x100/0x1e0
+[ 4712.004060]  memcpy+0x3c/0x60
+[ 4712.004064]  build_sec_desc+0x842/0x1dd0 [ksmbd]
+[ 4712.004076]  ? parse_sec_desc+0x580/0x580 [ksmbd]
+[ 4712.004088]  ? ksmbd_acls_fattr+0x281/0x410 [ksmbd]
+[ 4712.004099]  smb2_query_info+0xa8f/0x6110 [ksmbd]
+[ 4712.004111]  ? psi_group_change+0x856/0xd70
+[ 4712.004148]  ? update_load_avg+0x1c3/0x1af0
+[ 4712.004152]  ? asym_cpu_capacity_scan+0x5d0/0x5d0
+[ 4712.004157]  ? xas_load+0x23/0x300
+[ 4712.004162]  ? smb2_query_dir+0x1530/0x1530 [ksmbd]
+[ 4712.004173]  ? _raw_spin_lock_bh+0xe0/0xe0
+[ 4712.004179]  handle_ksmbd_work+0x30e/0x1020 [ksmbd]
+[ 4712.004192]  process_one_work+0x778/0x11c0
+[ 4712.004227]  ? _raw_spin_lock_irq+0x8e/0xe0
+[ 4712.004231]  worker_thread+0x544/0x1180
+[ 4712.004234]  ? __cpuidle_text_end+0x4/0x4
+[ 4712.004239]  kthread+0x282/0x320
+[ 4712.004243]  ? process_one_work+0x11c0/0x11c0
+[ 4712.004246]  ? kthread_complete_and_exit+0x30/0x30
+[ 4712.004282]  ret_from_fork+0x1f/0x30
+
+This patch add the buffer validation for security descriptor that is
+stored by malformed SMB2_SET_INFO_HE command. and allocate large
+response buffer about SMB2_O_INFO_SECURITY file info class.
+
+Fixes: e2f34481b24d ("cifsd: add server-side procedures for SMB3")
+Cc: stable@vger.kernel.org
+Reported-by: zdi-disclosures@trendmicro.com # ZDI-CAN-17771
+Reviewed-by: Hyunchul Lee <hyc.lee@gmail.com>
+Signed-off-by: Namjae Jeon <linkinjeon@kernel.org>
+Signed-off-by: Steve French <stfrench@microsoft.com>
+
+
+
+The vulnerable function:
+static int smb2_calc_max_out_buf_len(struct ksmbd_work *work,
+				     unsigned short hdr2_len,
+				     unsigned int out_buf_len)
+{
+	int free_len;
+
+	if (out_buf_len > work->conn->vals->max_trans_size)
+		return -EINVAL;
+
+	free_len = (int)(work->response_sz -
+			 (get_rfc1002_len(work->response_buf) + 4)) -
+		hdr2_len;
+	if (free_len < 0)
+		return -EINVAL;
+
+	return min_t(int, out_buf_len, free_len);
+}
+
+
+
+The corrected function:
+static int smb2_get_info_sec(struct ksmbd_work *work,
+			     struct smb2_query_info_req *req,
+			     struct smb2_query_info_rsp *rsp)
+{
+	struct ksmbd_file *fp;
+	struct user_namespace *user_ns;
+	struct smb_ntsd *pntsd = (struct smb_ntsd *)rsp->Buffer, *ppntsd = NULL;
+	struct smb_fattr fattr = {{0}};
+	struct inode *inode;
+	__u32 secdesclen;
+	unsigned int id = KSMBD_NO_FID, pid = KSMBD_NO_FID;
+	int addition_info = le32_to_cpu(req->AdditionalInformation);
+	int rc;
+
+	if (addition_info & ~(OWNER_SECINFO | GROUP_SECINFO | DACL_SECINFO |
+			      PROTECTED_DACL_SECINFO |
+			      UNPROTECTED_DACL_SECINFO)) {
+		ksmbd_debug(SMB, "Unsupported addition info: 0x%x)\n",
+		       addition_info);
+
+		pntsd->revision = cpu_to_le16(1);
+		pntsd->type = cpu_to_le16(SELF_RELATIVE | DACL_PROTECTED);
+		pntsd->osidoffset = 0;
+		pntsd->gsidoffset = 0;
+		pntsd->sacloffset = 0;
+		pntsd->dacloffset = 0;
+
+		secdesclen = sizeof(struct smb_ntsd);
+		rsp->OutputBufferLength = cpu_to_le32(secdesclen);
+		inc_rfc1001_len(work->response_buf, secdesclen);
+
+		return 0;
+	}
+
+	if (work->next_smb2_rcv_hdr_off) {
+		if (!has_file_id(req->VolatileFileId)) {
+			ksmbd_debug(SMB, "Compound request set FID = %llu\n",
+				    work->compound_fid);
+			id = work->compound_fid;
+			pid = work->compound_pfid;
+		}
+	}
+
+	if (!has_file_id(id)) {
+		id = req->VolatileFileId;
+		pid = req->PersistentFileId;
+	}
+
+	fp = ksmbd_lookup_fd_slow(work, id, pid);
+	if (!fp)
+		return -ENOENT;
+
+	user_ns = file_mnt_user_ns(fp->filp);
+	inode = file_inode(fp->filp);
+	ksmbd_acls_fattr(&fattr, user_ns, inode);
+
+	if (test_share_config_flag(work->tcon->share_conf,
+				   KSMBD_SHARE_FLAG_ACL_XATTR))
+		ksmbd_vfs_get_sd_xattr(work->conn, user_ns,
+				       fp->filp->f_path.dentry, &ppntsd);
+
+	rc = build_sec_desc(user_ns, pntsd, ppntsd, addition_info,
+			    &secdesclen, &fattr);
+	posix_acl_release(fattr.cf_acls);
+	posix_acl_release(fattr.cf_dacls);
+	kfree(ppntsd);
+	ksmbd_fd_put(work, fp);
+	if (rc)
+		return rc;
+
+	rsp->OutputBufferLength = cpu_to_le32(secdesclen);
+	inc_rfc1001_len(work->response_buf, secdesclen);
+	return 0;
+}

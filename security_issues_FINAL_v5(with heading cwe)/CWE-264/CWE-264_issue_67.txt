@@ -1,0 +1,73 @@
+This issue file has CWE-264. Your task is to create this CWE-264 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+netfilter: x_tables: check for bogus target offset
+
+We're currently asserting that targetoff + targetsize <= nextoff.
+
+Extend it to also check that targetoff is >= sizeof(xt_entry).
+Since this is generic code, add an argument pointing to the start of the
+match/target, we can then derive the base structure size from the delta.
+
+We also need the e->elems pointer in a followup change to validate matches.
+
+Signed-off-by: Florian Westphal <fw@strlen.de>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+
+
+
+The vulnerable function:
+int xt_compat_check_entry_offsets(const void *base,
+				  unsigned int target_offset,
+				  unsigned int next_offset)
+{
+	const struct compat_xt_entry_target *t;
+	const char *e = base;
+
+	if (target_offset + sizeof(*t) > next_offset)
+		return -EINVAL;
+
+	t = (void *)(e + target_offset);
+	if (t->u.target_size < sizeof(*t))
+		return -EINVAL;
+
+	if (target_offset + t->u.target_size > next_offset)
+		return -EINVAL;
+
+	if (strcmp(t->u.user.name, XT_STANDARD_TARGET) == 0 &&
+	    target_offset + sizeof(struct compat_xt_standard_target) != next_offset)
+		return -EINVAL;
+
+	return 0;
+}
+
+
+
+The corrected function:
+int xt_compat_check_entry_offsets(const void *base, const char *elems,
+				  unsigned int target_offset,
+				  unsigned int next_offset)
+{
+	long size_of_base_struct = elems - (const char *)base;
+	const struct compat_xt_entry_target *t;
+	const char *e = base;
+
+	if (target_offset < size_of_base_struct)
+		return -EINVAL;
+
+	if (target_offset + sizeof(*t) > next_offset)
+		return -EINVAL;
+
+	t = (void *)(e + target_offset);
+	if (t->u.target_size < sizeof(*t))
+		return -EINVAL;
+
+	if (target_offset + t->u.target_size > next_offset)
+		return -EINVAL;
+
+	if (strcmp(t->u.user.name, XT_STANDARD_TARGET) == 0 &&
+	    target_offset + sizeof(struct compat_xt_standard_target) != next_offset)
+		return -EINVAL;
+
+	return 0;
+}

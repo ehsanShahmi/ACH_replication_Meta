@@ -1,0 +1,53 @@
+The vulnerable issue:
+inet: add RCU protection to inet->opt
+
+We lack proper synchronization to manipulate inet->opt ip_options
+
+Problem is ip_make_skb() calls ip_setup_cork() and
+ip_setup_cork() possibly makes a copy of ipc->opt (struct ip_options),
+without any protection against another thread manipulating inet->opt.
+
+Another thread can change inet->opt pointer and free old one under us.
+
+Use RCU to protect inet->opt (changed to inet->inet_opt).
+
+Instead of handling atomic refcounts, just copy ip_options when
+necessary, to avoid cache line dirtying.
+
+We cant insert an rcu_head in struct ip_options since its included in
+skb->cb[], so this patch is large because I had to introduce a new
+ip_options_rcu structure.
+
+Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+Cc: Herbert Xu <herbert@gondor.apana.org.au>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+int ip_options_get(struct net *net, struct ip_options **optp,
+		   unsigned char *data, int optlen)
+{
+	struct ip_options *opt = ip_options_get_alloc(optlen);
+
+	if (!opt)
+		return -ENOMEM;
+	if (optlen)
+		memcpy(opt->__data, data, optlen);
+	return ip_options_get_finish(net, optp, opt, optlen);
+}
+
+
+
+The corrected function:
+int ip_options_get(struct net *net, struct ip_options_rcu **optp,
+		   unsigned char *data, int optlen)
+{
+	struct ip_options_rcu *opt = ip_options_get_alloc(optlen);
+
+	if (!opt)
+		return -ENOMEM;
+	if (optlen)
+		memcpy(opt->opt.__data, data, optlen);
+	return ip_options_get_finish(net, optp, opt, optlen);
+}

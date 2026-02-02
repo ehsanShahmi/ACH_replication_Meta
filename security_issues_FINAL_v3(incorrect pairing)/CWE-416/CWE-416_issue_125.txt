@@ -1,0 +1,97 @@
+The vulnerable issue:
+scsi: elx: libefc: Fix potential use after free in efc_nport_vport_del()
+
+The kref_put() function will call nport->release if the refcount drops to
+zero.  The nport->release release function is _efc_nport_free() which frees
+"nport".  But then we dereference "nport" on the next line which is a use
+after free.  Re-order these lines to avoid the use after free.
+
+Fixes: fcd427303eb9 ("scsi: elx: libefc: SLI and FC PORT state machine interfaces")
+Signed-off-by: Dan Carpenter <dan.carpenter@linaro.org>
+Link: https://lore.kernel.org/r/b666ab26-6581-4213-9a3d-32a9147f0399@stanley.mountain
+Reviewed-by: Daniel Wagner <dwagner@suse.de>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+
+
+The vulnerable function:
+int
+efc_nport_vport_del(struct efc *efc, struct efc_domain *domain,
+		    u64 wwpn, uint64_t wwnn)
+{
+	struct efc_nport *nport;
+	struct efc_vport *vport;
+	struct efc_vport *next;
+	unsigned long flags = 0;
+
+	spin_lock_irqsave(&efc->vport_lock, flags);
+	/* walk the efc_vport_list and remove from there */
+	list_for_each_entry_safe(vport, next, &efc->vport_list, list_entry) {
+		if (vport->wwpn == wwpn && vport->wwnn == wwnn) {
+			list_del(&vport->list_entry);
+			kfree(vport);
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&efc->vport_lock, flags);
+
+	if (!domain) {
+		/* No domain means no nport to look for */
+		return 0;
+	}
+
+	spin_lock_irqsave(&efc->lock, flags);
+	list_for_each_entry(nport, &domain->nport_list, list_entry) {
+		if (nport->wwpn == wwpn && nport->wwnn == wwnn) {
+			kref_put(&nport->ref, nport->release);
+			/* Shutdown this NPORT */
+			efc_sm_post_event(&nport->sm, EFC_EVT_SHUTDOWN, NULL);
+			break;
+		}
+	}
+
+	spin_unlock_irqrestore(&efc->lock, flags);
+	return 0;
+}
+
+
+
+The corrected function:
+int
+efc_nport_vport_del(struct efc *efc, struct efc_domain *domain,
+		    u64 wwpn, uint64_t wwnn)
+{
+	struct efc_nport *nport;
+	struct efc_vport *vport;
+	struct efc_vport *next;
+	unsigned long flags = 0;
+
+	spin_lock_irqsave(&efc->vport_lock, flags);
+	/* walk the efc_vport_list and remove from there */
+	list_for_each_entry_safe(vport, next, &efc->vport_list, list_entry) {
+		if (vport->wwpn == wwpn && vport->wwnn == wwnn) {
+			list_del(&vport->list_entry);
+			kfree(vport);
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&efc->vport_lock, flags);
+
+	if (!domain) {
+		/* No domain means no nport to look for */
+		return 0;
+	}
+
+	spin_lock_irqsave(&efc->lock, flags);
+	list_for_each_entry(nport, &domain->nport_list, list_entry) {
+		if (nport->wwpn == wwpn && nport->wwnn == wwnn) {
+			/* Shutdown this NPORT */
+			efc_sm_post_event(&nport->sm, EFC_EVT_SHUTDOWN, NULL);
+			kref_put(&nport->ref, nport->release);
+			break;
+		}
+	}
+
+	spin_unlock_irqrestore(&efc->lock, flags);
+	return 0;
+}

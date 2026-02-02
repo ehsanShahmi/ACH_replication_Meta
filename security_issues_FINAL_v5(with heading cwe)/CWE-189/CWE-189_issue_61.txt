@@ -1,0 +1,180 @@
+This issue file has CWE-189. Your task is to create this CWE-189 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+oom: fix integer overflow of points in oom_badness
+
+commit ff05b6f7ae762b6eb464183eec994b28ea09f6dd upstream.
+
+An integer overflow will happen on 64bit archs if task's sum of rss,
+swapents and nr_ptes exceeds (2^31)/1000 value.  This was introduced by
+commit
+
+f755a04 oom: use pte pages in OOM score
+
+where the oom score computation was divided into several steps and it's no
+longer computed as one expression in unsigned long(rss, swapents, nr_pte
+are unsigned long), where the result value assigned to points(int) is in
+range(1..1000).  So there could be an int overflow while computing
+
+176          points *= 1000;
+
+and points may have negative value. Meaning the oom score for a mem hog task
+will be one.
+
+196          if (points <= 0)
+197                  return 1;
+
+For example:
+[ 3366]     0  3366 35390480 24303939   5       0             0 oom01
+Out of memory: Kill process 3366 (oom01) score 1 or sacrifice child
+
+Here the oom1 process consumes more than 24303939(rss)*4096~=92GB physical
+memory, but it's oom score is one.
+
+In this situation the mem hog task is skipped and oom killer kills another and
+most probably innocent task with oom score greater than one.
+
+The points variable should be of type long instead of int to prevent the
+int overflow.
+
+Signed-off-by: Frantisek Hrbata <fhrbata@redhat.com>
+Acked-by: KOSAKI Motohiro <kosaki.motohiro@jp.fujitsu.com>
+Acked-by: Oleg Nesterov <oleg@redhat.com>
+Acked-by: David Rientjes <rientjes@google.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+
+
+The vulnerable function:
+unsigned int oom_badness(struct task_struct *p, struct mem_cgroup *mem,
+ 		      const nodemask_t *nodemask, unsigned long totalpages)
+ {
+	int points;
+ 
+ 	if (oom_unkillable_task(p, mem, nodemask))
+ 		return 0;
+
+	p = find_lock_task_mm(p);
+	if (!p)
+		return 0;
+
+	/*
+	 * Shortcut check for a thread sharing p->mm that is OOM_SCORE_ADJ_MIN
+	 * so the entire heuristic doesn't need to be executed for something
+	 * that cannot be killed.
+	 */
+	if (atomic_read(&p->mm->oom_disable_count)) {
+		task_unlock(p);
+		return 0;
+	}
+
+	/*
+	 * The memory controller may have a limit of 0 bytes, so avoid a divide
+	 * by zero, if necessary.
+	 */
+	if (!totalpages)
+		totalpages = 1;
+
+	/*
+	 * The baseline for the badness score is the proportion of RAM that each
+	 * task's rss, pagetable and swap space use.
+	 */
+	points = get_mm_rss(p->mm) + p->mm->nr_ptes;
+	points += get_mm_counter(p->mm, MM_SWAPENTS);
+
+	points *= 1000;
+	points /= totalpages;
+	task_unlock(p);
+
+	/*
+	 * Root processes get 3% bonus, just like the __vm_enough_memory()
+	 * implementation used by LSMs.
+	 */
+	if (has_capability_noaudit(p, CAP_SYS_ADMIN))
+		points -= 30;
+
+	/*
+	 * /proc/pid/oom_score_adj ranges from -1000 to +1000 such that it may
+	 * either completely disable oom killing or always prefer a certain
+	 * task.
+	 */
+	points += p->signal->oom_score_adj;
+
+	/*
+	 * Never return 0 for an eligible task that may be killed since it's
+	 * possible that no single user task uses more than 0.1% of memory and
+	 * no single admin tasks uses more than 3.0%.
+	 */
+	if (points <= 0)
+		return 1;
+	return (points < 1000) ? points : 1000;
+}
+
+
+
+The corrected function:
+unsigned int oom_badness(struct task_struct *p, struct mem_cgroup *mem,
+ 		      const nodemask_t *nodemask, unsigned long totalpages)
+ {
+	long points;
+ 
+ 	if (oom_unkillable_task(p, mem, nodemask))
+ 		return 0;
+
+	p = find_lock_task_mm(p);
+	if (!p)
+		return 0;
+
+	/*
+	 * Shortcut check for a thread sharing p->mm that is OOM_SCORE_ADJ_MIN
+	 * so the entire heuristic doesn't need to be executed for something
+	 * that cannot be killed.
+	 */
+	if (atomic_read(&p->mm->oom_disable_count)) {
+		task_unlock(p);
+		return 0;
+	}
+
+	/*
+	 * The memory controller may have a limit of 0 bytes, so avoid a divide
+	 * by zero, if necessary.
+	 */
+	if (!totalpages)
+		totalpages = 1;
+
+	/*
+	 * The baseline for the badness score is the proportion of RAM that each
+	 * task's rss, pagetable and swap space use.
+	 */
+	points = get_mm_rss(p->mm) + p->mm->nr_ptes;
+	points += get_mm_counter(p->mm, MM_SWAPENTS);
+
+	points *= 1000;
+	points /= totalpages;
+	task_unlock(p);
+
+	/*
+	 * Root processes get 3% bonus, just like the __vm_enough_memory()
+	 * implementation used by LSMs.
+	 */
+	if (has_capability_noaudit(p, CAP_SYS_ADMIN))
+		points -= 30;
+
+	/*
+	 * /proc/pid/oom_score_adj ranges from -1000 to +1000 such that it may
+	 * either completely disable oom killing or always prefer a certain
+	 * task.
+	 */
+	points += p->signal->oom_score_adj;
+
+	/*
+	 * Never return 0 for an eligible task that may be killed since it's
+	 * possible that no single user task uses more than 0.1% of memory and
+	 * no single admin tasks uses more than 3.0%.
+	 */
+	if (points <= 0)
+		return 1;
+	return (points < 1000) ? points : 1000;
+}

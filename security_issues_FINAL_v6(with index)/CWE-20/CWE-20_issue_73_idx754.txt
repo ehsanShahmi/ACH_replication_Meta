@@ -1,0 +1,119 @@
+This issue file has CWE-20. Your task is to create this CWE-20 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+crypto: salsa20 - fix blkcipher_walk API usage
+
+When asked to encrypt or decrypt 0 bytes, both the generic and x86
+implementations of Salsa20 crash in blkcipher_walk_done(), either when
+doing 'kfree(walk->buffer)' or 'free_page((unsigned long)walk->page)',
+because walk->buffer and walk->page have not been initialized.
+
+The bug is that Salsa20 is calling blkcipher_walk_done() even when
+nothing is in 'walk.nbytes'.  But blkcipher_walk_done() is only meant to
+be called when a nonzero number of bytes have been provided.
+
+The broken code is part of an optimization that tries to make only one
+call to salsa20_encrypt_bytes() to process inputs that are not evenly
+divisible by 64 bytes.  To fix the bug, just remove this "optimization"
+and use the blkcipher_walk API the same way all the other users do.
+
+Reproducer:
+
+    #include <linux/if_alg.h>
+    #include <sys/socket.h>
+    #include <unistd.h>
+
+    int main()
+    {
+            int algfd, reqfd;
+            struct sockaddr_alg addr = {
+                    .salg_type = "skcipher",
+                    .salg_name = "salsa20",
+            };
+            char key[16] = { 0 };
+
+            algfd = socket(AF_ALG, SOCK_SEQPACKET, 0);
+            bind(algfd, (void *)&addr, sizeof(addr));
+            reqfd = accept(algfd, 0, 0);
+            setsockopt(algfd, SOL_ALG, ALG_SET_KEY, key, sizeof(key));
+            read(reqfd, key, sizeof(key));
+    }
+
+Reported-by: syzbot <syzkaller@googlegroups.com>
+Fixes: eb6f13eb9f81 ("[CRYPTO] salsa20_generic: Fix multi-page processing")
+Cc: <stable@vger.kernel.org> # v2.6.25+
+Signed-off-by: Eric Biggers <ebiggers@google.com>
+Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+
+
+The vulnerable function:
+static int encrypt(struct blkcipher_desc *desc,
+		   struct scatterlist *dst, struct scatterlist *src,
+		   unsigned int nbytes)
+{
+	struct blkcipher_walk walk;
+	struct crypto_blkcipher *tfm = desc->tfm;
+	struct salsa20_ctx *ctx = crypto_blkcipher_ctx(tfm);
+	int err;
+
+	blkcipher_walk_init(&walk, dst, src, nbytes);
+	err = blkcipher_walk_virt_block(desc, &walk, 64);
+
+	salsa20_ivsetup(ctx, walk.iv);
+
+	if (likely(walk.nbytes == nbytes))
+	{
+		salsa20_encrypt_bytes(ctx, walk.dst.virt.addr,
+				      walk.src.virt.addr, nbytes);
+		return blkcipher_walk_done(desc, &walk, 0);
+	}
+
+	while (walk.nbytes >= 64) {
+		salsa20_encrypt_bytes(ctx, walk.dst.virt.addr,
+				      walk.src.virt.addr,
+				      walk.nbytes - (walk.nbytes % 64));
+		err = blkcipher_walk_done(desc, &walk, walk.nbytes % 64);
+	}
+
+	if (walk.nbytes) {
+		salsa20_encrypt_bytes(ctx, walk.dst.virt.addr,
+				      walk.src.virt.addr, walk.nbytes);
+		err = blkcipher_walk_done(desc, &walk, 0);
+	}
+
+	return err;
+}
+
+
+
+The corrected function:
+static int encrypt(struct blkcipher_desc *desc,
+		   struct scatterlist *dst, struct scatterlist *src,
+		   unsigned int nbytes)
+{
+	struct blkcipher_walk walk;
+	struct crypto_blkcipher *tfm = desc->tfm;
+	struct salsa20_ctx *ctx = crypto_blkcipher_ctx(tfm);
+	int err;
+
+	blkcipher_walk_init(&walk, dst, src, nbytes);
+	err = blkcipher_walk_virt_block(desc, &walk, 64);
+
+	salsa20_ivsetup(ctx, walk.iv);
+
+	while (walk.nbytes >= 64) {
+		salsa20_encrypt_bytes(ctx, walk.dst.virt.addr,
+				      walk.src.virt.addr,
+				      walk.nbytes - (walk.nbytes % 64));
+		err = blkcipher_walk_done(desc, &walk, walk.nbytes % 64);
+	}
+
+	if (walk.nbytes) {
+		salsa20_encrypt_bytes(ctx, walk.dst.virt.addr,
+				      walk.src.virt.addr, walk.nbytes);
+		err = blkcipher_walk_done(desc, &walk, 0);
+	}
+
+	return err;
+}

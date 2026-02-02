@@ -1,0 +1,55 @@
+This issue file has CWE-399. Your task is to create this CWE-399 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+[PATCH] xacct_add_tsk: fix pure theoretical ->mm use-after-free
+
+Paranoid fix. The task can free its ->mm after the 'if (p->mm)' check.
+
+Signed-off-by: Oleg Nesterov <oleg@tv-sign.ru>
+Cc: Shailabh Nagar <nagar@watson.ibm.com>
+Cc: Balbir Singh <balbir@in.ibm.com>
+Cc: Jay Lan <jlan@sgi.com>
+Signed-off-by: Andrew Morton <akpm@osdl.org>
+Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+
+
+The vulnerable function:
+void xacct_add_tsk(struct taskstats *stats, struct task_struct *p)
+{
+	/* convert pages-jiffies to Mbyte-usec */
+	stats->coremem = jiffies_to_usecs(p->acct_rss_mem1) * PAGE_SIZE / MB;
+	stats->virtmem = jiffies_to_usecs(p->acct_vm_mem1) * PAGE_SIZE / MB;
+	if (p->mm) {
+		/* adjust to KB unit */
+		stats->hiwater_rss   = p->mm->hiwater_rss * PAGE_SIZE / KB;
+		stats->hiwater_vm    = p->mm->hiwater_vm * PAGE_SIZE / KB;
+	}
+	stats->read_char	= p->rchar;
+	stats->write_char	= p->wchar;
+	stats->read_syscalls	= p->syscr;
+	stats->write_syscalls	= p->syscw;
+}
+
+
+
+The corrected function:
+void xacct_add_tsk(struct taskstats *stats, struct task_struct *p)
+{
+	struct mm_struct *mm;
+
+	/* convert pages-jiffies to Mbyte-usec */
+	stats->coremem = jiffies_to_usecs(p->acct_rss_mem1) * PAGE_SIZE / MB;
+	stats->virtmem = jiffies_to_usecs(p->acct_vm_mem1) * PAGE_SIZE / MB;
+	mm = get_task_mm(p);
+	if (mm) {
+		/* adjust to KB unit */
+		stats->hiwater_rss   = mm->hiwater_rss * PAGE_SIZE / KB;
+		stats->hiwater_vm    = mm->hiwater_vm * PAGE_SIZE / KB;
+		mmput(mm);
+	}
+	stats->read_char	= p->rchar;
+	stats->write_char	= p->wchar;
+	stats->read_syscalls	= p->syscr;
+	stats->write_syscalls	= p->syscw;
+}

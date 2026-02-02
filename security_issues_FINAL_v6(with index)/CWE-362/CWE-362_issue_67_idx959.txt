@@ -1,0 +1,133 @@
+This issue file has CWE-362. Your task is to create this CWE-362 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+tty: n_gsm: fix the UAF caused by race condition in gsm_cleanup_mux
+
+In commit 9b9c8195f3f0 ("tty: n_gsm: fix UAF in gsm_cleanup_mux"), the UAF
+problem is not completely fixed. There is a race condition in
+gsm_cleanup_mux(), which caused this UAF.
+
+The UAF problem is triggered by the following race:
+task[5046]                     task[5054]
+-----------------------        -----------------------
+gsm_cleanup_mux();
+dlci = gsm->dlci[0];
+mutex_lock(&gsm->mutex);
+                               gsm_cleanup_mux();
+			       dlci = gsm->dlci[0]; //Didn't take the lock
+gsm_dlci_release(gsm->dlci[i]);
+gsm->dlci[i] = NULL;
+mutex_unlock(&gsm->mutex);
+                               mutex_lock(&gsm->mutex);
+			       dlci->dead = true; //UAF
+
+Fix it by assigning values after mutex_lock().
+
+Link: https://syzkaller.appspot.com/text?tag=CrashReport&x=176188b5a80000
+Cc: stable <stable@kernel.org>
+Fixes: 9b9c8195f3f0 ("tty: n_gsm: fix UAF in gsm_cleanup_mux")
+Fixes: aa371e96f05d ("tty: n_gsm: fix restart handling via CLD command")
+Signed-off-by: Yi Yang <yiyang13@huawei.com>
+Co-developed-by: Qiumiao Zhang <zhangqiumiao1@huawei.com>
+Signed-off-by: Qiumiao Zhang <zhangqiumiao1@huawei.com>
+Link: https://lore.kernel.org/r/20230811031121.153237-1-yiyang13@huawei.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+
+
+The vulnerable function:
+static void gsm_cleanup_mux(struct gsm_mux *gsm, bool disc)
+{
+	int i;
+	struct gsm_dlci *dlci = gsm->dlci[0];
+	struct gsm_msg *txq, *ntxq;
+
+	gsm->dead = true;
+	mutex_lock(&gsm->mutex);
+
+	if (dlci) {
+		if (disc && dlci->state != DLCI_CLOSED) {
+			gsm_dlci_begin_close(dlci);
+			wait_event(gsm->event, dlci->state == DLCI_CLOSED);
+		}
+		dlci->dead = true;
+	}
+
+	/* Finish outstanding timers, making sure they are done */
+	del_timer_sync(&gsm->kick_timer);
+	del_timer_sync(&gsm->t2_timer);
+	del_timer_sync(&gsm->ka_timer);
+
+	/* Finish writing to ldisc */
+	flush_work(&gsm->tx_work);
+
+	/* Free up any link layer users and finally the control channel */
+	if (gsm->has_devices) {
+		gsm_unregister_devices(gsm_tty_driver, gsm->num);
+		gsm->has_devices = false;
+	}
+	for (i = NUM_DLCI - 1; i >= 0; i--)
+		if (gsm->dlci[i]) {
+			gsm_dlci_release(gsm->dlci[i]);
+			gsm->dlci[i] = NULL;
+		}
+	mutex_unlock(&gsm->mutex);
+	/* Now wipe the queues */
+	tty_ldisc_flush(gsm->tty);
+	list_for_each_entry_safe(txq, ntxq, &gsm->tx_ctrl_list, list)
+		kfree(txq);
+	INIT_LIST_HEAD(&gsm->tx_ctrl_list);
+	list_for_each_entry_safe(txq, ntxq, &gsm->tx_data_list, list)
+		kfree(txq);
+	INIT_LIST_HEAD(&gsm->tx_data_list);
+}
+
+
+
+The corrected function:
+static void gsm_cleanup_mux(struct gsm_mux *gsm, bool disc)
+{
+	int i;
+	struct gsm_dlci *dlci;
+	struct gsm_msg *txq, *ntxq;
+
+	gsm->dead = true;
+	mutex_lock(&gsm->mutex);
+
+	dlci = gsm->dlci[0];
+	if (dlci) {
+		if (disc && dlci->state != DLCI_CLOSED) {
+			gsm_dlci_begin_close(dlci);
+			wait_event(gsm->event, dlci->state == DLCI_CLOSED);
+		}
+		dlci->dead = true;
+	}
+
+	/* Finish outstanding timers, making sure they are done */
+	del_timer_sync(&gsm->kick_timer);
+	del_timer_sync(&gsm->t2_timer);
+	del_timer_sync(&gsm->ka_timer);
+
+	/* Finish writing to ldisc */
+	flush_work(&gsm->tx_work);
+
+	/* Free up any link layer users and finally the control channel */
+	if (gsm->has_devices) {
+		gsm_unregister_devices(gsm_tty_driver, gsm->num);
+		gsm->has_devices = false;
+	}
+	for (i = NUM_DLCI - 1; i >= 0; i--)
+		if (gsm->dlci[i]) {
+			gsm_dlci_release(gsm->dlci[i]);
+			gsm->dlci[i] = NULL;
+		}
+	mutex_unlock(&gsm->mutex);
+	/* Now wipe the queues */
+	tty_ldisc_flush(gsm->tty);
+	list_for_each_entry_safe(txq, ntxq, &gsm->tx_ctrl_list, list)
+		kfree(txq);
+	INIT_LIST_HEAD(&gsm->tx_ctrl_list);
+	list_for_each_entry_safe(txq, ntxq, &gsm->tx_data_list, list)
+		kfree(txq);
+	INIT_LIST_HEAD(&gsm->tx_data_list);
+}

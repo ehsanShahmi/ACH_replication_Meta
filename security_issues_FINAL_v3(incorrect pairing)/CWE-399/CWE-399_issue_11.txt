@@ -1,0 +1,84 @@
+The vulnerable issue:
+mm: thp: fix /dev/zero MAP_PRIVATE and vm_flags cleanups
+
+The huge_memory.c THP page fault was allowed to run if vm_ops was null
+(which would succeed for /dev/zero MAP_PRIVATE, as the f_op->mmap wouldn't
+setup a special vma->vm_ops and it would fallback to regular anonymous
+memory) but other THP logics weren't fully activated for vmas with vm_file
+not NULL (/dev/zero has a not NULL vma->vm_file).
+
+So this removes the vm_file checks so that /dev/zero also can safely use
+THP (the other albeit safer approach to fix this bug would have been to
+prevent the THP initial page fault to run if vm_file was set).
+
+After removing the vm_file checks, this also makes huge_memory.c stricter
+in khugepaged for the DEBUG_VM=y case.  It doesn't replace the vm_file
+check with a is_pfn_mapping check (but it keeps checking for VM_PFNMAP
+under VM_BUG_ON) because for a is_cow_mapping() mapping VM_PFNMAP should
+only be allowed to exist before the first page fault, and in turn when
+vma->anon_vma is null (so preventing khugepaged registration).  So I tend
+to think the previous comment saying if vm_file was set, VM_PFNMAP might
+have been set and we could still be registered in khugepaged (despite
+anon_vma was not NULL to be registered in khugepaged) was too paranoid.
+The is_linear_pfn_mapping check is also I think superfluous (as described
+by comment) but under DEBUG_VM it is safe to stay.
+
+Addresses https://bugzilla.kernel.org/show_bug.cgi?id=33682
+
+Signed-off-by: Andrea Arcangeli <aarcange@redhat.com>
+Reported-by: Caspar Zhang <bugs@casparzhang.com>
+Acked-by: Mel Gorman <mel@csn.ul.ie>
+Acked-by: Rik van Riel <riel@redhat.com>
+Cc: <stable@kernel.org>		[2.6.38.x]
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+int khugepaged_enter_vma_merge(struct vm_area_struct *vma)
+{
+	unsigned long hstart, hend;
+	if (!vma->anon_vma)
+		/*
+		 * Not yet faulted in so we will register later in the
+		 * page fault if needed.
+		 */
+		return 0;
+	if (vma->vm_file || vma->vm_ops)
+		/* khugepaged not yet working on file or special mappings */
+		return 0;
+	VM_BUG_ON(is_linear_pfn_mapping(vma) || is_pfn_mapping(vma));
+	hstart = (vma->vm_start + ~HPAGE_PMD_MASK) & HPAGE_PMD_MASK;
+	hend = vma->vm_end & HPAGE_PMD_MASK;
+	if (hstart < hend)
+		return khugepaged_enter(vma);
+	return 0;
+}
+
+
+
+The corrected function:
+int khugepaged_enter_vma_merge(struct vm_area_struct *vma)
+{
+	unsigned long hstart, hend;
+	if (!vma->anon_vma)
+		/*
+		 * Not yet faulted in so we will register later in the
+		 * page fault if needed.
+		 */
+		return 0;
+	if (vma->vm_ops)
+		/* khugepaged not yet working on file or special mappings */
+		return 0;
+	/*
+	 * If is_pfn_mapping() is true is_learn_pfn_mapping() must be
+	 * true too, verify it here.
+	 */
+	VM_BUG_ON(is_linear_pfn_mapping(vma) || vma->vm_flags & VM_NO_THP);
+	hstart = (vma->vm_start + ~HPAGE_PMD_MASK) & HPAGE_PMD_MASK;
+	hend = vma->vm_end & HPAGE_PMD_MASK;
+	if (hstart < hend)
+		return khugepaged_enter(vma);
+	return 0;
+}

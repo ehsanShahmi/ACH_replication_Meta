@@ -1,0 +1,64 @@
+The vulnerable issue:
+ipv6: add complete rcu protection around np->opt
+
+This patch addresses multiple problems :
+
+UDP/RAW sendmsg() need to get a stable struct ipv6_txoptions
+while socket is not locked : Other threads can change np->opt
+concurrently. Dmitry posted a syzkaller
+(http://github.com/google/syzkaller) program desmonstrating
+use-after-free.
+
+Starting with TCP/DCCP lockless listeners, tcp_v6_syn_recv_sock()
+and dccp_v6_request_recv_sock() also need to use RCU protection
+to dereference np->opt once (before calling ipv6_dup_options())
+
+This patch adds full RCU protection to np->opt
+
+Reported-by: Dmitry Vyukov <dvyukov@google.com>
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Acked-by: Hannes Frederic Sowa <hannes@stressinduktion.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+struct ipv6_txoptions *ipv6_update_options(struct sock *sk,
+					   struct ipv6_txoptions *opt)
+{
+	if (inet_sk(sk)->is_icsk) {
+		if (opt &&
+		    !((1 << sk->sk_state) & (TCPF_LISTEN | TCPF_CLOSE)) &&
+		    inet_sk(sk)->inet_daddr != LOOPBACK4_IPV6) {
+			struct inet_connection_sock *icsk = inet_csk(sk);
+			icsk->icsk_ext_hdr_len = opt->opt_flen + opt->opt_nflen;
+			icsk->icsk_sync_mss(sk, icsk->icsk_pmtu_cookie);
+		}
+	}
+	opt = xchg(&inet6_sk(sk)->opt, opt);
+	sk_dst_reset(sk);
+
+	return opt;
+}
+
+
+
+The corrected function:
+struct ipv6_txoptions *ipv6_update_options(struct sock *sk,
+					   struct ipv6_txoptions *opt)
+{
+	if (inet_sk(sk)->is_icsk) {
+		if (opt &&
+		    !((1 << sk->sk_state) & (TCPF_LISTEN | TCPF_CLOSE)) &&
+		    inet_sk(sk)->inet_daddr != LOOPBACK4_IPV6) {
+			struct inet_connection_sock *icsk = inet_csk(sk);
+			icsk->icsk_ext_hdr_len = opt->opt_flen + opt->opt_nflen;
+			icsk->icsk_sync_mss(sk, icsk->icsk_pmtu_cookie);
+		}
+	}
+	opt = xchg((__force struct ipv6_txoptions **)&inet6_sk(sk)->opt,
+		   opt);
+	sk_dst_reset(sk);
+
+	return opt;
+}

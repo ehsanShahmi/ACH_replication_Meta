@@ -1,0 +1,119 @@
+This issue file has CWE-362. Your task is to create this CWE-362 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+floppy: fix lock_fdc() signal handling
+
+floppy_revalidate() doesn't perform any error handling on lock_fdc()
+result. lock_fdc() might actually be interrupted by a signal (it waits for
+fdc becoming non-busy interruptibly). In such case, floppy_revalidate()
+proceeds as if it had claimed the lock, but it fact it doesn't.
+
+In case of multiple threads trying to open("/dev/fdX"), this leads to
+serious corruptions all over the place, because all of a sudden there is
+no critical section protection (that'd otherwise be guaranteed by locked
+fd) whatsoever.
+
+While at this, fix the fact that the 'interruptible' parameter to
+lock_fdc() doesn't make any sense whatsoever, because we always wait
+interruptibly anyway.
+
+Most of the lock_fdc() callsites do properly handle error (and propagate
+EINTR), but floppy_revalidate() and floppy_check_events() don't. Fix this.
+
+Spotted by 'syzkaller' tool.
+
+Reported-by: Dmitry Vyukov <dvyukov@google.com>
+Tested-by: Dmitry Vyukov <dvyukov@google.com>
+Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+
+
+The vulnerable function:
+static int floppy_revalidate(struct gendisk *disk)
+{
+	int drive = (long)disk->private_data;
+	int cf;
+	int res = 0;
+
+	if (test_bit(FD_DISK_CHANGED_BIT, &UDRS->flags) ||
+	    test_bit(FD_VERIFY_BIT, &UDRS->flags) ||
+	    test_bit(drive, &fake_change) ||
+	    drive_no_geom(drive)) {
+		if (WARN(atomic_read(&usage_count) == 0,
+			 "VFS: revalidate called on non-open device.\n"))
+			return -EFAULT;
+
+		lock_fdc(drive, false);
+		cf = (test_bit(FD_DISK_CHANGED_BIT, &UDRS->flags) ||
+		      test_bit(FD_VERIFY_BIT, &UDRS->flags));
+		if (!(cf || test_bit(drive, &fake_change) || drive_no_geom(drive))) {
+			process_fd_request();	/*already done by another thread */
+			return 0;
+		}
+		UDRS->maxblock = 0;
+		UDRS->maxtrack = 0;
+		if (buffer_drive == drive)
+			buffer_track = -1;
+		clear_bit(drive, &fake_change);
+		clear_bit(FD_DISK_CHANGED_BIT, &UDRS->flags);
+		if (cf)
+			UDRS->generation++;
+		if (drive_no_geom(drive)) {
+			/* auto-sensing */
+			res = __floppy_read_block_0(opened_bdev[drive], drive);
+		} else {
+			if (cf)
+				poll_drive(false, FD_RAW_NEED_DISK);
+			process_fd_request();
+		}
+	}
+	set_capacity(disk, floppy_sizes[UDRS->fd_device]);
+	return res;
+}
+
+
+
+The corrected function:
+static int floppy_revalidate(struct gendisk *disk)
+{
+	int drive = (long)disk->private_data;
+	int cf;
+	int res = 0;
+
+	if (test_bit(FD_DISK_CHANGED_BIT, &UDRS->flags) ||
+	    test_bit(FD_VERIFY_BIT, &UDRS->flags) ||
+	    test_bit(drive, &fake_change) ||
+	    drive_no_geom(drive)) {
+		if (WARN(atomic_read(&usage_count) == 0,
+			 "VFS: revalidate called on non-open device.\n"))
+			return -EFAULT;
+
+		res = lock_fdc(drive);
+		if (res)
+			return res;
+		cf = (test_bit(FD_DISK_CHANGED_BIT, &UDRS->flags) ||
+		      test_bit(FD_VERIFY_BIT, &UDRS->flags));
+		if (!(cf || test_bit(drive, &fake_change) || drive_no_geom(drive))) {
+			process_fd_request();	/*already done by another thread */
+			return 0;
+		}
+		UDRS->maxblock = 0;
+		UDRS->maxtrack = 0;
+		if (buffer_drive == drive)
+			buffer_track = -1;
+		clear_bit(drive, &fake_change);
+		clear_bit(FD_DISK_CHANGED_BIT, &UDRS->flags);
+		if (cf)
+			UDRS->generation++;
+		if (drive_no_geom(drive)) {
+			/* auto-sensing */
+			res = __floppy_read_block_0(opened_bdev[drive], drive);
+		} else {
+			if (cf)
+				poll_drive(false, FD_RAW_NEED_DISK);
+			process_fd_request();
+		}
+	}
+	set_capacity(disk, floppy_sizes[UDRS->fd_device]);
+	return res;
+}

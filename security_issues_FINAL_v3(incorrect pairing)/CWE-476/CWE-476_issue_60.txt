@@ -1,0 +1,108 @@
+The vulnerable issue:
+net: mana: Fix possible double free in error handling path
+
+When auxiliary_device_add() returns error and then calls
+auxiliary_device_uninit(), callback function adev_release
+calls kfree(madev). We shouldn't call kfree(madev) again
+in the error handling path. Set 'madev' to NULL.
+
+Fixes: a69839d4327d ("net: mana: Add support for auxiliary device")
+Signed-off-by: Ma Ke <make24@iscas.ac.cn>
+Link: https://patch.msgid.link/20240625130314.2661257-1-make24@iscas.ac.cn
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+
+
+
+The vulnerable function:
+static int add_adev(struct gdma_dev *gd)
+{
+	struct auxiliary_device *adev;
+	struct mana_adev *madev;
+	int ret;
+
+	madev = kzalloc(sizeof(*madev), GFP_KERNEL);
+	if (!madev)
+		return -ENOMEM;
+
+	adev = &madev->adev;
+	ret = mana_adev_idx_alloc();
+	if (ret < 0)
+		goto idx_fail;
+	adev->id = ret;
+
+	adev->name = "rdma";
+	adev->dev.parent = gd->gdma_context->dev;
+	adev->dev.release = adev_release;
+	madev->mdev = gd;
+
+	ret = auxiliary_device_init(adev);
+	if (ret)
+		goto init_fail;
+
+	ret = auxiliary_device_add(adev);
+	if (ret)
+		goto add_fail;
+
+	gd->adev = adev;
+	return 0;
+
+add_fail:
+	auxiliary_device_uninit(adev);
+
+init_fail:
+	mana_adev_idx_free(adev->id);
+
+idx_fail:
+	kfree(madev);
+
+	return ret;
+}
+
+
+
+The corrected function:
+static int add_adev(struct gdma_dev *gd)
+{
+	struct auxiliary_device *adev;
+	struct mana_adev *madev;
+	int ret;
+
+	madev = kzalloc(sizeof(*madev), GFP_KERNEL);
+	if (!madev)
+		return -ENOMEM;
+
+	adev = &madev->adev;
+	ret = mana_adev_idx_alloc();
+	if (ret < 0)
+		goto idx_fail;
+	adev->id = ret;
+
+	adev->name = "rdma";
+	adev->dev.parent = gd->gdma_context->dev;
+	adev->dev.release = adev_release;
+	madev->mdev = gd;
+
+	ret = auxiliary_device_init(adev);
+	if (ret)
+		goto init_fail;
+
+	/* madev is owned by the auxiliary device */
+	madev = NULL;
+	ret = auxiliary_device_add(adev);
+	if (ret)
+		goto add_fail;
+
+	gd->adev = adev;
+	return 0;
+
+add_fail:
+	auxiliary_device_uninit(adev);
+
+init_fail:
+	mana_adev_idx_free(adev->id);
+
+idx_fail:
+	kfree(madev);
+
+	return ret;
+}

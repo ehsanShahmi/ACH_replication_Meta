@@ -1,0 +1,58 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+greybus: Fix use-after-free bug in gb_interface_release due to race condition.
+
+In gb_interface_create, &intf->mode_switch_completion is bound with
+gb_interface_mode_switch_work. Then it will be started by
+gb_interface_request_mode_switch. Here is the relevant code.
+if (!queue_work(system_long_wq, &intf->mode_switch_work)) {
+	...
+}
+
+If we call gb_interface_release to make cleanup, there may be an
+unfinished work. This function will call kfree to free the object
+"intf". However, if gb_interface_mode_switch_work is scheduled to
+run after kfree, it may cause use-after-free error as
+gb_interface_mode_switch_work will use the object "intf".
+The possible execution flow that may lead to the issue is as follows:
+
+CPU0                            CPU1
+
+                            |   gb_interface_create
+                            |   gb_interface_request_mode_switch
+gb_interface_release        |
+kfree(intf) (free)          |
+                            |   gb_interface_mode_switch_work
+                            |   mutex_lock(&intf->mutex) (use)
+
+Fix it by canceling the work before kfree.
+
+Signed-off-by: Sicong Huang <congei42@163.com>
+Link: https://lore.kernel.org/r/20240416080313.92306-1-congei42@163.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+
+
+The vulnerable function:
+static void gb_interface_release(struct device *dev)
+{
+	struct gb_interface *intf = to_gb_interface(dev);
+
+	trace_gb_interface_release(intf);
+
+	kfree(intf);
+}
+
+
+
+The corrected function:
+static void gb_interface_release(struct device *dev)
+{
+	struct gb_interface *intf = to_gb_interface(dev);
+
+	trace_gb_interface_release(intf);
+
+	cancel_work_sync(&intf->mode_switch_work);
+	kfree(intf);
+}

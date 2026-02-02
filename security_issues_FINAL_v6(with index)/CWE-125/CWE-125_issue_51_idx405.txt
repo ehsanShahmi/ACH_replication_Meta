@@ -1,0 +1,259 @@
+This issue file has CWE-125. Your task is to create this CWE-125 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+ksmbd: prevent out of bound read for SMB2_TREE_CONNNECT
+
+if Status is not 0 and PathLength is long,
+smb_strndup_from_utf16 could make out of bound
+read in smb2_tree_connnect.
+
+This bug can lead an oops looking something like:
+
+[ 1553.882047] BUG: KASAN: slab-out-of-bounds in smb_strndup_from_utf16+0x469/0x4c0 [ksmbd]
+[ 1553.882064] Read of size 2 at addr ffff88802c4eda04 by task kworker/0:2/42805
+...
+[ 1553.882095] Call Trace:
+[ 1553.882098]  <TASK>
+[ 1553.882101]  dump_stack_lvl+0x49/0x5f
+[ 1553.882107]  print_report.cold+0x5e/0x5cf
+[ 1553.882112]  ? smb_strndup_from_utf16+0x469/0x4c0 [ksmbd]
+[ 1553.882122]  kasan_report+0xaa/0x120
+[ 1553.882128]  ? smb_strndup_from_utf16+0x469/0x4c0 [ksmbd]
+[ 1553.882139]  __asan_report_load_n_noabort+0xf/0x20
+[ 1553.882143]  smb_strndup_from_utf16+0x469/0x4c0 [ksmbd]
+[ 1553.882155]  ? smb_strtoUTF16+0x3b0/0x3b0 [ksmbd]
+[ 1553.882166]  ? __kmalloc_node+0x185/0x430
+[ 1553.882171]  smb2_tree_connect+0x140/0xab0 [ksmbd]
+[ 1553.882185]  handle_ksmbd_work+0x30e/0x1020 [ksmbd]
+[ 1553.882197]  process_one_work+0x778/0x11c0
+[ 1553.882201]  ? _raw_spin_lock_irq+0x8e/0xe0
+[ 1553.882206]  worker_thread+0x544/0x1180
+[ 1553.882209]  ? __cpuidle_text_end+0x4/0x4
+[ 1553.882214]  kthread+0x282/0x320
+[ 1553.882218]  ? process_one_work+0x11c0/0x11c0
+[ 1553.882221]  ? kthread_complete_and_exit+0x30/0x30
+[ 1553.882225]  ret_from_fork+0x1f/0x30
+[ 1553.882231]  </TASK>
+
+There is no need to check error request validation in server.
+This check allow invalid requests not to validate message.
+
+Fixes: e2f34481b24d ("cifsd: add server-side procedures for SMB3")
+Cc: stable@vger.kernel.org
+Reported-by: zdi-disclosures@trendmicro.com # ZDI-CAN-17818
+Signed-off-by: Hyunchul Lee <hyc.lee@gmail.com>
+Acked-by: Namjae Jeon <linkinjeon@kernel.org>
+Signed-off-by: Steve French <stfrench@microsoft.com>
+
+
+
+The vulnerable function:
+static int smb2_get_data_area_len(unsigned int *off, unsigned int *len,
+				  struct smb2_hdr *hdr)
+{
+	int ret = 0;
+
+	*off = 0;
+	*len = 0;
+
+	/* error reqeusts do not have data area */
+	if (hdr->Status && hdr->Status != STATUS_MORE_PROCESSING_REQUIRED &&
+	    (((struct smb2_err_rsp *)hdr)->StructureSize) == SMB2_ERROR_STRUCTURE_SIZE2_LE)
+		return ret;
+
+	/*
+	 * Following commands have data areas so we have to get the location
+	 * of the data buffer offset and data buffer length for the particular
+	 * command.
+	 */
+	switch (hdr->Command) {
+	case SMB2_SESSION_SETUP:
+		*off = le16_to_cpu(((struct smb2_sess_setup_req *)hdr)->SecurityBufferOffset);
+		*len = le16_to_cpu(((struct smb2_sess_setup_req *)hdr)->SecurityBufferLength);
+		break;
+	case SMB2_TREE_CONNECT:
+		*off = le16_to_cpu(((struct smb2_tree_connect_req *)hdr)->PathOffset);
+		*len = le16_to_cpu(((struct smb2_tree_connect_req *)hdr)->PathLength);
+		break;
+	case SMB2_CREATE:
+	{
+		if (((struct smb2_create_req *)hdr)->CreateContextsLength) {
+			*off = le32_to_cpu(((struct smb2_create_req *)
+				hdr)->CreateContextsOffset);
+			*len = le32_to_cpu(((struct smb2_create_req *)
+				hdr)->CreateContextsLength);
+			break;
+		}
+
+		*off = le16_to_cpu(((struct smb2_create_req *)hdr)->NameOffset);
+		*len = le16_to_cpu(((struct smb2_create_req *)hdr)->NameLength);
+		break;
+	}
+	case SMB2_QUERY_INFO:
+		*off = le16_to_cpu(((struct smb2_query_info_req *)hdr)->InputBufferOffset);
+		*len = le32_to_cpu(((struct smb2_query_info_req *)hdr)->InputBufferLength);
+		break;
+	case SMB2_SET_INFO:
+		*off = le16_to_cpu(((struct smb2_set_info_req *)hdr)->BufferOffset);
+		*len = le32_to_cpu(((struct smb2_set_info_req *)hdr)->BufferLength);
+		break;
+	case SMB2_READ:
+		*off = le16_to_cpu(((struct smb2_read_req *)hdr)->ReadChannelInfoOffset);
+		*len = le16_to_cpu(((struct smb2_read_req *)hdr)->ReadChannelInfoLength);
+		break;
+	case SMB2_WRITE:
+		if (((struct smb2_write_req *)hdr)->DataOffset ||
+		    ((struct smb2_write_req *)hdr)->Length) {
+			*off = max_t(unsigned int,
+				     le16_to_cpu(((struct smb2_write_req *)hdr)->DataOffset),
+				     offsetof(struct smb2_write_req, Buffer));
+			*len = le32_to_cpu(((struct smb2_write_req *)hdr)->Length);
+			break;
+		}
+
+		*off = le16_to_cpu(((struct smb2_write_req *)hdr)->WriteChannelInfoOffset);
+		*len = le16_to_cpu(((struct smb2_write_req *)hdr)->WriteChannelInfoLength);
+		break;
+	case SMB2_QUERY_DIRECTORY:
+		*off = le16_to_cpu(((struct smb2_query_directory_req *)hdr)->FileNameOffset);
+		*len = le16_to_cpu(((struct smb2_query_directory_req *)hdr)->FileNameLength);
+		break;
+	case SMB2_LOCK:
+	{
+		int lock_count;
+
+		/*
+		 * smb2_lock request size is 48 included single
+		 * smb2_lock_element structure size.
+		 */
+		lock_count = le16_to_cpu(((struct smb2_lock_req *)hdr)->LockCount) - 1;
+		if (lock_count > 0) {
+			*off = __SMB2_HEADER_STRUCTURE_SIZE + 48;
+			*len = sizeof(struct smb2_lock_element) * lock_count;
+		}
+		break;
+	}
+	case SMB2_IOCTL:
+		*off = le32_to_cpu(((struct smb2_ioctl_req *)hdr)->InputOffset);
+		*len = le32_to_cpu(((struct smb2_ioctl_req *)hdr)->InputCount);
+		break;
+	default:
+		ksmbd_debug(SMB, "no length check for command\n");
+		break;
+	}
+
+	if (*off > 4096) {
+		ksmbd_debug(SMB, "offset %d too large\n", *off);
+		ret = -EINVAL;
+	} else if ((u64)*off + *len > MAX_STREAM_PROT_LEN) {
+		ksmbd_debug(SMB, "Request is larger than maximum stream protocol length(%u): %llu\n",
+			    MAX_STREAM_PROT_LEN, (u64)*off + *len);
+		ret = -EINVAL;
+	}
+
+	return ret;
+}
+
+
+
+The corrected function:
+static int smb2_get_data_area_len(unsigned int *off, unsigned int *len,
+				  struct smb2_hdr *hdr)
+{
+	int ret = 0;
+
+	*off = 0;
+	*len = 0;
+
+	/*
+	 * Following commands have data areas so we have to get the location
+	 * of the data buffer offset and data buffer length for the particular
+	 * command.
+	 */
+	switch (hdr->Command) {
+	case SMB2_SESSION_SETUP:
+		*off = le16_to_cpu(((struct smb2_sess_setup_req *)hdr)->SecurityBufferOffset);
+		*len = le16_to_cpu(((struct smb2_sess_setup_req *)hdr)->SecurityBufferLength);
+		break;
+	case SMB2_TREE_CONNECT:
+		*off = le16_to_cpu(((struct smb2_tree_connect_req *)hdr)->PathOffset);
+		*len = le16_to_cpu(((struct smb2_tree_connect_req *)hdr)->PathLength);
+		break;
+	case SMB2_CREATE:
+	{
+		if (((struct smb2_create_req *)hdr)->CreateContextsLength) {
+			*off = le32_to_cpu(((struct smb2_create_req *)
+				hdr)->CreateContextsOffset);
+			*len = le32_to_cpu(((struct smb2_create_req *)
+				hdr)->CreateContextsLength);
+			break;
+		}
+
+		*off = le16_to_cpu(((struct smb2_create_req *)hdr)->NameOffset);
+		*len = le16_to_cpu(((struct smb2_create_req *)hdr)->NameLength);
+		break;
+	}
+	case SMB2_QUERY_INFO:
+		*off = le16_to_cpu(((struct smb2_query_info_req *)hdr)->InputBufferOffset);
+		*len = le32_to_cpu(((struct smb2_query_info_req *)hdr)->InputBufferLength);
+		break;
+	case SMB2_SET_INFO:
+		*off = le16_to_cpu(((struct smb2_set_info_req *)hdr)->BufferOffset);
+		*len = le32_to_cpu(((struct smb2_set_info_req *)hdr)->BufferLength);
+		break;
+	case SMB2_READ:
+		*off = le16_to_cpu(((struct smb2_read_req *)hdr)->ReadChannelInfoOffset);
+		*len = le16_to_cpu(((struct smb2_read_req *)hdr)->ReadChannelInfoLength);
+		break;
+	case SMB2_WRITE:
+		if (((struct smb2_write_req *)hdr)->DataOffset ||
+		    ((struct smb2_write_req *)hdr)->Length) {
+			*off = max_t(unsigned int,
+				     le16_to_cpu(((struct smb2_write_req *)hdr)->DataOffset),
+				     offsetof(struct smb2_write_req, Buffer));
+			*len = le32_to_cpu(((struct smb2_write_req *)hdr)->Length);
+			break;
+		}
+
+		*off = le16_to_cpu(((struct smb2_write_req *)hdr)->WriteChannelInfoOffset);
+		*len = le16_to_cpu(((struct smb2_write_req *)hdr)->WriteChannelInfoLength);
+		break;
+	case SMB2_QUERY_DIRECTORY:
+		*off = le16_to_cpu(((struct smb2_query_directory_req *)hdr)->FileNameOffset);
+		*len = le16_to_cpu(((struct smb2_query_directory_req *)hdr)->FileNameLength);
+		break;
+	case SMB2_LOCK:
+	{
+		int lock_count;
+
+		/*
+		 * smb2_lock request size is 48 included single
+		 * smb2_lock_element structure size.
+		 */
+		lock_count = le16_to_cpu(((struct smb2_lock_req *)hdr)->LockCount) - 1;
+		if (lock_count > 0) {
+			*off = __SMB2_HEADER_STRUCTURE_SIZE + 48;
+			*len = sizeof(struct smb2_lock_element) * lock_count;
+		}
+		break;
+	}
+	case SMB2_IOCTL:
+		*off = le32_to_cpu(((struct smb2_ioctl_req *)hdr)->InputOffset);
+		*len = le32_to_cpu(((struct smb2_ioctl_req *)hdr)->InputCount);
+		break;
+	default:
+		ksmbd_debug(SMB, "no length check for command\n");
+		break;
+	}
+
+	if (*off > 4096) {
+		ksmbd_debug(SMB, "offset %d too large\n", *off);
+		ret = -EINVAL;
+	} else if ((u64)*off + *len > MAX_STREAM_PROT_LEN) {
+		ksmbd_debug(SMB, "Request is larger than maximum stream protocol length(%u): %llu\n",
+			    MAX_STREAM_PROT_LEN, (u64)*off + *len);
+		ret = -EINVAL;
+	}
+
+	return ret;
+}

@@ -1,0 +1,67 @@
+The vulnerable issue:
+can: kvaser_usb: kvaser_usb_leaf: Fix some info-leaks to USB devices
+
+Uninitialized Kernel memory can leak to USB devices.
+
+Fix this by using kzalloc() instead of kmalloc().
+
+Signed-off-by: Xiaolong Huang <butterflyhuangxx@gmail.com>
+Fixes: 7259124eac7d ("can: kvaser_usb: Split driver into kvaser_usb_core.c and kvaser_usb_leaf.c")
+Cc: linux-stable <stable@vger.kernel.org> # >= v4.19
+Signed-off-by: Marc Kleine-Budde <mkl@pengutronix.de>
+
+
+
+The vulnerable function:
+static int kvaser_usb_leaf_set_opt_mode(const struct kvaser_usb_net_priv *priv)
+{
+	struct kvaser_cmd *cmd;
+	int rc;
+
+	cmd = kmalloc(sizeof(*cmd), GFP_KERNEL);
+	if (!cmd)
+		return -ENOMEM;
+
+	cmd->id = CMD_SET_CTRL_MODE;
+	cmd->len = CMD_HEADER_LEN + sizeof(struct kvaser_cmd_ctrl_mode);
+	cmd->u.ctrl_mode.tid = 0xff;
+	cmd->u.ctrl_mode.channel = priv->channel;
+
+	if (priv->can.ctrlmode & CAN_CTRLMODE_LISTENONLY)
+		cmd->u.ctrl_mode.ctrl_mode = KVASER_CTRL_MODE_SILENT;
+	else
+		cmd->u.ctrl_mode.ctrl_mode = KVASER_CTRL_MODE_NORMAL;
+
+	rc = kvaser_usb_send_cmd(priv->dev, cmd, cmd->len);
+
+	kfree(cmd);
+	return rc;
+}
+
+
+
+The corrected function:
+static int kvaser_usb_leaf_set_opt_mode(const struct kvaser_usb_net_priv *priv)
+{
+	struct kvaser_cmd *cmd;
+	int rc;
+
+	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
+	if (!cmd)
+		return -ENOMEM;
+
+	cmd->id = CMD_SET_CTRL_MODE;
+	cmd->len = CMD_HEADER_LEN + sizeof(struct kvaser_cmd_ctrl_mode);
+	cmd->u.ctrl_mode.tid = 0xff;
+	cmd->u.ctrl_mode.channel = priv->channel;
+
+	if (priv->can.ctrlmode & CAN_CTRLMODE_LISTENONLY)
+		cmd->u.ctrl_mode.ctrl_mode = KVASER_CTRL_MODE_SILENT;
+	else
+		cmd->u.ctrl_mode.ctrl_mode = KVASER_CTRL_MODE_NORMAL;
+
+	rc = kvaser_usb_send_cmd(priv->dev, cmd, cmd->len);
+
+	kfree(cmd);
+	return rc;
+}

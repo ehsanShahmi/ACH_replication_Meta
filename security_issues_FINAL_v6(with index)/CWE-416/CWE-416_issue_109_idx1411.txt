@@ -1,0 +1,406 @@
+This issue file has CWE-416. Your task is to create this CWE-416 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+net/sched: Fix UAF when resolving a clash
+
+KASAN reports the following UAF:
+
+ BUG: KASAN: slab-use-after-free in tcf_ct_flow_table_process_conn+0x12b/0x380 [act_ct]
+ Read of size 1 at addr ffff888c07603600 by task handler130/6469
+
+ Call Trace:
+  <IRQ>
+  dump_stack_lvl+0x48/0x70
+  print_address_description.constprop.0+0x33/0x3d0
+  print_report+0xc0/0x2b0
+  kasan_report+0xd0/0x120
+  __asan_load1+0x6c/0x80
+  tcf_ct_flow_table_process_conn+0x12b/0x380 [act_ct]
+  tcf_ct_act+0x886/0x1350 [act_ct]
+  tcf_action_exec+0xf8/0x1f0
+  fl_classify+0x355/0x360 [cls_flower]
+  __tcf_classify+0x1fd/0x330
+  tcf_classify+0x21c/0x3c0
+  sch_handle_ingress.constprop.0+0x2c5/0x500
+  __netif_receive_skb_core.constprop.0+0xb25/0x1510
+  __netif_receive_skb_list_core+0x220/0x4c0
+  netif_receive_skb_list_internal+0x446/0x620
+  napi_complete_done+0x157/0x3d0
+  gro_cell_poll+0xcf/0x100
+  __napi_poll+0x65/0x310
+  net_rx_action+0x30c/0x5c0
+  __do_softirq+0x14f/0x491
+  __irq_exit_rcu+0x82/0xc0
+  irq_exit_rcu+0xe/0x20
+  common_interrupt+0xa1/0xb0
+  </IRQ>
+  <TASK>
+  asm_common_interrupt+0x27/0x40
+
+ Allocated by task 6469:
+  kasan_save_stack+0x38/0x70
+  kasan_set_track+0x25/0x40
+  kasan_save_alloc_info+0x1e/0x40
+  __kasan_krealloc+0x133/0x190
+  krealloc+0xaa/0x130
+  nf_ct_ext_add+0xed/0x230 [nf_conntrack]
+  tcf_ct_act+0x1095/0x1350 [act_ct]
+  tcf_action_exec+0xf8/0x1f0
+  fl_classify+0x355/0x360 [cls_flower]
+  __tcf_classify+0x1fd/0x330
+  tcf_classify+0x21c/0x3c0
+  sch_handle_ingress.constprop.0+0x2c5/0x500
+  __netif_receive_skb_core.constprop.0+0xb25/0x1510
+  __netif_receive_skb_list_core+0x220/0x4c0
+  netif_receive_skb_list_internal+0x446/0x620
+  napi_complete_done+0x157/0x3d0
+  gro_cell_poll+0xcf/0x100
+  __napi_poll+0x65/0x310
+  net_rx_action+0x30c/0x5c0
+  __do_softirq+0x14f/0x491
+
+ Freed by task 6469:
+  kasan_save_stack+0x38/0x70
+  kasan_set_track+0x25/0x40
+  kasan_save_free_info+0x2b/0x60
+  ____kasan_slab_free+0x180/0x1f0
+  __kasan_slab_free+0x12/0x30
+  slab_free_freelist_hook+0xd2/0x1a0
+  __kmem_cache_free+0x1a2/0x2f0
+  kfree+0x78/0x120
+  nf_conntrack_free+0x74/0x130 [nf_conntrack]
+  nf_ct_destroy+0xb2/0x140 [nf_conntrack]
+  __nf_ct_resolve_clash+0x529/0x5d0 [nf_conntrack]
+  nf_ct_resolve_clash+0xf6/0x490 [nf_conntrack]
+  __nf_conntrack_confirm+0x2c6/0x770 [nf_conntrack]
+  tcf_ct_act+0x12ad/0x1350 [act_ct]
+  tcf_action_exec+0xf8/0x1f0
+  fl_classify+0x355/0x360 [cls_flower]
+  __tcf_classify+0x1fd/0x330
+  tcf_classify+0x21c/0x3c0
+  sch_handle_ingress.constprop.0+0x2c5/0x500
+  __netif_receive_skb_core.constprop.0+0xb25/0x1510
+  __netif_receive_skb_list_core+0x220/0x4c0
+  netif_receive_skb_list_internal+0x446/0x620
+  napi_complete_done+0x157/0x3d0
+  gro_cell_poll+0xcf/0x100
+  __napi_poll+0x65/0x310
+  net_rx_action+0x30c/0x5c0
+  __do_softirq+0x14f/0x491
+
+The ct may be dropped if a clash has been resolved but is still passed to
+the tcf_ct_flow_table_process_conn function for further usage. This issue
+can be fixed by retrieving ct from skb again after confirming conntrack.
+
+Fixes: 0cc254e5aa37 ("net/sched: act_ct: Offload connections with commit action")
+Co-developed-by: Gerald Yang <gerald.yang@canonical.com>
+Signed-off-by: Gerald Yang <gerald.yang@canonical.com>
+Signed-off-by: Chengen Du <chengen.du@canonical.com>
+Link: https://patch.msgid.link/20240710053747.13223-1-chengen.du@canonical.com
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+
+
+
+The vulnerable function:
+TC_INDIRECT_SCOPE int tcf_ct_act(struct sk_buff *skb, const struct tc_action *a,
+				 struct tcf_result *res)
+{
+	struct net *net = dev_net(skb->dev);
+	enum ip_conntrack_info ctinfo;
+	struct tcf_ct *c = to_ct(a);
+	struct nf_conn *tmpl = NULL;
+	struct nf_hook_state state;
+	bool cached, commit, clear;
+	int nh_ofs, err, retval;
+	struct tcf_ct_params *p;
+	bool add_helper = false;
+	bool skip_add = false;
+	bool defrag = false;
+	struct nf_conn *ct;
+	u8 family;
+
+	p = rcu_dereference_bh(c->params);
+
+	retval = READ_ONCE(c->tcf_action);
+	commit = p->ct_action & TCA_CT_ACT_COMMIT;
+	clear = p->ct_action & TCA_CT_ACT_CLEAR;
+	tmpl = p->tmpl;
+
+	tcf_lastuse_update(&c->tcf_tm);
+	tcf_action_update_bstats(&c->common, skb);
+
+	if (clear) {
+		tc_skb_cb(skb)->post_ct = false;
+		ct = nf_ct_get(skb, &ctinfo);
+		if (ct) {
+			nf_ct_put(ct);
+			nf_ct_set(skb, NULL, IP_CT_UNTRACKED);
+		}
+
+		goto out_clear;
+	}
+
+	family = tcf_ct_skb_nf_family(skb);
+	if (family == NFPROTO_UNSPEC)
+		goto drop;
+
+	/* The conntrack module expects to be working at L3.
+	 * We also try to pull the IPv4/6 header to linear area
+	 */
+	nh_ofs = skb_network_offset(skb);
+	skb_pull_rcsum(skb, nh_ofs);
+	err = tcf_ct_handle_fragments(net, skb, family, p->zone, &defrag);
+	if (err)
+		goto out_frag;
+
+	err = nf_ct_skb_network_trim(skb, family);
+	if (err)
+		goto drop;
+
+	/* If we are recirculating packets to match on ct fields and
+	 * committing with a separate ct action, then we don't need to
+	 * actually run the packet through conntrack twice unless it's for a
+	 * different zone.
+	 */
+	cached = tcf_ct_skb_nfct_cached(net, skb, p);
+	if (!cached) {
+		if (tcf_ct_flow_table_lookup(p, skb, family)) {
+			skip_add = true;
+			goto do_nat;
+		}
+
+		/* Associate skb with specified zone. */
+		if (tmpl) {
+			nf_conntrack_put(skb_nfct(skb));
+			nf_conntrack_get(&tmpl->ct_general);
+			nf_ct_set(skb, tmpl, IP_CT_NEW);
+		}
+
+		state.hook = NF_INET_PRE_ROUTING;
+		state.net = net;
+		state.pf = family;
+		err = nf_conntrack_in(skb, &state);
+		if (err != NF_ACCEPT)
+			goto out_push;
+	}
+
+do_nat:
+	ct = nf_ct_get(skb, &ctinfo);
+	if (!ct)
+		goto out_push;
+	nf_ct_deliver_cached_events(ct);
+	nf_conn_act_ct_ext_fill(skb, ct, ctinfo);
+
+	err = tcf_ct_act_nat(skb, ct, ctinfo, p->ct_action, &p->range, commit);
+	if (err != NF_ACCEPT)
+		goto drop;
+
+	if (!nf_ct_is_confirmed(ct) && commit && p->helper && !nfct_help(ct)) {
+		err = __nf_ct_try_assign_helper(ct, p->tmpl, GFP_ATOMIC);
+		if (err)
+			goto drop;
+		add_helper = true;
+		if (p->ct_action & TCA_CT_ACT_NAT && !nfct_seqadj(ct)) {
+			if (!nfct_seqadj_ext_add(ct))
+				goto drop;
+		}
+	}
+
+	if (nf_ct_is_confirmed(ct) ? ((!cached && !skip_add) || add_helper) : commit) {
+		if (nf_ct_helper(skb, ct, ctinfo, family) != NF_ACCEPT)
+			goto drop;
+	}
+
+	if (commit) {
+		tcf_ct_act_set_mark(ct, p->mark, p->mark_mask);
+		tcf_ct_act_set_labels(ct, p->labels, p->labels_mask);
+
+		if (!nf_ct_is_confirmed(ct))
+			nf_conn_act_ct_ext_add(skb, ct, ctinfo);
+
+		/* This will take care of sending queued events
+		 * even if the connection is already confirmed.
+		 */
+		if (nf_conntrack_confirm(skb) != NF_ACCEPT)
+			goto drop;
+	}
+
+	if (!skip_add)
+		tcf_ct_flow_table_process_conn(p->ct_ft, ct, ctinfo);
+
+out_push:
+	skb_push_rcsum(skb, nh_ofs);
+
+	tc_skb_cb(skb)->post_ct = true;
+	tc_skb_cb(skb)->zone = p->zone;
+out_clear:
+	if (defrag)
+		qdisc_skb_cb(skb)->pkt_len = skb->len;
+	return retval;
+
+out_frag:
+	if (err != -EINPROGRESS)
+		tcf_action_inc_drop_qstats(&c->common);
+	return TC_ACT_CONSUMED;
+
+drop:
+	tcf_action_inc_drop_qstats(&c->common);
+	return TC_ACT_SHOT;
+}
+
+
+
+The corrected function:
+TC_INDIRECT_SCOPE int tcf_ct_act(struct sk_buff *skb, const struct tc_action *a,
+				 struct tcf_result *res)
+{
+	struct net *net = dev_net(skb->dev);
+	enum ip_conntrack_info ctinfo;
+	struct tcf_ct *c = to_ct(a);
+	struct nf_conn *tmpl = NULL;
+	struct nf_hook_state state;
+	bool cached, commit, clear;
+	int nh_ofs, err, retval;
+	struct tcf_ct_params *p;
+	bool add_helper = false;
+	bool skip_add = false;
+	bool defrag = false;
+	struct nf_conn *ct;
+	u8 family;
+
+	p = rcu_dereference_bh(c->params);
+
+	retval = READ_ONCE(c->tcf_action);
+	commit = p->ct_action & TCA_CT_ACT_COMMIT;
+	clear = p->ct_action & TCA_CT_ACT_CLEAR;
+	tmpl = p->tmpl;
+
+	tcf_lastuse_update(&c->tcf_tm);
+	tcf_action_update_bstats(&c->common, skb);
+
+	if (clear) {
+		tc_skb_cb(skb)->post_ct = false;
+		ct = nf_ct_get(skb, &ctinfo);
+		if (ct) {
+			nf_ct_put(ct);
+			nf_ct_set(skb, NULL, IP_CT_UNTRACKED);
+		}
+
+		goto out_clear;
+	}
+
+	family = tcf_ct_skb_nf_family(skb);
+	if (family == NFPROTO_UNSPEC)
+		goto drop;
+
+	/* The conntrack module expects to be working at L3.
+	 * We also try to pull the IPv4/6 header to linear area
+	 */
+	nh_ofs = skb_network_offset(skb);
+	skb_pull_rcsum(skb, nh_ofs);
+	err = tcf_ct_handle_fragments(net, skb, family, p->zone, &defrag);
+	if (err)
+		goto out_frag;
+
+	err = nf_ct_skb_network_trim(skb, family);
+	if (err)
+		goto drop;
+
+	/* If we are recirculating packets to match on ct fields and
+	 * committing with a separate ct action, then we don't need to
+	 * actually run the packet through conntrack twice unless it's for a
+	 * different zone.
+	 */
+	cached = tcf_ct_skb_nfct_cached(net, skb, p);
+	if (!cached) {
+		if (tcf_ct_flow_table_lookup(p, skb, family)) {
+			skip_add = true;
+			goto do_nat;
+		}
+
+		/* Associate skb with specified zone. */
+		if (tmpl) {
+			nf_conntrack_put(skb_nfct(skb));
+			nf_conntrack_get(&tmpl->ct_general);
+			nf_ct_set(skb, tmpl, IP_CT_NEW);
+		}
+
+		state.hook = NF_INET_PRE_ROUTING;
+		state.net = net;
+		state.pf = family;
+		err = nf_conntrack_in(skb, &state);
+		if (err != NF_ACCEPT)
+			goto out_push;
+	}
+
+do_nat:
+	ct = nf_ct_get(skb, &ctinfo);
+	if (!ct)
+		goto out_push;
+	nf_ct_deliver_cached_events(ct);
+	nf_conn_act_ct_ext_fill(skb, ct, ctinfo);
+
+	err = tcf_ct_act_nat(skb, ct, ctinfo, p->ct_action, &p->range, commit);
+	if (err != NF_ACCEPT)
+		goto drop;
+
+	if (!nf_ct_is_confirmed(ct) && commit && p->helper && !nfct_help(ct)) {
+		err = __nf_ct_try_assign_helper(ct, p->tmpl, GFP_ATOMIC);
+		if (err)
+			goto drop;
+		add_helper = true;
+		if (p->ct_action & TCA_CT_ACT_NAT && !nfct_seqadj(ct)) {
+			if (!nfct_seqadj_ext_add(ct))
+				goto drop;
+		}
+	}
+
+	if (nf_ct_is_confirmed(ct) ? ((!cached && !skip_add) || add_helper) : commit) {
+		if (nf_ct_helper(skb, ct, ctinfo, family) != NF_ACCEPT)
+			goto drop;
+	}
+
+	if (commit) {
+		tcf_ct_act_set_mark(ct, p->mark, p->mark_mask);
+		tcf_ct_act_set_labels(ct, p->labels, p->labels_mask);
+
+		if (!nf_ct_is_confirmed(ct))
+			nf_conn_act_ct_ext_add(skb, ct, ctinfo);
+
+		/* This will take care of sending queued events
+		 * even if the connection is already confirmed.
+		 */
+		if (nf_conntrack_confirm(skb) != NF_ACCEPT)
+			goto drop;
+
+		/* The ct may be dropped if a clash has been resolved,
+		 * so it's necessary to retrieve it from skb again to
+		 * prevent UAF.
+		 */
+		ct = nf_ct_get(skb, &ctinfo);
+		if (!ct)
+			skip_add = true;
+	}
+
+	if (!skip_add)
+		tcf_ct_flow_table_process_conn(p->ct_ft, ct, ctinfo);
+
+out_push:
+	skb_push_rcsum(skb, nh_ofs);
+
+	tc_skb_cb(skb)->post_ct = true;
+	tc_skb_cb(skb)->zone = p->zone;
+out_clear:
+	if (defrag)
+		qdisc_skb_cb(skb)->pkt_len = skb->len;
+	return retval;
+
+out_frag:
+	if (err != -EINPROGRESS)
+		tcf_action_inc_drop_qstats(&c->common);
+	return TC_ACT_CONSUMED;
+
+drop:
+	tcf_action_inc_drop_qstats(&c->common);
+	return TC_ACT_SHOT;
+}

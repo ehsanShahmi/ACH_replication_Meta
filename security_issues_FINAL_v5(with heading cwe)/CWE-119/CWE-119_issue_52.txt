@@ -1,0 +1,111 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+bpf, ringbuf: Deny reserve of buffers larger than ringbuf
+
+A BPF program might try to reserve a buffer larger than the ringbuf size.
+If the consumer pointer is way ahead of the producer, that would be
+successfully reserved, allowing the BPF program to read or write out of
+the ringbuf allocated area.
+
+Reported-by: Ryota Shiga (Flatt Security)
+Fixes: 457f44363a88 ("bpf: Implement BPF ring buffer and verifier support for it")
+Signed-off-by: Thadeu Lima de Souza Cascardo <cascardo@canonical.com>
+Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+Acked-by: Andrii Nakryiko <andrii@kernel.org>
+Acked-by: Alexei Starovoitov <ast@kernel.org>
+
+
+
+The vulnerable function:
+static void *__bpf_ringbuf_reserve(struct bpf_ringbuf *rb, u64 size)
+{
+	unsigned long cons_pos, prod_pos, new_prod_pos, flags;
+	u32 len, pg_off;
+	struct bpf_ringbuf_hdr *hdr;
+
+	if (unlikely(size > RINGBUF_MAX_RECORD_SZ))
+		return NULL;
+
+	len = round_up(size + BPF_RINGBUF_HDR_SZ, 8);
+	cons_pos = smp_load_acquire(&rb->consumer_pos);
+
+	if (in_nmi()) {
+		if (!spin_trylock_irqsave(&rb->spinlock, flags))
+			return NULL;
+	} else {
+		spin_lock_irqsave(&rb->spinlock, flags);
+	}
+
+	prod_pos = rb->producer_pos;
+	new_prod_pos = prod_pos + len;
+
+	/* check for out of ringbuf space by ensuring producer position
+	 * doesn't advance more than (ringbuf_size - 1) ahead
+	 */
+	if (new_prod_pos - cons_pos > rb->mask) {
+		spin_unlock_irqrestore(&rb->spinlock, flags);
+		return NULL;
+	}
+
+	hdr = (void *)rb->data + (prod_pos & rb->mask);
+	pg_off = bpf_ringbuf_rec_pg_off(rb, hdr);
+	hdr->len = size | BPF_RINGBUF_BUSY_BIT;
+	hdr->pg_off = pg_off;
+
+	/* pairs with consumer's smp_load_acquire() */
+	smp_store_release(&rb->producer_pos, new_prod_pos);
+
+	spin_unlock_irqrestore(&rb->spinlock, flags);
+
+	return (void *)hdr + BPF_RINGBUF_HDR_SZ;
+}
+
+
+
+The corrected function:
+static void *__bpf_ringbuf_reserve(struct bpf_ringbuf *rb, u64 size)
+{
+	unsigned long cons_pos, prod_pos, new_prod_pos, flags;
+	u32 len, pg_off;
+	struct bpf_ringbuf_hdr *hdr;
+
+	if (unlikely(size > RINGBUF_MAX_RECORD_SZ))
+		return NULL;
+
+	len = round_up(size + BPF_RINGBUF_HDR_SZ, 8);
+	if (len > rb->mask + 1)
+		return NULL;
+
+	cons_pos = smp_load_acquire(&rb->consumer_pos);
+
+	if (in_nmi()) {
+		if (!spin_trylock_irqsave(&rb->spinlock, flags))
+			return NULL;
+	} else {
+		spin_lock_irqsave(&rb->spinlock, flags);
+	}
+
+	prod_pos = rb->producer_pos;
+	new_prod_pos = prod_pos + len;
+
+	/* check for out of ringbuf space by ensuring producer position
+	 * doesn't advance more than (ringbuf_size - 1) ahead
+	 */
+	if (new_prod_pos - cons_pos > rb->mask) {
+		spin_unlock_irqrestore(&rb->spinlock, flags);
+		return NULL;
+	}
+
+	hdr = (void *)rb->data + (prod_pos & rb->mask);
+	pg_off = bpf_ringbuf_rec_pg_off(rb, hdr);
+	hdr->len = size | BPF_RINGBUF_BUSY_BIT;
+	hdr->pg_off = pg_off;
+
+	/* pairs with consumer's smp_load_acquire() */
+	smp_store_release(&rb->producer_pos, new_prod_pos);
+
+	spin_unlock_irqrestore(&rb->spinlock, flags);
+
+	return (void *)hdr + BPF_RINGBUF_HDR_SZ;
+}

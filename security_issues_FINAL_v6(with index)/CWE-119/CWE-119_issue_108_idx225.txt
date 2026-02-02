@@ -1,0 +1,79 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+staging: wlags49_h2: buffer overflow setting station name
+
+We need to check the length parameter before doing the memcpy().  I've
+actually changed it to strlcpy() as well so that it's NUL terminated.
+
+You need CAP_NET_ADMIN to trigger these so it's not the end of the
+world.
+
+Reported-by: Nico Golde <nico@ngolde.de>
+Reported-by: Fabian Yamaguchi <fabs@goesec.de>
+Signed-off-by: Dan Carpenter <dan.carpenter@oracle.com>
+Cc: stable@kernel.org
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+
+
+The vulnerable function:
+int wvlan_set_station_nickname(struct net_device *dev,
+		      struct iw_request_info *info,
+		      union iwreq_data *wrqu,
+		      char *extra)
+{
+	struct wl_private *lp = wl_priv(dev);
+	unsigned long flags;
+	int         ret = 0;
+	/*------------------------------------------------------------------------*/
+
+
+	DBG_FUNC("wvlan_set_station_nickname");
+	DBG_ENTER(DbgInfo);
+
+	wl_lock(lp, &flags);
+
+	memset(lp->StationName, 0, sizeof(lp->StationName));
+
+	memcpy(lp->StationName, extra, wrqu->data.length);
+
+	/* Commit the adapter parameters */
+	wl_apply(lp);
+	wl_unlock(lp, &flags);
+
+	DBG_LEAVE(DbgInfo);
+	return ret;
+} /* wvlan_set_station_nickname */
+
+
+
+The corrected function:
+int wvlan_set_station_nickname(struct net_device *dev,
+		      struct iw_request_info *info,
+		      union iwreq_data *wrqu,
+		      char *extra)
+{
+	struct wl_private *lp = wl_priv(dev);
+	unsigned long flags;
+	size_t len;
+	int         ret = 0;
+	/*------------------------------------------------------------------------*/
+
+
+	DBG_FUNC("wvlan_set_station_nickname");
+	DBG_ENTER(DbgInfo);
+
+	wl_lock(lp, &flags);
+
+	memset(lp->StationName, 0, sizeof(lp->StationName));
+	len = min_t(size_t, wrqu->data.length, sizeof(lp->StationName));
+	strlcpy(lp->StationName, extra, len);
+
+	/* Commit the adapter parameters */
+	wl_apply(lp);
+	wl_unlock(lp, &flags);
+
+	DBG_LEAVE(DbgInfo);
+	return ret;
+} /* wvlan_set_station_nickname */

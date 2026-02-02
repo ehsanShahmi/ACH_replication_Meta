@@ -1,0 +1,71 @@
+The vulnerable issue:
+crypto: prefix module autoloading with "crypto-"
+
+This prefixes all crypto module loading with "crypto-" so we never run
+the risk of exposing module auto-loading to userspace via a crypto API,
+as demonstrated by Mathias Krause:
+
+https://lkml.org/lkml/2013/3/4/70
+
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+
+
+The vulnerable function:
+struct crypto_alg *crypto_larval_lookup(const char *name, u32 type, u32 mask)
+{
+	struct crypto_alg *alg;
+
+	if (!name)
+		return ERR_PTR(-ENOENT);
+
+	mask &= ~(CRYPTO_ALG_LARVAL | CRYPTO_ALG_DEAD);
+	type &= mask;
+
+	alg = crypto_alg_lookup(name, type, mask);
+	if (!alg) {
+		request_module("%s", name);
+
+		if (!((type ^ CRYPTO_ALG_NEED_FALLBACK) & mask &
+		      CRYPTO_ALG_NEED_FALLBACK))
+			request_module("%s-all", name);
+
+		alg = crypto_alg_lookup(name, type, mask);
+	}
+
+	if (alg)
+		return crypto_is_larval(alg) ? crypto_larval_wait(alg) : alg;
+
+	return crypto_larval_add(name, type, mask);
+}
+
+
+
+The corrected function:
+struct crypto_alg *crypto_larval_lookup(const char *name, u32 type, u32 mask)
+{
+	struct crypto_alg *alg;
+
+	if (!name)
+		return ERR_PTR(-ENOENT);
+
+	mask &= ~(CRYPTO_ALG_LARVAL | CRYPTO_ALG_DEAD);
+	type &= mask;
+
+	alg = crypto_alg_lookup(name, type, mask);
+	if (!alg) {
+		request_module("crypto-%s", name);
+
+		if (!((type ^ CRYPTO_ALG_NEED_FALLBACK) & mask &
+		      CRYPTO_ALG_NEED_FALLBACK))
+			request_module("crypto-%s-all", name);
+
+		alg = crypto_alg_lookup(name, type, mask);
+	}
+
+	if (alg)
+		return crypto_is_larval(alg) ? crypto_larval_wait(alg) : alg;
+
+	return crypto_larval_add(name, type, mask);
+}

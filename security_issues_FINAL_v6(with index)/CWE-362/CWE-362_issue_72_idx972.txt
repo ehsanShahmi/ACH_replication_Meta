@@ -1,0 +1,120 @@
+This issue file has CWE-362. Your task is to create this CWE-362 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+dentry name snapshots
+
+take_dentry_name_snapshot() takes a safe snapshot of dentry name;
+if the name is a short one, it gets copied into caller-supplied
+structure, otherwise an extra reference to external name is grabbed
+(those are never modified).  In either case the pointer to stable
+string is stored into the same structure.
+
+dentry must be held by the caller of take_dentry_name_snapshot(),
+but may be freely dropped afterwards - the snapshot will stay
+until destroyed by release_dentry_name_snapshot().
+
+Intended use:
+	struct name_snapshot s;
+
+	take_dentry_name_snapshot(&s, dentry);
+	...
+	access s.name
+	...
+	release_dentry_name_snapshot(&s);
+
+Replaces fsnotify_oldname_...(), gets used in fsnotify to obtain the name
+to pass down with event.
+
+Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+
+
+The vulnerable function:
+struct dentry *debugfs_rename(struct dentry *old_dir, struct dentry *old_dentry,
+		struct dentry *new_dir, const char *new_name)
+{
+	int error;
+	struct dentry *dentry = NULL, *trap;
+	const char *old_name;
+
+	trap = lock_rename(new_dir, old_dir);
+	/* Source or destination directories don't exist? */
+	if (d_really_is_negative(old_dir) || d_really_is_negative(new_dir))
+		goto exit;
+	/* Source does not exist, cyclic rename, or mountpoint? */
+	if (d_really_is_negative(old_dentry) || old_dentry == trap ||
+	    d_mountpoint(old_dentry))
+		goto exit;
+	dentry = lookup_one_len(new_name, new_dir, strlen(new_name));
+	/* Lookup failed, cyclic rename or target exists? */
+	if (IS_ERR(dentry) || dentry == trap || d_really_is_positive(dentry))
+		goto exit;
+
+	old_name = fsnotify_oldname_init(old_dentry->d_name.name);
+
+	error = simple_rename(d_inode(old_dir), old_dentry, d_inode(new_dir),
+			      dentry, 0);
+	if (error) {
+		fsnotify_oldname_free(old_name);
+		goto exit;
+	}
+	d_move(old_dentry, dentry);
+	fsnotify_move(d_inode(old_dir), d_inode(new_dir), old_name,
+		d_is_dir(old_dentry),
+		NULL, old_dentry);
+	fsnotify_oldname_free(old_name);
+	unlock_rename(new_dir, old_dir);
+	dput(dentry);
+	return old_dentry;
+exit:
+	if (dentry && !IS_ERR(dentry))
+		dput(dentry);
+	unlock_rename(new_dir, old_dir);
+	return NULL;
+}
+
+
+
+The corrected function:
+struct dentry *debugfs_rename(struct dentry *old_dir, struct dentry *old_dentry,
+		struct dentry *new_dir, const char *new_name)
+{
+	int error;
+	struct dentry *dentry = NULL, *trap;
+	struct name_snapshot old_name;
+
+	trap = lock_rename(new_dir, old_dir);
+	/* Source or destination directories don't exist? */
+	if (d_really_is_negative(old_dir) || d_really_is_negative(new_dir))
+		goto exit;
+	/* Source does not exist, cyclic rename, or mountpoint? */
+	if (d_really_is_negative(old_dentry) || old_dentry == trap ||
+	    d_mountpoint(old_dentry))
+		goto exit;
+	dentry = lookup_one_len(new_name, new_dir, strlen(new_name));
+	/* Lookup failed, cyclic rename or target exists? */
+	if (IS_ERR(dentry) || dentry == trap || d_really_is_positive(dentry))
+		goto exit;
+
+	take_dentry_name_snapshot(&old_name, old_dentry);
+
+	error = simple_rename(d_inode(old_dir), old_dentry, d_inode(new_dir),
+			      dentry, 0);
+	if (error) {
+		release_dentry_name_snapshot(&old_name);
+		goto exit;
+	}
+	d_move(old_dentry, dentry);
+	fsnotify_move(d_inode(old_dir), d_inode(new_dir), old_name.name,
+		d_is_dir(old_dentry),
+		NULL, old_dentry);
+	release_dentry_name_snapshot(&old_name);
+	unlock_rename(new_dir, old_dir);
+	dput(dentry);
+	return old_dentry;
+exit:
+	if (dentry && !IS_ERR(dentry))
+		dput(dentry);
+	unlock_rename(new_dir, old_dir);
+	return NULL;
+}

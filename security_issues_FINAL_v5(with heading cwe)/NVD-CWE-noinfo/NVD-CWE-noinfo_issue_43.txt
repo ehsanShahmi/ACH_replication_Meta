@@ -1,0 +1,141 @@
+This issue file has NVD-CWE-noinfo. Your task is to create this NVD-CWE-noinfo type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+net: Audit drivers to identify those needing IFF_TX_SKB_SHARING cleared
+
+After the last patch, We are left in a state in which only drivers calling
+ether_setup have IFF_TX_SKB_SHARING set (we assume that drivers touching real
+hardware call ether_setup for their net_devices and don't hold any state in
+their skbs.  There are a handful of drivers that violate this assumption of
+course, and need to be fixed up.  This patch identifies those drivers, and marks
+them as not being able to support the safe transmission of skbs by clearning the
+IFF_TX_SKB_SHARING flag in priv_flags
+
+Signed-off-by: Neil Horman <nhorman@tuxdriver.com>
+CC: Karsten Keil <isdn@linux-pingi.de>
+CC: "David S. Miller" <davem@davemloft.net>
+CC: Jay Vosburgh <fubar@us.ibm.com>
+CC: Andy Gospodarek <andy@greyhouse.net>
+CC: Patrick McHardy <kaber@trash.net>
+CC: Krzysztof Halasa <khc@pm.waw.pl>
+CC: "John W. Linville" <linville@tuxdriver.com>
+CC: Greg Kroah-Hartman <gregkh@suse.de>
+CC: Marcel Holtmann <marcel@holtmann.org>
+CC: Johannes Berg <johannes@sipsolutions.net>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static void bond_setup(struct net_device *bond_dev)
+{
+	struct bonding *bond = netdev_priv(bond_dev);
+
+	/* initialize rwlocks */
+	rwlock_init(&bond->lock);
+	rwlock_init(&bond->curr_slave_lock);
+
+	bond->params = bonding_defaults;
+
+	/* Initialize pointers */
+	bond->dev = bond_dev;
+	INIT_LIST_HEAD(&bond->vlan_list);
+
+	/* Initialize the device entry points */
+	ether_setup(bond_dev);
+	bond_dev->netdev_ops = &bond_netdev_ops;
+	bond_dev->ethtool_ops = &bond_ethtool_ops;
+	bond_set_mode_ops(bond, bond->params.mode);
+
+	bond_dev->destructor = bond_destructor;
+
+	/* Initialize the device options */
+	bond_dev->tx_queue_len = 0;
+	bond_dev->flags |= IFF_MASTER|IFF_MULTICAST;
+	bond_dev->priv_flags |= IFF_BONDING;
+	bond_dev->priv_flags &= ~IFF_XMIT_DST_RELEASE;
+
+	/* At first, we block adding VLANs. That's the only way to
+	 * prevent problems that occur when adding VLANs over an
+	 * empty bond. The block will be removed once non-challenged
+	 * slaves are enslaved.
+	 */
+	bond_dev->features |= NETIF_F_VLAN_CHALLENGED;
+
+	/* don't acquire bond device's netif_tx_lock when
+	 * transmitting */
+	bond_dev->features |= NETIF_F_LLTX;
+
+	/* By default, we declare the bond to be fully
+	 * VLAN hardware accelerated capable. Special
+	 * care is taken in the various xmit functions
+	 * when there are slaves that are not hw accel
+	 * capable
+	 */
+
+	bond_dev->hw_features = BOND_VLAN_FEATURES |
+				NETIF_F_HW_VLAN_TX |
+				NETIF_F_HW_VLAN_RX |
+				NETIF_F_HW_VLAN_FILTER;
+
+	bond_dev->hw_features &= ~(NETIF_F_ALL_CSUM & ~NETIF_F_NO_CSUM);
+	bond_dev->features |= bond_dev->hw_features;
+}
+
+
+
+The corrected function:
+static void bond_setup(struct net_device *bond_dev)
+{
+	struct bonding *bond = netdev_priv(bond_dev);
+
+	/* initialize rwlocks */
+	rwlock_init(&bond->lock);
+	rwlock_init(&bond->curr_slave_lock);
+
+	bond->params = bonding_defaults;
+
+	/* Initialize pointers */
+	bond->dev = bond_dev;
+	INIT_LIST_HEAD(&bond->vlan_list);
+
+	/* Initialize the device entry points */
+	ether_setup(bond_dev);
+	bond_dev->netdev_ops = &bond_netdev_ops;
+	bond_dev->ethtool_ops = &bond_ethtool_ops;
+	bond_set_mode_ops(bond, bond->params.mode);
+
+	bond_dev->destructor = bond_destructor;
+
+	/* Initialize the device options */
+	bond_dev->tx_queue_len = 0;
+	bond_dev->flags |= IFF_MASTER|IFF_MULTICAST;
+	bond_dev->priv_flags |= IFF_BONDING;
+	bond_dev->priv_flags &= ~(IFF_XMIT_DST_RELEASE | IFF_TX_SKB_SHARING);
+
+	/* At first, we block adding VLANs. That's the only way to
+	 * prevent problems that occur when adding VLANs over an
+	 * empty bond. The block will be removed once non-challenged
+	 * slaves are enslaved.
+	 */
+	bond_dev->features |= NETIF_F_VLAN_CHALLENGED;
+
+	/* don't acquire bond device's netif_tx_lock when
+	 * transmitting */
+	bond_dev->features |= NETIF_F_LLTX;
+
+	/* By default, we declare the bond to be fully
+	 * VLAN hardware accelerated capable. Special
+	 * care is taken in the various xmit functions
+	 * when there are slaves that are not hw accel
+	 * capable
+	 */
+
+	bond_dev->hw_features = BOND_VLAN_FEATURES |
+				NETIF_F_HW_VLAN_TX |
+				NETIF_F_HW_VLAN_RX |
+				NETIF_F_HW_VLAN_FILTER;
+
+	bond_dev->hw_features &= ~(NETIF_F_ALL_CSUM & ~NETIF_F_NO_CSUM);
+	bond_dev->features |= bond_dev->hw_features;
+}

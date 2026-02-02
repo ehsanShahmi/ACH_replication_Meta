@@ -1,0 +1,179 @@
+The vulnerable issue:
+ipv6: raw: Deduct extension header length in rawv6_push_pending_frames
+
+The total cork length created by ip6_append_data includes extension
+headers, so we must exclude them when comparing them against the
+IPV6_CHECKSUM offset which does not include extension headers.
+
+Reported-by: Kyle Zeng <zengyhkyle@gmail.com>
+Fixes: 357b40a18b04 ("[IPV6]: IPV6_CHECKSUM socket option can corrupt kernel memory")
+Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static int rawv6_push_pending_frames(struct sock *sk, struct flowi6 *fl6,
+				     struct raw6_sock *rp)
+{
+	struct sk_buff *skb;
+	int err = 0;
+	int offset;
+	int len;
+	int total_len;
+	__wsum tmp_csum;
+	__sum16 csum;
+
+	if (!rp->checksum)
+		goto send;
+
+	skb = skb_peek(&sk->sk_write_queue);
+	if (!skb)
+		goto out;
+
+	offset = rp->offset;
+	total_len = inet_sk(sk)->cork.base.length;
+	if (offset >= total_len - 1) {
+		err = -EINVAL;
+		ip6_flush_pending_frames(sk);
+		goto out;
+	}
+
+	/* should be check HW csum miyazawa */
+	if (skb_queue_len(&sk->sk_write_queue) == 1) {
+		/*
+		 * Only one fragment on the socket.
+		 */
+		tmp_csum = skb->csum;
+	} else {
+		struct sk_buff *csum_skb = NULL;
+		tmp_csum = 0;
+
+		skb_queue_walk(&sk->sk_write_queue, skb) {
+			tmp_csum = csum_add(tmp_csum, skb->csum);
+
+			if (csum_skb)
+				continue;
+
+			len = skb->len - skb_transport_offset(skb);
+			if (offset >= len) {
+				offset -= len;
+				continue;
+			}
+
+			csum_skb = skb;
+		}
+
+		skb = csum_skb;
+	}
+
+	offset += skb_transport_offset(skb);
+	err = skb_copy_bits(skb, offset, &csum, 2);
+	if (err < 0) {
+		ip6_flush_pending_frames(sk);
+		goto out;
+	}
+
+	/* in case cksum was not initialized */
+	if (unlikely(csum))
+		tmp_csum = csum_sub(tmp_csum, csum_unfold(csum));
+
+	csum = csum_ipv6_magic(&fl6->saddr, &fl6->daddr,
+			       total_len, fl6->flowi6_proto, tmp_csum);
+
+	if (csum == 0 && fl6->flowi6_proto == IPPROTO_UDP)
+		csum = CSUM_MANGLED_0;
+
+	BUG_ON(skb_store_bits(skb, offset, &csum, 2));
+
+send:
+	err = ip6_push_pending_frames(sk);
+out:
+	return err;
+}
+
+
+
+The corrected function:
+static int rawv6_push_pending_frames(struct sock *sk, struct flowi6 *fl6,
+				     struct raw6_sock *rp)
+{
+	struct ipv6_txoptions *opt;
+	struct sk_buff *skb;
+	int err = 0;
+	int offset;
+	int len;
+	int total_len;
+	__wsum tmp_csum;
+	__sum16 csum;
+
+	if (!rp->checksum)
+		goto send;
+
+	skb = skb_peek(&sk->sk_write_queue);
+	if (!skb)
+		goto out;
+
+	offset = rp->offset;
+	total_len = inet_sk(sk)->cork.base.length;
+	opt = inet6_sk(sk)->cork.opt;
+	total_len -= opt ? opt->opt_flen : 0;
+
+	if (offset >= total_len - 1) {
+		err = -EINVAL;
+		ip6_flush_pending_frames(sk);
+		goto out;
+	}
+
+	/* should be check HW csum miyazawa */
+	if (skb_queue_len(&sk->sk_write_queue) == 1) {
+		/*
+		 * Only one fragment on the socket.
+		 */
+		tmp_csum = skb->csum;
+	} else {
+		struct sk_buff *csum_skb = NULL;
+		tmp_csum = 0;
+
+		skb_queue_walk(&sk->sk_write_queue, skb) {
+			tmp_csum = csum_add(tmp_csum, skb->csum);
+
+			if (csum_skb)
+				continue;
+
+			len = skb->len - skb_transport_offset(skb);
+			if (offset >= len) {
+				offset -= len;
+				continue;
+			}
+
+			csum_skb = skb;
+		}
+
+		skb = csum_skb;
+	}
+
+	offset += skb_transport_offset(skb);
+	err = skb_copy_bits(skb, offset, &csum, 2);
+	if (err < 0) {
+		ip6_flush_pending_frames(sk);
+		goto out;
+	}
+
+	/* in case cksum was not initialized */
+	if (unlikely(csum))
+		tmp_csum = csum_sub(tmp_csum, csum_unfold(csum));
+
+	csum = csum_ipv6_magic(&fl6->saddr, &fl6->daddr,
+			       total_len, fl6->flowi6_proto, tmp_csum);
+
+	if (csum == 0 && fl6->flowi6_proto == IPPROTO_UDP)
+		csum = CSUM_MANGLED_0;
+
+	BUG_ON(skb_store_bits(skb, offset, &csum, 2));
+
+send:
+	err = ip6_push_pending_frames(sk);
+out:
+	return err;
+}

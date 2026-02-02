@@ -1,0 +1,159 @@
+This issue file has CWE-200. Your task is to create this CWE-200 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+mac80211: fix fragmentation code, particularly for encryption
+
+The "new" fragmentation code (since my rewrite almost 5 years ago)
+erroneously sets skb->len rather than using skb_trim() to adjust
+the length of the first fragment after copying out all the others.
+This leaves the skb tail pointer pointing to after where the data
+originally ended, and thus causes the encryption MIC to be written
+at that point, rather than where it belongs: immediately after the
+data.
+
+The impact of this is that if software encryption is done, then
+ a) encryption doesn't work for the first fragment, the connection
+    becomes unusable as the first fragment will never be properly
+    verified at the receiver, the MIC is practically guaranteed to
+    be wrong
+ b) we leak up to 8 bytes of plaintext (!) of the packet out into
+    the air
+
+This is only mitigated by the fact that many devices are capable
+of doing encryption in hardware, in which case this can't happen
+as the tail pointer is irrelevant in that case. Additionally,
+fragmentation is not used very frequently and would normally have
+to be configured manually.
+
+Fix this by using skb_trim() properly.
+
+Cc: stable@vger.kernel.org
+Fixes: 2de8e0d999b8 ("mac80211: rewrite fragmentation")
+Reported-by: Jouni Malinen <j@w1.fi>
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+
+
+The vulnerable function:
+static int ieee80211_fragment(struct ieee80211_tx_data *tx,
+			      struct sk_buff *skb, int hdrlen,
+			      int frag_threshold)
+{
+	struct ieee80211_local *local = tx->local;
+	struct ieee80211_tx_info *info;
+	struct sk_buff *tmp;
+	int per_fragm = frag_threshold - hdrlen - FCS_LEN;
+	int pos = hdrlen + per_fragm;
+	int rem = skb->len - hdrlen - per_fragm;
+
+	if (WARN_ON(rem < 0))
+		return -EINVAL;
+
+	/* first fragment was already added to queue by caller */
+
+	while (rem) {
+		int fraglen = per_fragm;
+
+		if (fraglen > rem)
+			fraglen = rem;
+		rem -= fraglen;
+		tmp = dev_alloc_skb(local->tx_headroom +
+				    frag_threshold +
+				    tx->sdata->encrypt_headroom +
+				    IEEE80211_ENCRYPT_TAILROOM);
+		if (!tmp)
+			return -ENOMEM;
+
+		__skb_queue_tail(&tx->skbs, tmp);
+
+		skb_reserve(tmp,
+			    local->tx_headroom + tx->sdata->encrypt_headroom);
+
+		/* copy control information */
+		memcpy(tmp->cb, skb->cb, sizeof(tmp->cb));
+
+		info = IEEE80211_SKB_CB(tmp);
+		info->flags &= ~(IEEE80211_TX_CTL_CLEAR_PS_FILT |
+				 IEEE80211_TX_CTL_FIRST_FRAGMENT);
+
+		if (rem)
+			info->flags |= IEEE80211_TX_CTL_MORE_FRAMES;
+
+		skb_copy_queue_mapping(tmp, skb);
+		tmp->priority = skb->priority;
+		tmp->dev = skb->dev;
+
+		/* copy header and data */
+		memcpy(skb_put(tmp, hdrlen), skb->data, hdrlen);
+		memcpy(skb_put(tmp, fraglen), skb->data + pos, fraglen);
+
+		pos += fraglen;
+	}
+
+	/* adjust first fragment's length */
+	skb->len = hdrlen + per_fragm;
+	return 0;
+}
+
+
+
+The corrected function:
+static int ieee80211_fragment(struct ieee80211_tx_data *tx,
+			      struct sk_buff *skb, int hdrlen,
+			      int frag_threshold)
+{
+	struct ieee80211_local *local = tx->local;
+	struct ieee80211_tx_info *info;
+	struct sk_buff *tmp;
+	int per_fragm = frag_threshold - hdrlen - FCS_LEN;
+	int pos = hdrlen + per_fragm;
+	int rem = skb->len - hdrlen - per_fragm;
+
+	if (WARN_ON(rem < 0))
+		return -EINVAL;
+
+	/* first fragment was already added to queue by caller */
+
+	while (rem) {
+		int fraglen = per_fragm;
+
+		if (fraglen > rem)
+			fraglen = rem;
+		rem -= fraglen;
+		tmp = dev_alloc_skb(local->tx_headroom +
+				    frag_threshold +
+				    tx->sdata->encrypt_headroom +
+				    IEEE80211_ENCRYPT_TAILROOM);
+		if (!tmp)
+			return -ENOMEM;
+
+		__skb_queue_tail(&tx->skbs, tmp);
+
+		skb_reserve(tmp,
+			    local->tx_headroom + tx->sdata->encrypt_headroom);
+
+		/* copy control information */
+		memcpy(tmp->cb, skb->cb, sizeof(tmp->cb));
+
+		info = IEEE80211_SKB_CB(tmp);
+		info->flags &= ~(IEEE80211_TX_CTL_CLEAR_PS_FILT |
+				 IEEE80211_TX_CTL_FIRST_FRAGMENT);
+
+		if (rem)
+			info->flags |= IEEE80211_TX_CTL_MORE_FRAMES;
+
+		skb_copy_queue_mapping(tmp, skb);
+		tmp->priority = skb->priority;
+		tmp->dev = skb->dev;
+
+		/* copy header and data */
+		memcpy(skb_put(tmp, hdrlen), skb->data, hdrlen);
+		memcpy(skb_put(tmp, fraglen), skb->data + pos, fraglen);
+
+		pos += fraglen;
+	}
+
+	/* adjust first fragment's length */
+	skb_trim(skb, hdrlen + per_fragm);
+	return 0;
+}

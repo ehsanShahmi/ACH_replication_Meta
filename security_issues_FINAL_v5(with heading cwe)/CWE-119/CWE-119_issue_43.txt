@@ -1,0 +1,167 @@
+This issue file has CWE-119. Your task is to create this CWE-119 type in your file under test similar to the following entire context.
+
+The vulnerable issue:
+EDAC/thunderx: Fix possible out-of-bounds string access
+
+Enabling -Wstringop-overflow globally exposes a warning for a common bug
+in the usage of strncat():
+
+  drivers/edac/thunderx_edac.c: In function 'thunderx_ocx_com_threaded_isr':
+  drivers/edac/thunderx_edac.c:1136:17: error: 'strncat' specified bound 1024 equals destination size [-Werror=stringop-overflow=]
+   1136 |                 strncat(msg, other, OCX_MESSAGE_SIZE);
+        |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   ...
+   1145 |                                 strncat(msg, other, OCX_MESSAGE_SIZE);
+   ...
+   1150 |                                 strncat(msg, other, OCX_MESSAGE_SIZE);
+
+   ...
+
+Apparently the author of this driver expected strncat() to behave the
+way that strlcat() does, which uses the size of the destination buffer
+as its third argument rather than the length of the source buffer. The
+result is that there is no check on the size of the allocated buffer.
+
+Change it to strlcat().
+
+  [ bp: Trim compiler output, fixup commit message. ]
+
+Fixes: 41003396f932 ("EDAC, thunderx: Add Cavium ThunderX EDAC driver")
+Signed-off-by: Arnd Bergmann <arnd@arndb.de>
+Signed-off-by: Borislav Petkov (AMD) <bp@alien8.de>
+Reviewed-by: Gustavo A. R. Silva <gustavoars@kernel.org>
+Link: https://lore.kernel.org/r/20231122222007.3199885-1-arnd@kernel.org
+
+
+
+The vulnerable function:
+static irqreturn_t thunderx_ocx_com_threaded_isr(int irq, void *irq_id)
+{
+	struct msix_entry *msix = irq_id;
+	struct thunderx_ocx *ocx = container_of(msix, struct thunderx_ocx,
+						msix_ent[msix->entry]);
+
+	irqreturn_t ret = IRQ_NONE;
+
+	unsigned long tail;
+	struct ocx_com_err_ctx *ctx;
+	int lane;
+	char *msg;
+	char *other;
+
+	msg = kmalloc(OCX_MESSAGE_SIZE, GFP_KERNEL);
+	other = kmalloc(OCX_OTHER_SIZE, GFP_KERNEL);
+
+	if (!msg || !other)
+		goto err_free;
+
+	while (CIRC_CNT(ocx->com_ring_head, ocx->com_ring_tail,
+			ARRAY_SIZE(ocx->com_err_ctx))) {
+		tail = ring_pos(ocx->com_ring_tail,
+				ARRAY_SIZE(ocx->com_err_ctx));
+		ctx = &ocx->com_err_ctx[tail];
+
+		snprintf(msg, OCX_MESSAGE_SIZE, "%s: OCX_COM_INT: %016llx",
+			ocx->edac_dev->ctl_name, ctx->reg_com_int);
+
+		decode_register(other, OCX_OTHER_SIZE,
+				ocx_com_errors, ctx->reg_com_int);
+
+		strncat(msg, other, OCX_MESSAGE_SIZE);
+
+		for (lane = 0; lane < OCX_RX_LANES; lane++)
+			if (ctx->reg_com_int & BIT(lane)) {
+				snprintf(other, OCX_OTHER_SIZE,
+					 "\n\tOCX_LNE_INT[%02d]: %016llx OCX_LNE_STAT11[%02d]: %016llx",
+					 lane, ctx->reg_lane_int[lane],
+					 lane, ctx->reg_lane_stat11[lane]);
+
+				strncat(msg, other, OCX_MESSAGE_SIZE);
+
+				decode_register(other, OCX_OTHER_SIZE,
+						ocx_lane_errors,
+						ctx->reg_lane_int[lane]);
+				strncat(msg, other, OCX_MESSAGE_SIZE);
+			}
+
+		if (ctx->reg_com_int & OCX_COM_INT_CE)
+			edac_device_handle_ce(ocx->edac_dev, 0, 0, msg);
+
+		ocx->com_ring_tail++;
+	}
+
+	ret = IRQ_HANDLED;
+
+err_free:
+	kfree(other);
+	kfree(msg);
+
+	return ret;
+}
+
+
+
+The corrected function:
+static irqreturn_t thunderx_ocx_com_threaded_isr(int irq, void *irq_id)
+{
+	struct msix_entry *msix = irq_id;
+	struct thunderx_ocx *ocx = container_of(msix, struct thunderx_ocx,
+						msix_ent[msix->entry]);
+
+	irqreturn_t ret = IRQ_NONE;
+
+	unsigned long tail;
+	struct ocx_com_err_ctx *ctx;
+	int lane;
+	char *msg;
+	char *other;
+
+	msg = kmalloc(OCX_MESSAGE_SIZE, GFP_KERNEL);
+	other = kmalloc(OCX_OTHER_SIZE, GFP_KERNEL);
+
+	if (!msg || !other)
+		goto err_free;
+
+	while (CIRC_CNT(ocx->com_ring_head, ocx->com_ring_tail,
+			ARRAY_SIZE(ocx->com_err_ctx))) {
+		tail = ring_pos(ocx->com_ring_tail,
+				ARRAY_SIZE(ocx->com_err_ctx));
+		ctx = &ocx->com_err_ctx[tail];
+
+		snprintf(msg, OCX_MESSAGE_SIZE, "%s: OCX_COM_INT: %016llx",
+			ocx->edac_dev->ctl_name, ctx->reg_com_int);
+
+		decode_register(other, OCX_OTHER_SIZE,
+				ocx_com_errors, ctx->reg_com_int);
+
+		strlcat(msg, other, OCX_MESSAGE_SIZE);
+
+		for (lane = 0; lane < OCX_RX_LANES; lane++)
+			if (ctx->reg_com_int & BIT(lane)) {
+				snprintf(other, OCX_OTHER_SIZE,
+					 "\n\tOCX_LNE_INT[%02d]: %016llx OCX_LNE_STAT11[%02d]: %016llx",
+					 lane, ctx->reg_lane_int[lane],
+					 lane, ctx->reg_lane_stat11[lane]);
+
+				strlcat(msg, other, OCX_MESSAGE_SIZE);
+
+				decode_register(other, OCX_OTHER_SIZE,
+						ocx_lane_errors,
+						ctx->reg_lane_int[lane]);
+				strlcat(msg, other, OCX_MESSAGE_SIZE);
+			}
+
+		if (ctx->reg_com_int & OCX_COM_INT_CE)
+			edac_device_handle_ce(ocx->edac_dev, 0, 0, msg);
+
+		ocx->com_ring_tail++;
+	}
+
+	ret = IRQ_HANDLED;
+
+err_free:
+	kfree(other);
+	kfree(msg);
+
+	return ret;
+}

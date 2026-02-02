@@ -1,0 +1,182 @@
+The vulnerable issue:
+net/sctp: fix race condition in sctp_destroy_sock
+
+If sctp_destroy_sock is called without sock_net(sk)->sctp.addr_wq_lock
+held and sp->do_auto_asconf is true, then an element is removed
+from the auto_asconf_splist without any proper locking.
+
+This can happen in the following functions:
+1. In sctp_accept, if sctp_sock_migrate fails.
+2. In inet_create or inet6_create, if there is a bpf program
+   attached to BPF_CGROUP_INET_SOCK_CREATE which denies
+   creation of the sctp socket.
+
+The bug is fixed by acquiring addr_wq_lock in sctp_destroy_sock
+instead of sctp_close.
+
+This addresses CVE-2021-23133.
+
+Reported-by: Or Cohen <orcohen@paloaltonetworks.com>
+Reviewed-by: Xin Long <lucien.xin@gmail.com>
+Fixes: 610236587600 ("bpf: Add new cgroup attach type to enable sock modifications")
+Signed-off-by: Or Cohen <orcohen@paloaltonetworks.com>
+Acked-by: Marcelo Ricardo Leitner <marcelo.leitner@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+
+
+The vulnerable function:
+static void sctp_close(struct sock *sk, long timeout)
+{
+	struct net *net = sock_net(sk);
+	struct sctp_endpoint *ep;
+	struct sctp_association *asoc;
+	struct list_head *pos, *temp;
+	unsigned int data_was_unread;
+
+	pr_debug("%s: sk:%p, timeout:%ld\n", __func__, sk, timeout);
+
+	lock_sock_nested(sk, SINGLE_DEPTH_NESTING);
+	sk->sk_shutdown = SHUTDOWN_MASK;
+	inet_sk_set_state(sk, SCTP_SS_CLOSING);
+
+	ep = sctp_sk(sk)->ep;
+
+	/* Clean up any skbs sitting on the receive queue.  */
+	data_was_unread = sctp_queue_purge_ulpevents(&sk->sk_receive_queue);
+	data_was_unread += sctp_queue_purge_ulpevents(&sctp_sk(sk)->pd_lobby);
+
+	/* Walk all associations on an endpoint.  */
+	list_for_each_safe(pos, temp, &ep->asocs) {
+		asoc = list_entry(pos, struct sctp_association, asocs);
+
+		if (sctp_style(sk, TCP)) {
+			/* A closed association can still be in the list if
+			 * it belongs to a TCP-style listening socket that is
+			 * not yet accepted. If so, free it. If not, send an
+			 * ABORT or SHUTDOWN based on the linger options.
+			 */
+			if (sctp_state(asoc, CLOSED)) {
+				sctp_association_free(asoc);
+				continue;
+			}
+		}
+
+		if (data_was_unread || !skb_queue_empty(&asoc->ulpq.lobby) ||
+		    !skb_queue_empty(&asoc->ulpq.reasm) ||
+		    !skb_queue_empty(&asoc->ulpq.reasm_uo) ||
+		    (sock_flag(sk, SOCK_LINGER) && !sk->sk_lingertime)) {
+			struct sctp_chunk *chunk;
+
+			chunk = sctp_make_abort_user(asoc, NULL, 0);
+			sctp_primitive_ABORT(net, asoc, chunk);
+		} else
+			sctp_primitive_SHUTDOWN(net, asoc, NULL);
+	}
+
+	/* On a TCP-style socket, block for at most linger_time if set. */
+	if (sctp_style(sk, TCP) && timeout)
+		sctp_wait_for_close(sk, timeout);
+
+	/* This will run the backlog queue.  */
+	release_sock(sk);
+
+	/* Supposedly, no process has access to the socket, but
+	 * the net layers still may.
+	 * Also, sctp_destroy_sock() needs to be called with addr_wq_lock
+	 * held and that should be grabbed before socket lock.
+	 */
+	spin_lock_bh(&net->sctp.addr_wq_lock);
+	bh_lock_sock_nested(sk);
+
+	/* Hold the sock, since sk_common_release() will put sock_put()
+	 * and we have just a little more cleanup.
+	 */
+	sock_hold(sk);
+	sk_common_release(sk);
+
+	bh_unlock_sock(sk);
+	spin_unlock_bh(&net->sctp.addr_wq_lock);
+
+	sock_put(sk);
+
+	SCTP_DBG_OBJCNT_DEC(sock);
+}
+
+
+
+The corrected function:
+static void sctp_close(struct sock *sk, long timeout)
+{
+	struct net *net = sock_net(sk);
+	struct sctp_endpoint *ep;
+	struct sctp_association *asoc;
+	struct list_head *pos, *temp;
+	unsigned int data_was_unread;
+
+	pr_debug("%s: sk:%p, timeout:%ld\n", __func__, sk, timeout);
+
+	lock_sock_nested(sk, SINGLE_DEPTH_NESTING);
+	sk->sk_shutdown = SHUTDOWN_MASK;
+	inet_sk_set_state(sk, SCTP_SS_CLOSING);
+
+	ep = sctp_sk(sk)->ep;
+
+	/* Clean up any skbs sitting on the receive queue.  */
+	data_was_unread = sctp_queue_purge_ulpevents(&sk->sk_receive_queue);
+	data_was_unread += sctp_queue_purge_ulpevents(&sctp_sk(sk)->pd_lobby);
+
+	/* Walk all associations on an endpoint.  */
+	list_for_each_safe(pos, temp, &ep->asocs) {
+		asoc = list_entry(pos, struct sctp_association, asocs);
+
+		if (sctp_style(sk, TCP)) {
+			/* A closed association can still be in the list if
+			 * it belongs to a TCP-style listening socket that is
+			 * not yet accepted. If so, free it. If not, send an
+			 * ABORT or SHUTDOWN based on the linger options.
+			 */
+			if (sctp_state(asoc, CLOSED)) {
+				sctp_association_free(asoc);
+				continue;
+			}
+		}
+
+		if (data_was_unread || !skb_queue_empty(&asoc->ulpq.lobby) ||
+		    !skb_queue_empty(&asoc->ulpq.reasm) ||
+		    !skb_queue_empty(&asoc->ulpq.reasm_uo) ||
+		    (sock_flag(sk, SOCK_LINGER) && !sk->sk_lingertime)) {
+			struct sctp_chunk *chunk;
+
+			chunk = sctp_make_abort_user(asoc, NULL, 0);
+			sctp_primitive_ABORT(net, asoc, chunk);
+		} else
+			sctp_primitive_SHUTDOWN(net, asoc, NULL);
+	}
+
+	/* On a TCP-style socket, block for at most linger_time if set. */
+	if (sctp_style(sk, TCP) && timeout)
+		sctp_wait_for_close(sk, timeout);
+
+	/* This will run the backlog queue.  */
+	release_sock(sk);
+
+	/* Supposedly, no process has access to the socket, but
+	 * the net layers still may.
+	 */
+	local_bh_disable();
+	bh_lock_sock(sk);
+
+	/* Hold the sock, since sk_common_release() will put sock_put()
+	 * and we have just a little more cleanup.
+	 */
+	sock_hold(sk);
+	sk_common_release(sk);
+
+	bh_unlock_sock(sk);
+	local_bh_enable();
+
+	sock_put(sk);
+
+	SCTP_DBG_OBJCNT_DEC(sock);
+}

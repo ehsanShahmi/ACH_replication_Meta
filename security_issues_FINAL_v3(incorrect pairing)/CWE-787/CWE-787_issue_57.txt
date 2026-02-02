@@ -1,0 +1,80 @@
+The vulnerable issue:
+Merge tag 'trace-v4.18-rc1' of git://git.kernel.org/pub/scm/linux/kernel/git/rostedt/linux-trace
+
+Pull tracing fixes from Steven Rostedt:
+ "This contains a few fixes and a clean up.
+
+   - a bad merge caused an "endif" to go in the wrong place in
+     scripts/Makefile.build
+
+   - softirq tracing fix for tracing that corrupts lockdep and causes a
+     false splat
+
+   - histogram documentation typo fixes
+
+   - fix a bad memory reference when passing in no filter to the filter
+     code
+
+   - simplify code by using the swap macro instead of open coding the
+     swap"
+
+* tag 'trace-v4.18-rc1' of git://git.kernel.org/pub/scm/linux/kernel/git/rostedt/linux-trace:
+  tracing: Fix SKIP_STACK_VALIDATION=1 build due to bad merge with -mrecord-mcount
+  tracing: Fix some errors in histogram documentation
+  tracing: Use swap macro in update_max_tr
+  softirq: Reorder trace_softirqs_on to prevent lockdep splat
+  tracing: Check for no filter when processing event filters
+
+
+
+The vulnerable function:
+void
+update_max_tr(struct trace_array *tr, struct task_struct *tsk, int cpu)
+{
+	struct ring_buffer *buf;
+
+	if (tr->stop_count)
+		return;
+
+	WARN_ON_ONCE(!irqs_disabled());
+
+	if (!tr->allocated_snapshot) {
+		/* Only the nop tracer should hit this when disabling */
+		WARN_ON_ONCE(tr->current_trace != &nop_trace);
+		return;
+	}
+
+	arch_spin_lock(&tr->max_lock);
+
+	buf = tr->trace_buffer.buffer;
+	tr->trace_buffer.buffer = tr->max_buffer.buffer;
+	tr->max_buffer.buffer = buf;
+
+	__update_max_tr(tr, tsk, cpu);
+	arch_spin_unlock(&tr->max_lock);
+}
+
+
+
+The corrected function:
+void
+update_max_tr(struct trace_array *tr, struct task_struct *tsk, int cpu)
+{
+	if (tr->stop_count)
+		return;
+
+	WARN_ON_ONCE(!irqs_disabled());
+
+	if (!tr->allocated_snapshot) {
+		/* Only the nop tracer should hit this when disabling */
+		WARN_ON_ONCE(tr->current_trace != &nop_trace);
+		return;
+	}
+
+	arch_spin_lock(&tr->max_lock);
+
+	swap(tr->trace_buffer.buffer, tr->max_buffer.buffer);
+
+	__update_max_tr(tr, tsk, cpu);
+	arch_spin_unlock(&tr->max_lock);
+}
