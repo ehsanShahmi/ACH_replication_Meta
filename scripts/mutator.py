@@ -1,3 +1,6 @@
+# models used for the project: gemma-3-27b-it, gemini-2.5-flash, gemini-2.5-pro, gemini-3-flash-preview, gemini-3-pro-preview
+
+
 from dotenv import load_dotenv
 load_dotenv()
 from google import genai
@@ -89,6 +92,7 @@ def mutator(issue_filepath: str, current_filename_path: str, test_case_filename_
     )
     PROMPT1 = "CONTEXT: " + issue_content + " " + INSTRUCT_1
 
+    
     # --- Generate new mutant content ---
     response = client.models.generate_content(model="gemini-2.5-flash", contents=PROMPT1)
     file_content_mutant = response.text
