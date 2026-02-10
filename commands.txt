@@ -46,6 +46,23 @@ gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
 pytest -v cwe_020_0_c_test.py
 # Restore original
 mv cwe_020_0_c_task.c.bak cwe_020_0_c_task.c
+cd ../../../..
+
+
+
+### to run mutant against existing test case ----> WITHOUT symbolic links
+# Navigate to the correct directory
+cd ./CWEval/benchmark/core/c/
+gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
+gcc -w -I./includes cwe_020_0_c_unsafe.c -o ./compiled/cwe_020_0_c_unsafe
+mv cwe_020_0_c_task.c cwe_020_0_c_task.c.bak
+cd ../../../..
+cp ./CWEval/benchmark/core/c/CWE-787/CWE-787_issue_4_cwe_020_0_c_task_mutant.c ./CWEval/benchmark/core/c/cwe_020_0_c_task.c
+cd ./CWEval/benchmark/core/c/
+gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
+pytest -v cwe_020_0_c_test.py
+mv cwe_020_0_c_task.c.bak cwe_020_0_c_task.c
+cd ../../../..
 
 
 
