@@ -44,11 +44,11 @@ def eqChecker(mutant_filename_path: str, current_filename_path: str, output_dire
         "INSTRUCTION: If the first version of the file will always do exactly the same thing "
         "as the second version, just respond with '{yes}'. "
         "However, if the two versions of the file are not equivalent, respond with '{no}', "
-        "and give an explanation of how execution of the first version can produce different behavior."
+        "and give a short explanation of how execution of the first version can produce different behavior."
     )
 
     # --- LLM Call ---
-    response = client.models.generate_content(model="gemma-3-27b-it", contents=INSTRUCT_2)
+    response = client.models.generate_content(model="gemini-2.5-flash", contents=INSTRUCT_2)
     file_content_eq = response.text
 
     # --- Ensure output directory exists ---
@@ -69,11 +69,11 @@ def eqChecker(mutant_filename_path: str, current_filename_path: str, output_dire
 
 if __name__ == "__main__":
     if len(sys.argv) != 4:
-        print("Usage: python3 eqChecker.py <original_c_file> <mutant_c_file> <output_directory>")
+        print("Usage: python3 eqChecker.py <version1_c_file> <version2_c_file> <output_directory>")
         sys.exit(1)
 
-    current_file = sys.argv[1]      # original
-    mutant_file = sys.argv[2]       # mutant
+    current_file = sys.argv[1]      # version 1
+    mutant_file = sys.argv[2]       # version 2
     output_directory = sys.argv[3]
 
     if not os.path.exists(mutant_file):

@@ -57,7 +57,7 @@ gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
 gcc -w -I./includes cwe_020_0_c_unsafe.c -o ./compiled/cwe_020_0_c_unsafe
 mv cwe_020_0_c_task.c cwe_020_0_c_task.c.bak
 cd ../../../..
-cp ./CWEval/benchmark/core/c/CWE-416/CWE-416_issue_7_cwe_020_0_c_task_mutant.c ./CWEval/benchmark/core/c/cwe_020_0_c_task.c
+cp ./CWEval/benchmark/core/c/CWE-476/CWE-476_issue_317_cwe_020_0_c_task_mutant.c ./CWEval/benchmark/core/c/cwe_020_0_c_task.c
 cd ./CWEval/benchmark/core/c/
 gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
 pytest -v cwe_020_0_c_test.py
