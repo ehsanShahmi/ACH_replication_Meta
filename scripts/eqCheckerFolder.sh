@@ -35,7 +35,7 @@ eqchecker_py="$(dirname "$0")/eqChecker.py"
 for ((i=0; i<$num_files; i++)); do
     file_i="${files[$i]}"
     unique=1
-    for ((j=0; j<$num_files; j++)); do
+    for ((j=i+1; j<$num_files; j++)); do
         if [ "$i" -eq "$j" ]; then continue; fi
         file_j="${files[$j]}"
         output=$(python3 "$eqchecker_py" "$file_i" "$file_j" "$abs_input_folder/eq_checker_output")

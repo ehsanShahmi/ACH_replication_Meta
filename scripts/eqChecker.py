@@ -1,3 +1,4 @@
+# models used for the project: gemma-3-27b-it, gemini-2.5-flash, gemini-2.5-pro, gemini-3-flash-preview, gemini-3-pro-preview
 #  python3 eqChecker.py ./CWEval/benchmark/core/c/CWE-119/CWE-119_issue_1_math_task_mutant.c ./CWEval/benchmark/core/c/math_task.c ./CWEval/benchmark/core/c/CWE-119/
 
 from dotenv import load_dotenv
