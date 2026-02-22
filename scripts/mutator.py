@@ -51,6 +51,17 @@ def get_includes_as_string(include_dir="./includes") -> str:
 import os
 import sys
 
+def clean_llm_markdown(input_string) -> str:
+    # Regex to match ```language_name ... ``` and capture the content inside
+    # it handles cases with or without a language name (like 'python', 'c', etc.)
+    pattern = r'^```(?:\w+)?\n(.*?)\n```$'
+    
+    # Use re.DOTALL to make '.' match newlines
+    # Use re.MULTILINE if the markdown is part of a larger string
+    cleaned = re.sub(pattern, r'\1', input_string.strip(), flags=re.DOTALL)
+    
+    return cleaned
+
 def mutator(issue_filepath: str, current_filename_path: str, test_case_filename_path: str, output_directory: str) -> str:
     """
     Generates a mutant from the given issue, code, and test files.
@@ -95,7 +106,7 @@ def mutator(issue_filepath: str, current_filename_path: str, test_case_filename_
     
     # --- Generate new mutant content ---
     response = client.models.generate_content(model="gemini-2.5-flash", contents=PROMPT1)
-    file_content_mutant = response.text
+    file_content_mutant = clean_llm_markdown(response.text)
 
     # --- Build mutant filename ---
     current_filename_basename = os.path.basename(current_filename_path)

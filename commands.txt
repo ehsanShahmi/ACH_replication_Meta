@@ -26,6 +26,7 @@ mv ./CWEval/benchmark/core/c/add_task.c.bak ./CWEval/benchmark/core/c/add_task.c
 
 
 
+
 ### to run mutant against existing test case ----> WITHOUT symbolic links
 # Navigate to the correct directory
 cd ./CWEval/benchmark/core/c/
@@ -48,10 +49,7 @@ pytest -v cwe_020_0_c_test.py
 mv cwe_020_0_c_task.c.bak cwe_020_0_c_task.c
 cd ../../../..
 
-
-
-### to run mutant against existing test case ----> WITHOUT symbolic links
-# Navigate to the correct directory
+### to run mutant against existing test case ----> WITHOUT symbolic links [AS A WHOLE FOR THE TERMINAL]
 cd ./CWEval/benchmark/core/c/
 gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
 gcc -w -I./includes cwe_020_0_c_unsafe.c -o ./compiled/cwe_020_0_c_unsafe
@@ -69,6 +67,7 @@ cd ../../../..
 
 
 
+
 ### Running new test against old code
 # Navigate to the correct directory
 cd ./CWEval/benchmark/core/c/
@@ -79,17 +78,35 @@ gcc -w -I./includes cwe_020_0_c_unsafe.c -o ./compiled/cwe_020_0_c_unsafe
 mv cwe_020_0_c_test.py cwe_020_0_c_test.py.bak
 # Copy new test in this folder
 cd ../../../..
-cp ./CWEval/benchmark/core/c/CWE-122/CWE-122_issue_1_cwe_020_0_c_task_newtest.py ./CWEval/benchmark/core/c/cwe_020_0_c_test.py
+cp ./CWEval/benchmark/core/c/CWE-122/new-tests-CWE-122/CWE-122_issue_1_cwe_020_0_c_task_newtest.py ./CWEval/benchmark/core/c/cwe_020_0_c_test.py
 # Run new tests against the original TASK
 cd ./CWEval/benchmark/core/c/
 pytest -v cwe_020_0_c_test.py
 # Restore original
 mv cwe_020_0_c_test.py.bak cwe_020_0_c_test.py
 
+### Running new test against old code [AS A WHOLE FOR THE TERMINAL]
+cd ./CWEval/benchmark/core/c/
+gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
+gcc -w -I./includes cwe_020_0_c_unsafe.c -o ./compiled/cwe_020_0_c_unsafe
+mv cwe_020_0_c_test.py cwe_020_0_c_test.py.bak
+cd ../../../..
+cp ./CWEval/benchmark/core/c/CWE-416/new-tests-CWE-416/CWE-416_issue_115_cwe_020_0_c_task_newtest.py ./CWEval/benchmark/core/c/cwe_020_0_c_test.py
+cd ./CWEval/benchmark/core/c/
+pytest -v cwe_020_0_c_test.py
+mv cwe_020_0_c_test.py.bak cwe_020_0_c_test.py
+
+
+
+
+
 
 
 
 ### Running new test against the mutant
+# Compile original task
+gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
+gcc -w -I./includes cwe_020_0_c_unsafe.c -o ./compiled/cwe_020_0_c_unsafe
 # Navigate to the correct directory
 cd ./CWEval/benchmark/core/c/
 # Backup original TASK file
@@ -109,5 +126,22 @@ cp ./CWEval/benchmark/core/c/CWE-122/CWE-122_issue_1_cwe_020_0_c_task_newtest.py
 cd ./CWEval/benchmark/core/c/
 pytest -v cwe_020_0_c_test.py
 # Restore originals TASK AND TEST
+mv cwe_020_0_c_task.c.bak cwe_020_0_c_task.c
+mv cwe_020_0_c_test.py.bak cwe_020_0_c_test.py
+
+### Running new test against the mutant [AS A WHOLE FOR THE TERMINAL]
+cd ./CWEval/benchmark/core/c/
+gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
+gcc -w -I./includes cwe_020_0_c_unsafe.c -o ./compiled/cwe_020_0_c_unsafe
+mv cwe_020_0_c_task.c cwe_020_0_c_task.c.bak
+cd ../../../..
+cp ./CWEval/benchmark/core/c/CWE-416/non-eq-CWE-416/CWE-416_issue_115_cwe_020_0_c_task_mutant.c ./CWEval/benchmark/core/c/cwe_020_0_c_task.c
+cd ./CWEval/benchmark/core/c/
+gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
+mv cwe_020_0_c_test.py cwe_020_0_c_test.py.bak
+cd ../../../..
+cp ./CWEval/benchmark/core/c/CWE-416/new-tests-CWE-416/CWE-416_issue_115_cwe_020_0_c_task_newtest.py ./CWEval/benchmark/core/c/cwe_020_0_c_test.py
+cd ./CWEval/benchmark/core/c/
+pytest -v cwe_020_0_c_test.py
 mv cwe_020_0_c_task.c.bak cwe_020_0_c_task.c
 mv cwe_020_0_c_test.py.bak cwe_020_0_c_test.py

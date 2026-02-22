@@ -18,6 +18,8 @@ import openai
 import sys
 import glob
 client = genai.Client()
+import openai
+client_gpt = openai.OpenAI()
 
 import os
 from pathlib import Path
@@ -48,9 +50,13 @@ def eqChecker(mutant_filename_path: str, current_filename_path: str, output_dire
         "and give a short explanation of how execution of the first version can produce different behavior."
     )
 
-    # --- LLM Call ---
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=INSTRUCT_2)
-    file_content_eq = response.text
+    # --- LLM Call using gemini---
+    # response = client.models.generate_content(model="gemini-2.5-pro", contents=INSTRUCT_2)
+    # file_content_eq = response.text
+
+    # --- LLM Call using gpt---
+    response = client_gpt.responses.create(model="gpt-5-nano", input=INSTRUCT_2)
+    file_content_eq = response.output_text
 
     # --- Ensure output directory exists ---
     os.makedirs(output_directory, exist_ok=True)

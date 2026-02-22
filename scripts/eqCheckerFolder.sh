@@ -20,10 +20,10 @@ fi
 mapfile -t files < <(find "$abs_input_folder" -maxdepth 1 -type f -name "*.c" | sort)
 num_files="${#files[@]}"
 
-if [ "$num_files" -le 1 ]; then
-    echo "Only one or zero *.c files, nothing to compare."
-    exit 0
-fi
+# if [ "$num_files" -le 1 ]; then
+#     echo "Only one or zero *.c files, nothing to compare."
+#     exit 0
+# fi
 
 mkdir -p "$abs_input_folder/eq_checker_output"
 output_dir="$abs_input_folder/non-eq-$(basename "$abs_input_folder")"
@@ -35,12 +35,16 @@ eqchecker_py="$(dirname "$0")/eqChecker.py"
 for ((i=0; i<$num_files; i++)); do
     file_i="${files[$i]}"
     unique=1
+    echo "starting $file_i"
     for ((j=i+1; j<$num_files; j++)); do
         if [ "$i" -eq "$j" ]; then continue; fi
         file_j="${files[$j]}"
+        echo " with $file_j" 
         output=$(python3 "$eqchecker_py" "$file_i" "$file_j" "$abs_input_folder/eq_checker_output")
         if echo "$output" | grep -iq "{yes}"; then
             unique=0
+            echo "$file_i == equivalent == $file_j. We keep $file_j."
+            echo " "
             break
         fi
     done
@@ -48,7 +52,9 @@ for ((i=0; i<$num_files; i++)); do
     if [ "$unique" -eq 1 ]; then
         cp "$file_i" "$output_dir/"
         echo "Unique (non-equivalent) file: $file_i"
+        echo " "
     fi
+    # if [ "$i" -eq 0 ]; then break; fi
 done
 
 echo "Done. Non-equivalent files are copied to: $output_dir"

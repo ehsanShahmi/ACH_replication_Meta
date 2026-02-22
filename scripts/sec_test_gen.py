@@ -1,4 +1,4 @@
-# python3 sec_test_gen.py ./CWEval/benchmark/core/c/foo_task.c ./CWEval/benchmark/core/c/foo_test.py ./CWEval/benchmark/core/c/CWE-79_issue_2_foo_task_mutant.c ./CWEval/benchmark/core/c/CWE-79/
+# python3 scripts/sec_test_gen.py ./CWEval/benchmark/core/c/cwe_020_0_c_task.c ./CWEval/benchmark/core/c/cwe_020_0_c_test.py ./CWEval/benchmark/core/c/CWE-125/non-eq-CWE-125/CWE-125_issue_2_cwe_020_0_c_task_mutant.c ./CWEval/benchmark/core/c/CWE-125/
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -8,8 +8,13 @@ import os
 import sys
 import glob
 from pathlib import Path
+import logging
+import openai
+import re
+
 
 client = genai.Client()
+client_gpt = openai.OpenAI()
 
 def get_includes_as_string(include_dir="./includes") -> str:
     """
@@ -30,6 +35,16 @@ def get_includes_as_string(include_dir="./includes") -> str:
             continue
     return combined_includes
 
+def clean_llm_markdown(input_string) -> str:
+    # Regex to match ```language_name ... ``` and capture the content inside
+    # it handles cases with or without a language name (like 'python', 'c', etc.)
+    pattern = r'^```(?:\w+)?\n(.*?)\n```$'
+    
+    # Use re.DOTALL to make '.' match newlines
+    # Use re.MULTILINE if the markdown is part of a larger string
+    cleaned = re.sub(pattern, r'\1', input_string.strip(), flags=re.DOTALL)
+    
+    return cleaned
 
 # =============================================================================
 # Function 1: sec_test_gen
@@ -39,7 +54,19 @@ def sec_test_gen(current_filename_path: str, test_case_filename_path: str, mutan
     Generates extended Python test cases for a C source file and its mutant,
     stores the new test file in the given output directory.
     """
+    # Logic to handle specific CWE path formatting
+    if "CWE-" in output_directory:
+        # normpath removes trailing slashes so basename correctly gets the folder name
+        # e.g., "./CWE-125/" becomes "CWE-125"
+        clean_path = os.path.normpath(output_directory)
+        cwe_folder_name = os.path.basename(clean_path)
+        
+        # Append the new sub-directory name
+        output_directory = os.path.join(output_directory, f"new-tests-{cwe_folder_name}")
+        logging.info(f"Output directory modified to: {output_directory}")
     os.makedirs(output_directory, exist_ok=True)
+
+
     all_header_content = get_includes_as_string(include_dir="./includes")
 
     with open(test_case_filename_path, 'r', encoding='utf-8') as file:
@@ -51,28 +78,38 @@ def sec_test_gen(current_filename_path: str, test_case_filename_path: str, mutan
 
     INSTRUCT_3 = (
         "What follows is two versions of a C file under test. "
-        "An original correct file and a mutated version of that file that contains one mutant per C function, "
-        "each of which represents a bug. Each bug is delimited by the comment pair "
-        "`// MUTANT <START>' and `// MUTANT <END>'. "
-        "The original C file and its mutant are followed by a set of existing test cases that contains unit tests "
+        "An original correct file and a mutated version of that file, "
+        "which represents new bugs of the specified CWE type which is mostly written in the mutant file as comments. "
+        "Each bug is delimited by the comment pair `// MUTANT <START>' and `// MUTANT <END>'. "
+        "The original C file and its mutant are accompanied by a set of existing test cases that contains unit tests "
         "for the original correct file under test. "
         "This is the original version of the file: '''{" + string_current_filename + "}'''. "
         "This is the mutated version: '''{" + file_MUTANT + "}'''. "
         "Here is the existing test suite: '''{" + string_test_case_filename + "}'''. "
-        "Write an extended version of the test class that contains extra test cases that MUST FAIL on the mutant version "
+        "Write an extended version of the test class that contains extra test cases that SHOULD FAIL on the mutant version "
         "but MUST PASS on the original version of the file. "
         "_______________________________________________________"
         "IMPORTANT Instruction:"
-        "THIS NEW TEST CASES ALL MUST PASS IN THE ORIGINAL C FILE. MUST PASS ON ORIGINAL."
+        "THIS NEW TEST CASES ALL MUST PASS IN THE ORIGINAL C FILE. MUST PASS ON ORIGINAL. MUST FAIL ON MUTANT."
+        "The new testcase file must have the original import modules, same runner functions and structures of pytest libraries."
+        "The new testcase file MUST NOT have any technical compile or other errors."
+        "The new testcase file will contain testcases TOGETHER that pass on original C version, but fail on mutant version."
+        "But the new testcases will be run separately when run against original C version and then run against mutant version,"
+        "so that tests designed to pass on original C version will not be considered even running against mutant version and "
+        "tests designed to fail on mutant will not be considered even running against the original C version."
         "_______________________________________________________"
         "Extra Instructions:"
-        "[IN YOUR NEW TEST SUITE CLASS, RETURN FAILURE IF ANY SINGLE TEST FAILS ON THE MUTANT. "
         "DO NOT INCLUDE MARKDOWN (```python...```) python CODEBLOCKS at beginning and end of your file. "
         "USE STANDARD #include 'filename.h' STATEMENTS. DO NOT COPY HEADER CONTENT.]"
     )
 
-    response = client.models.generate_content(model="gemma-3-27b-it", contents=INSTRUCT_3)
-    file_content_new_testcases = response.text
+    # --- LLM Call using gemini---
+    response = client.models.generate_content(model="gemini-3-flash-preview", contents=INSTRUCT_3)
+    file_content_new_testcases = clean_llm_markdown(response.text)
+
+    # # --- LLM Call using gpt---
+    # response = client_gpt.responses.create(model="gpt-5-mini", input=INSTRUCT_3)
+    # file_content_new_testcases = clean_llm_markdown(response.output_text)
 
     # Compose output filename using the format 
     issue_file_name = os.path.basename(mutant_filename_path)
