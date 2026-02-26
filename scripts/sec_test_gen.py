@@ -99,6 +99,8 @@ def sec_test_gen(current_filename_path: str, test_case_filename_path: str, mutan
         "tests designed to fail on mutant will not be considered even running against the original C version."
         "_______________________________________________________"
         "Extra Instructions:"
+        "You must keep the comments EXACTLY as given in the original testcase file. "
+        "DO NOT INCLUDE ANYTHING for any help like input, output, CTRL, etc. or anything without comments at the start of the file."
         "DO NOT INCLUDE MARKDOWN (```python...```) python CODEBLOCKS at beginning and end of your file. "
         "USE STANDARD #include 'filename.h' STATEMENTS. DO NOT COPY HEADER CONTENT.]"
     )

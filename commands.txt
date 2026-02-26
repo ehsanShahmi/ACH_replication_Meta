@@ -91,7 +91,7 @@ gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
 gcc -w -I./includes cwe_020_0_c_unsafe.c -o ./compiled/cwe_020_0_c_unsafe
 mv cwe_020_0_c_test.py cwe_020_0_c_test.py.bak
 cd ../../../..
-cp ./CWEval/benchmark/core/c/CWE-416/new-tests-CWE-416/CWE-416_issue_115_cwe_020_0_c_task_newtest.py ./CWEval/benchmark/core/c/cwe_020_0_c_test.py
+cp ./CWEval/benchmark/core/c/CWE-358/new-tests-CWE-358/CWE-358_issue_1_cwe_020_0_c_task_newtest.py ./CWEval/benchmark/core/c/cwe_020_0_c_test.py
 cd ./CWEval/benchmark/core/c/
 pytest -v cwe_020_0_c_test.py
 mv cwe_020_0_c_test.py.bak cwe_020_0_c_test.py
@@ -135,12 +135,12 @@ gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
 gcc -w -I./includes cwe_020_0_c_unsafe.c -o ./compiled/cwe_020_0_c_unsafe
 mv cwe_020_0_c_task.c cwe_020_0_c_task.c.bak
 cd ../../../..
-cp ./CWEval/benchmark/core/c/CWE-416/non-eq-CWE-416/CWE-416_issue_115_cwe_020_0_c_task_mutant.c ./CWEval/benchmark/core/c/cwe_020_0_c_task.c
+cp ./CWEval/benchmark/core/c/CWE-358/non-eq-CWE-358/CWE-358_issue_1_cwe_020_0_c_task_mutant.c ./CWEval/benchmark/core/c/cwe_020_0_c_task.c
 cd ./CWEval/benchmark/core/c/
 gcc -w -I./includes cwe_020_0_c_task.c -o ./compiled/cwe_020_0_c_task
 mv cwe_020_0_c_test.py cwe_020_0_c_test.py.bak
 cd ../../../..
-cp ./CWEval/benchmark/core/c/CWE-416/new-tests-CWE-416/CWE-416_issue_115_cwe_020_0_c_task_newtest.py ./CWEval/benchmark/core/c/cwe_020_0_c_test.py
+cp ./CWEval/benchmark/core/c/CWE-358/new-tests-CWE-358/CWE-358_issue_1_cwe_020_0_c_task_newtest.py ./CWEval/benchmark/core/c/cwe_020_0_c_test.py
 cd ./CWEval/benchmark/core/c/
 pytest -v cwe_020_0_c_test.py
 mv cwe_020_0_c_task.c.bak cwe_020_0_c_task.c
