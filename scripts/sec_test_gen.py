@@ -100,13 +100,13 @@ def sec_test_gen(current_filename_path: str, test_case_filename_path: str, mutan
         "_______________________________________________________"
         "Extra Instructions:"
         "You must keep the comments EXACTLY as given in the original testcase file. "
-        "DO NOT INCLUDE ANYTHING for any help like input, output, CTRL, etc. or anything without comments at the start of the file."
-        "DO NOT INCLUDE MARKDOWN (```python...```) python CODEBLOCKS at beginning and end of your file. "
+        "DO NOT INCLUDE ANYTHING for any help like 'input', 'output', 'CTRL', etc. or anything without comments at the start/end of the file."
+        "DO NOT INCLUDE MARKDOWN (```python...```) python CODEBLOCKS at start/end of your file. "
         "USE STANDARD #include 'filename.h' STATEMENTS. DO NOT COPY HEADER CONTENT.]"
     )
 
     # --- LLM Call using gemini---
-    response = client.models.generate_content(model="gemini-3-flash-preview", contents=INSTRUCT_3)
+    response = client.models.generate_content(model="gemini-2.5-flash", contents=INSTRUCT_3)
     file_content_new_testcases = clean_llm_markdown(response.text)
 
     # # --- LLM Call using gpt---
