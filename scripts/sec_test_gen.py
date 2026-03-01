@@ -106,7 +106,7 @@ def sec_test_gen(current_filename_path: str, test_case_filename_path: str, mutan
     )
 
     # --- LLM Call using gemini---
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=INSTRUCT_3)
+    response = client.models.generate_content(model="gemini-3-flash-preview", contents=INSTRUCT_3)
     file_content_new_testcases = clean_llm_markdown(response.text)
 
     # # --- LLM Call using gpt---
