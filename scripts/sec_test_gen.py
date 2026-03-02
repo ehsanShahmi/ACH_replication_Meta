@@ -36,15 +36,25 @@ def get_includes_as_string(include_dir="./includes") -> str:
     return combined_includes
 
 def clean_llm_markdown(input_string) -> str:
-    # Regex to match ```language_name ... ``` and capture the content inside
-    # it handles cases with or without a language name (like 'python', 'c', etc.)
-    pattern = r'^```(?:\w+)?\n(.*?)\n```$'
+    # 1. Initial whitespace cleanup
+    text = input_string.strip()
     
-    # Use re.DOTALL to make '.' match newlines
-    # Use re.MULTILINE if the markdown is part of a larger string
-    cleaned = re.sub(pattern, r'\1', input_string.strip(), flags=re.DOTALL)
+    # 2. Remove markdown code blocks (e.g., ```python ... ```)
+    # This pattern captures the content inside the backticks
+    # Using re.search is often more robust than re.sub for extracting code
+    pattern = r'```(?:\w+)?\n?(.*?)\n?```'
+    match = re.search(pattern, text, flags=re.DOTALL)
     
-    return cleaned
+    if match:
+        text = match.group(1).strip()
+    
+    # 3. Remove {}, [], () from the very start and very end
+    # The .strip() method removes any of the characters in the string 
+    # from both the beginning and the end repeatedly.
+    text = text.strip("{}[]()")
+    
+    # 4. Final strip to handle any whitespace left after brace removal
+    return text.strip()
 
 # =============================================================================
 # Function 1: sec_test_gen
@@ -125,6 +135,117 @@ def sec_test_gen(current_filename_path: str, test_case_filename_path: str, mutan
         file.write(file_content_new_testcases)
 
     return new_testcase_filename_path
+
+
+# =============================================================================
+# Function 1v2: sec_test_gen
+# =============================================================================
+def sec_test_gen_v2(current_filename_path: str, test_case_filename_path: str, mutant_filename_path: str, output_directory: str) -> str:
+    """
+    Generates extended Python test cases for a C source file and its mutant,
+    stores the new test file in the given output directory.
+    """
+    # Logic to handle specific CWE path formatting
+    if "CWE-" in output_directory:
+        # normpath removes trailing slashes so basename correctly gets the folder name
+        # e.g., "./CWE-125/" becomes "CWE-125"
+        clean_path = os.path.normpath(output_directory)
+        cwe_folder_name = os.path.basename(clean_path)
+        
+        # Append the new sub-directory name
+        output_directory = os.path.join(output_directory, f"new-tests-{cwe_folder_name}")
+        logging.info(f"Output directory modified to: {output_directory}")
+    os.makedirs(output_directory, exist_ok=True)
+
+
+    all_header_content = get_includes_as_string(include_dir="./includes")
+
+    with open(test_case_filename_path, 'r', encoding='utf-8') as file:
+        string_test_case_filename = file.read()
+    with open(current_filename_path, 'r', encoding='utf-8') as file:
+        string_current_filename = file.read()
+    with open(mutant_filename_path, 'r', encoding='utf-8') as file:
+        file_MUTANT = file.read()
+
+    
+    Separator_Sentence = "\n\nHere ends first answer that MUST be run against ONLY the original source c file. Now starts the second answer which will be run against ONLY the mutated c file.\n\n"
+
+    INSTRUCT_3 = (
+        "PRIMARY INSTRUCTIONS:"
+        "What follows is two versions of a C file under test. "
+        "An original correct file and a mutated version of that file, "
+        "which represents new bugs of the specified CWE type which is mostly written in the mutant file as comments. "
+        "Each bug is delimited by the comment pair `// MUTANT <START>' and `// MUTANT <END>'. "
+        "The original C file and its mutant are accompanied by a set of existing test cases that contains unit tests "
+        "for the original correct file under test. "
+        "This is the original version of the file: '''{" + string_current_filename + "}'''. "
+        "This is the mutated version: '''{" + file_MUTANT + "}'''. "
+        "Here is the existing test suite: '''{" + string_test_case_filename + "}'''. "
+        "Write an extended version of the test class that contains extra test cases that SHOULD FAIL on the mutant version "
+        "but MUST PASS on the original version of the file. "
+        "_______________________________________________________"
+        "MUST-FOLLOW Instructions:"
+        "THESE NEW TEST CASES ALL MUST PASS IN THE ORIGINAL C FILE. MUST PASS ON ORIGINAL. MUST FAIL ON MUTANT."
+        "To help you with the PRIMARY INSTRUCTIONS, CREATE 2 SEPARATE testsuite files. Your entire response will follow this below structure:"
+        "Step1: First answer of the testsuite file will contain ONLY new tests that will all be passed when run against original source c file. This anewer will be run against ONLY the original source c file. So there will be NO FAIL for this testsuite file first answer."
+        "Step2: This first answer will end with this sentence: '\n\n" + Separator_Sentence + "\n\n'"
+        "Step3: Second answer of the testsuite file will contain ONLY new tests that will FAILED when run against mutated c file. This answer MUST be run against ONLY the mutated c file. So there will be NO PASS for this testsuite file second answer."
+        "The three above steps MUST be followed in your response."
+        "_______________________________________________________"
+        "Additional Instructions:"
+        "Both testsuite answers must have the original import modules, same runner functions and structures of pytest libraries."
+        "Both testsuite answers MUST NOT have any technical compile or other errors."
+        "You must keep the comments EXACTLY as given in the original testcase file. "
+        "DO NOT INCLUDE ANYTHING for any help like 'input', 'output', 'CTRL', etc. or anything without comments at the start/end of the file."
+        "DO NOT INCLUDE MARKDOWN (```python...```) python CODEBLOCKS at start/end of your file. "
+        "USE STANDARD #include 'filename.h' STATEMENTS. DO NOT COPY HEADER CONTENT.]"
+    )
+
+    # --- LLM Call using gemini---
+    response = client.models.generate_content(model="gemini-3-flash-preview", contents=INSTRUCT_3)
+    raw_text = response.text
+    file_content_full = clean_llm_markdown(raw_text)
+    # file_content_new_testcases = clean_llm_markdown(response.text)
+
+    # # --- LLM Call using gpt---
+    # response = client_gpt.responses.create(model="gpt-5-mini", input=INSTRUCT_3)
+    # file_content_new_testcases = clean_llm_markdown(response.output_text)
+
+    # --- Split Logic ---
+    if Separator_Sentence in file_content_full:
+        parts = file_content_full.split(Separator_Sentence)
+        content_1 = parts[0].strip()
+        # If the marker appears multiple times for some reason, we take the rest as part 2
+        content_2 = parts[1].strip() if len(parts) > 1 else ""
+    else:
+        # Fallback: If LLM missed the marker, dump everything in file 1
+        logging.warning("Split marker not found in LLM response. Saving all to file 1.")
+        content_1 = file_content_full.strip()
+        content_2 = "# LLM failed to generate the split marker."
+
+    # --- Construct Filenames ---
+    issue_file_name = os.path.basename(mutant_filename_path)
+    issue_root, _ = os.path.splitext(issue_file_name)
+    if issue_root.endswith("_mutant"):
+        issue_root = issue_root[:-7]
+
+    # File 1 Path
+    filename_1 = f"{issue_root}_newtest_1.py"
+    path_1 = os.path.join(output_directory, filename_1)
+
+    # File 2 Path
+    filename_2 = f"{issue_root}_newtest_2.py"
+    path_2 = os.path.join(output_directory, filename_2)
+
+    # --- Write to Files ---
+    with open(path_1, "w", encoding="utf-8") as f1:
+        f1.write(content_1)
+        
+    with open(path_2, "w", encoding="utf-8") as f2:
+        f2.write(content_2)
+
+    # Return both paths separated by a comma or space for CLI usage
+    return f"{path_1}\n{path_2}"
 
 
 # =============================================================================
@@ -242,5 +363,5 @@ if __name__ == "__main__":
     mutant_file = sys.argv[3]
     output_directory = sys.argv[4]
 
-    new_testcase_filename_path = sec_test_gen(current_file, existing_test_case, mutant_file, output_directory)
-    print(new_testcase_filename_path)
+    two_files_filename_path = sec_test_gen_v2(current_file, existing_test_case, mutant_file, output_directory)
+    print(two_files_filename_path)
