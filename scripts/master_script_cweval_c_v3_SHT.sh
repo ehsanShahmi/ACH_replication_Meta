@@ -190,10 +190,10 @@ for issue_file in "${issue_files[@]}"; do
         cp "$MUTANT_REL_PATH" "$TASK_BASENAME"
 
         # Compile mutant (and _unsafe if present)
-        gcc -w -I./includes "$TASK_BASENAME" -o ./compiled/"${TASK_BASENAME%_task.c}" -larchive
+        gcc -w -I./includes "$TASK_BASENAME" -o ./compiled/"${TASK_BASENAME%_task.c}" -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
         compile_exit=$?
         [ -f "${TASK_BASENAME/_task.c/_unsafe.c}" ] && \
-            gcc -w -I./includes "${TASK_BASENAME/_task.c/_unsafe.c}" -o ./compiled/"${TASK_BASENAME%_task.c}_unsafe" -larchive
+            gcc -w -I./includes "${TASK_BASENAME/_task.c/_unsafe.c}" -o ./compiled/"${TASK_BASENAME%_task.c}_unsafe" -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
 
         # Only run pytest if compilation succeeded
         if [ $compile_exit -eq 0 ]; then
