@@ -10,18 +10,15 @@
 # --- 1. ARGUMENT PARSING ---
 if [ -z "$1" ]; then
     echo "ERROR: No issue folder name provided."
-    echo "Usage: $0 <CWE-folder-name> [skip_issues.csv]   e.g.  $0 CWE-119 skip_list.csv"
+    echo "Usage: $0 <CWE-folder-name>   e.g.  $0 CWE-119"
     exit 1
 fi
 
 ISSUE_FOLDER_NAME="$1"
 
-# --- SKIP-LIST CONFIG ---
-# The hardcoded source name the skip list applies to exclusively
+# --- SKIP-LIST CONFIG (HARDCODED) ---
 SKIP_SOURCE_NAME="cwe_020_0_c_task.c"
-# Optional CSV path from second CLI argument (empty string if not provided)
-SKIP_CSV="${2:-}"
-# Associative array used as a fast O(1) lookup set: skip_set[issue_id]=1
+SKIP_CSV="sample_done_issue_list.csv"  # Hardcoded path
 declare -A skip_set
 
 # --- 2. DIRECTORY DEFINITIONS ---
@@ -111,6 +108,8 @@ TOTAL_MUTANTS_GENERATED=0
 TOTAL_MUTANTS_BUILDABLE_AND_PASS=0
 TOTAL_MUTANTS_FAILED=0
 TOTAL_NON_EQUIVALENT_MUTANTS=0
+TOTAL_NEWTESTS_GENERATED=0
+TOTAL_NEWTESTS_STAGE2_PASSED=0  
 TOTAL_VALID_VULNERABILITIES_FOUND=0
 
 echo "Found ${NUM_SUMMARIES} issue files and ${NUM_CODES} task files."
@@ -191,10 +190,10 @@ for issue_file in "${issue_files[@]}"; do
         cp "$MUTANT_REL_PATH" "$TASK_BASENAME"
 
         # Compile mutant (and _unsafe if present)
-        gcc -w -I./includes "$TASK_BASENAME" -o ./compiled/"${TASK_BASENAME%_task.c}"
+        gcc -w -I./includes "$TASK_BASENAME" -o ./compiled/"${TASK_BASENAME%_task.c}" -larchive
         compile_exit=$?
         [ -f "${TASK_BASENAME/_task.c/_unsafe.c}" ] && \
-            gcc -w -I./includes "${TASK_BASENAME/_task.c/_unsafe.c}" -o ./compiled/"${TASK_BASENAME%_task.c}_unsafe"
+            gcc -w -I./includes "${TASK_BASENAME/_task.c/_unsafe.c}" -o ./compiled/"${TASK_BASENAME%_task.c}_unsafe" -larchive
 
         # Only run pytest if compilation succeeded
         if [ $compile_exit -eq 0 ]; then
@@ -353,6 +352,7 @@ else
             echo "ERROR: sec_test_gen script failed. Skipping."
             continue
         fi
+        (($TOTAL_NEWTESTS_GENERATED))++
 
         # Parse the two newline-separated paths returned by sec_test_gen_v2
         newtest_1_file=$(echo "$sec_test_output" | sed -n '1p')
@@ -399,6 +399,7 @@ else
             echo "DISCARD: newtest_1 FAILED on original source."
             continue
         fi
+        ((TOTAL_NEWTESTS_STAGE2_PASSED++))
         echo "PASS: newtest_1 passed on original source."
         echo "--------------------------------------------------------------------"
 
@@ -455,7 +456,7 @@ fi
 REPORT_FILE="$OUTPUT_DIR/final_report_$ISSUE_FOLDER_NAME.txt"
 
 if [ "$TOTAL_MUTANTS_GENERATED" -gt 0 ]; then
-    PERC_BUILD_PASS=$(awk "BEGIN {printf \"%.2f\", ($TOTAL_MUTANTS_BUILDABLE_AND_PASS / $TOTAL_MUTANTS_GENERATED) * 100}")
+    PERC_BUILD_PASS=$(awk "BEGIN {printf \"%.2f\", ($TOTAL_MUTANTS_BUILDABLE_AND_PASS / $TOTAL_PAIRS_FOUND) * 100}")
 else
     PERC_BUILD_PASS="0.00"
 fi
@@ -464,6 +465,12 @@ if [ "$TOTAL_MUTANTS_BUILDABLE_AND_PASS" -gt 0 ]; then
     PERC_NON_EQUIV=$(awk "BEGIN {printf \"%.2f\", ($TOTAL_NON_EQUIVALENT_MUTANTS / $TOTAL_MUTANTS_BUILDABLE_AND_PASS) * 100}")
 else
     PERC_NON_EQUIV="0.00"
+fi
+
+if [ "$TOTAL_NEWTESTS_GENERATED" -gt 0 ]; then
+    PERC_FINAL_NEWTESTS=$(awk "BEGIN {printf \"%.2f\", ($TOTAL_VALID_VULNERABILITIES_FOUND / $TOTAL_NEWTESTS_GENERATED) * 100}")
+else
+    PERC_FINAL_NEWTESTS="0.00"
 fi
 
 (
@@ -497,7 +504,9 @@ fi
     echo "  Non-Equivalent Mutants:             $TOTAL_NON_EQUIVALENT_MUTANTS ($PERC_NON_EQUIV %)"
     echo "--------------------------------------------------------"
     echo "PHASE 3/4 — Test Generation & Validation:"
-    echo "  Valid Vulnerabilities Found:        $TOTAL_VALID_VULNERABILITIES_FOUND"
+    echo "  Total new tests generated after 3rd LLM:        $TOTAL_NEWTESTS_GENERATED"
+    echo "  New Tests Passing Stage 2:          $TOTAL_NEWTESTS_STAGE2_PASSED"
+    echo "  Valid Vulnerabilities Found at the end:        $TOTAL_VALID_VULNERABILITIES_FOUND ($PERC_FINAL_NEWTESTS %)"
     echo "========================================================"
     echo "--------------------------------------------------------"
     echo "Successful Newtests (newtest_2 that FAILED on mutant):"
