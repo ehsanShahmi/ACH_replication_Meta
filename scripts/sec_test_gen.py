@@ -202,14 +202,15 @@ def sec_test_gen_v2(current_filename_path: str, test_case_filename_path: str, mu
     )
 
     # --- LLM Call using gemini---
-    response = client.models.generate_content(model="gemini-3-flash-preview", contents=INSTRUCT_3)
-    raw_text = response.text
-    file_content_full = clean_llm_markdown(raw_text)
+    # response = client.models.generate_content(model="gemini-2.5-flash", contents=INSTRUCT_3)
+    # raw_text = response.text
+    # file_content_full = clean_llm_markdown(raw_text)
     # file_content_new_testcases = clean_llm_markdown(response.text)
 
     # # --- LLM Call using gpt---
-    # response = client_gpt.responses.create(model="gpt-5-mini", input=INSTRUCT_3)
-    # file_content_new_testcases = clean_llm_markdown(response.output_text)
+    response = client_gpt.responses.create(model="gpt-5-mini", input=INSTRUCT_3)
+    raw_text = response.output_text
+    file_content_full = clean_llm_markdown(raw_text)
 
     # --- Split Logic ---
     if Separator_Sentence in file_content_full:

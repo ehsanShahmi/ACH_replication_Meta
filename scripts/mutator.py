@@ -23,6 +23,7 @@ client_gpt = openai.OpenAI()
 
 
 
+
 def get_includes_as_string(include_dir="./includes") -> str:
     """
     Reads all files in the includes directory and formats them into a single string 
@@ -47,7 +48,7 @@ def get_includes_as_string(include_dir="./includes") -> str:
     return combined_includes
 
 
-
+import re
 import os
 import sys
 
@@ -95,6 +96,7 @@ def mutator(issue_filepath: str, current_filename_path: str, test_case_filename_
         "THE MUTANT MUST PASS ALL THE EXISTING TEST CASES. YOU HAVE TO INTRODUCE A NEW CWE TYPE, ACCORDING TO THE GIVEN CONTEXT."
         "YOUR MAIN TASK WILL BE TO INTRODUCE THE NEW CWE TYPE ACCORDING TO THE FILE UNDER TEST. DO NOT JUST MIMIC THE SITUATION GIVEN IN THE CONTEXT."
         "DO NOT CHANGE THE ORIGINAL SECURITY ISSUE IN ANY WAY, SO THAT EXISTING ALL TEST CASES PASS YOUR MUTANT."
+        "The produced mutant MUST BE BUILDABLE. No import module error will be present. This means, add ONLY STANDARD LIBRARIES."
         "______________________________________________________________________________________"
         "Extra instructions: "
         "[DO NOT INCLUDE MARKDOWN CODEBLOCKS (```c...``` or ```python...```) AT THE START AND END OF THE FILE. "
@@ -105,8 +107,12 @@ def mutator(issue_filepath: str, current_filename_path: str, test_case_filename_
 
     
     # --- Generate new mutant content ---
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=PROMPT1)
-    file_content_mutant = clean_llm_markdown(response.text)
+    # response = client.models.generate_content(model="gemini-2.5-flash", contents=PROMPT1)
+    # file_content_mutant = clean_llm_markdown(response.text)
+
+    # --- LLM Call using gpt---
+    response = client_gpt.responses.create(model="gpt-5-mini", input=PROMPT1)
+    file_content_mutant = clean_llm_markdown(response.output_text)
 
     # --- Build mutant filename ---
     current_filename_basename = os.path.basename(current_filename_path)
