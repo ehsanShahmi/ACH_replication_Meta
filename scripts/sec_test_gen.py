@@ -208,7 +208,7 @@ def sec_test_gen_v2(current_filename_path: str, test_case_filename_path: str, mu
     # file_content_new_testcases = clean_llm_markdown(response.text)
 
     # # --- LLM Call using gpt---
-    response = client_gpt.responses.create(model="gpt-5-mini", input=INSTRUCT_3)
+    response = client_gpt.responses.create(model="gpt-4o-mini", input=INSTRUCT_3)
     raw_text = response.output_text
     file_content_full = clean_llm_markdown(raw_text)
 

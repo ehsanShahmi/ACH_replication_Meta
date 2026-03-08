@@ -55,7 +55,7 @@ def eqChecker(mutant_filename_path: str, current_filename_path: str, output_dire
     # file_content_eq = response.text
 
     # --- LLM Call using gpt---
-    response = client_gpt.responses.create(model="gpt-5-nano", input=INSTRUCT_2)
+    response = client_gpt.responses.create(model="gpt-4o-mini", input=INSTRUCT_2)
     file_content_eq = response.output_text
 
     # --- Ensure output directory exists ---

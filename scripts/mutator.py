@@ -93,9 +93,9 @@ def mutator(issue_filepath: str, current_filename_path: str, test_case_filename_
         "Delimit the mutated part using the comment-pair '// MUTANT <START>' and '// MUTANT <END>'. "
         "______________________________________________________________________________________"
         "IMPORTANT instructions: "
-        "THE MUTANT MUST PASS ALL THE EXISTING TEST CASES. YOU HAVE TO INTRODUCE A NEW CWE TYPE, ACCORDING TO THE GIVEN CONTEXT."
+        "TRY TO PRODUCE A MUTANT that PASSes ALL THE EXISTING TEST CASES. YOU HAVE TO INTRODUCE A NEW CWE TYPE, ACCORDING TO THE GIVEN CONTEXT."
         "YOUR MAIN TASK WILL BE TO INTRODUCE THE NEW CWE TYPE ACCORDING TO THE FILE UNDER TEST. DO NOT JUST MIMIC THE SITUATION GIVEN IN THE CONTEXT."
-        "DO NOT CHANGE THE ORIGINAL SECURITY ISSUE IN ANY WAY, SO THAT EXISTING ALL TEST CASES PASS YOUR MUTANT."
+        "DO NOT CHANGE THE ORIGINAL SECURITY ISSUE IN ANY WAY, SO THAT EXISTING ALL TEST CASES PASSes YOUR MUTANT."
         "The produced mutant MUST BE BUILDABLE. No import module error will be present. This means, add ONLY STANDARD LIBRARIES."
         "______________________________________________________________________________________"
         "Extra instructions: "
@@ -111,7 +111,7 @@ def mutator(issue_filepath: str, current_filename_path: str, test_case_filename_
     # file_content_mutant = clean_llm_markdown(response.text)
 
     # --- LLM Call using gpt---
-    response = client_gpt.responses.create(model="gpt-5-mini", input=PROMPT1)
+    response = client_gpt.responses.create(model="gpt-4o-mini", input=PROMPT1)
     file_content_mutant = clean_llm_markdown(response.output_text)
 
     # --- Build mutant filename ---

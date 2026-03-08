@@ -47,6 +47,14 @@ if [ ! -d "$ISSUE_DIR" ]; then
     exit 1
 fi
 
+# Logging everything in a log file
+FULL_LOG="$OUTPUT_DIR/output_log-$ISSUE_FOLDER_NAME.log"
+exec > >(tee -i "$FULL_LOG") 2>&1
+echo "============================================================"
+echo "STARTING PROCESS FOR $ISSUE_FOLDER_NAME"
+echo "Log file: $FULL_LOG"
+echo "============================================================"
+
 # --- 4. SKIP-LIST LOADING ---
 # Reads the CSV (one issue ID per row, ignores blank lines and # comments)
 # and populates skip_set. Only applies to SKIP_SOURCE_NAME at runtime.
@@ -352,7 +360,7 @@ else
             echo "ERROR: sec_test_gen script failed. Skipping."
             continue
         fi
-        (($TOTAL_NEWTESTS_GENERATED))++
+        ((TOTAL_NEWTESTS_GENERATED++))
 
         # Parse the two newline-separated paths returned by sec_test_gen_v2
         newtest_1_file=$(echo "$sec_test_output" | sed -n '1p')
@@ -370,38 +378,47 @@ else
         echo "  newtest_1 (vs original): $newtest_1_file"
         echo "  newtest_2 (vs mutant):   $newtest_2_file"
 
-        # ------------------------------------------------------------------
         # Stage 2: newtest_1 vs ORIGINAL source — expect PASS
         # ------------------------------------------------------------------
         echo "<--- STAGE 2: newtest_1 vs original source (expect PASS) --->"
         cd "$REPO_BASE_DIR"
 
-        # Compile original source (and _unsafe if present)
-        gcc -w -I./includes "$TASK_BASENAME" -o ./compiled/"${TASK_BASENAME%_task.c}"
+        # Compile original source
+        gcc -w -I./includes "$TASK_BASENAME" -o ./compiled/"${TASK_BASENAME%_task.c}" -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
+        stage2_compile_exit=$?
         [ -f "${TASK_BASENAME/_task.c/_unsafe.c}" ] && \
-            gcc -w -I./includes "${TASK_BASENAME/_task.c/_unsafe.c}" -o ./compiled/"${TASK_BASENAME%_task.c}_unsafe"
+            gcc -w -I./includes "${TASK_BASENAME/_task.c/_unsafe.c}" -o ./compiled/"${TASK_BASENAME%_task.c}_unsafe" -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
 
-        # Swap in newtest_1
+        # Check if original source compiled successfully
+        if [ $stage2_compile_exit -ne 0 ]; then
+            echo "DISCARD: newtest_1 discarded for non-buildable (Original source failed to compile)."
+            cd - >/dev/null
+            continue
+        fi
+
+        # Swap in newtest_1 as test file
         mv "$TEST_BASENAME" "$TEST_BASENAME.bak"
         cd - >/dev/null
         cp "$newtest_1_file" "$REPO_BASE_DIR/$TEST_BASENAME"
         cd "$REPO_BASE_DIR"
 
         pytest -v "$TEST_BASENAME"
-        stage2_exit_code=$?
+        stage2_pytest_exit=$?
 
         # Restore original test
         rm "$TEST_BASENAME"
         mv "$TEST_BASENAME.bak" "$TEST_BASENAME"
         cd - >/dev/null
 
-        if [ $stage2_exit_code -ne 0 ]; then
+        if [ $stage2_pytest_exit -ne 0 ]; then
             echo "DISCARD: newtest_1 FAILED on original source."
             continue
         fi
-        ((TOTAL_NEWTESTS_STAGE2_PASSED++))
+        
         echo "PASS: newtest_1 passed on original source."
+        ((TOTAL_NEWTESTS_STAGE2_PASSED++))
         echo "--------------------------------------------------------------------"
+
 
         # ------------------------------------------------------------------
         # Stage 3: newtest_2 vs MUTANT — expect FAIL
@@ -415,10 +432,21 @@ else
         cp "$non_eq_mutant" "$REPO_BASE_DIR/$TASK_BASENAME"
         cd "$REPO_BASE_DIR"
 
-        # Compile mutant (and _unsafe if present)
-        gcc -w -I./includes "$TASK_BASENAME" -o ./compiled/"${TASK_BASENAME%_task.c}"
+        # Compile mutant
+        gcc -w -I./includes "$TASK_BASENAME" -o ./compiled/"${TASK_BASENAME%_task.c}" -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
+        stage3_compile_exit=$?
         [ -f "${TASK_BASENAME/_task.c/_unsafe.c}" ] && \
-            gcc -w -I./includes "${TASK_BASENAME/_task.c/_unsafe.c}" -o ./compiled/"${TASK_BASENAME%_task.c}_unsafe"
+            gcc -w -I./includes "${TASK_BASENAME/_task.c/_unsafe.c}" -o ./compiled/"${TASK_BASENAME%_task.c}_unsafe" -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
+
+        # --- CRITICAL CHECK: If mutant failed to compile, discard newtest_2 immediately ---
+        if [ $stage3_compile_exit -ne 0 ]; then
+            echo "DISCARD: newtest_2 discarded for non-buildable (Mutant failed to compile)."
+            # Restore original task file before skipping
+            rm "$TASK_BASENAME"
+            mv "$TASK_BASENAME.bak" "$TASK_BASENAME"
+            cd - >/dev/null
+            continue
+        fi
 
         # Swap in newtest_2 as test file
         mv "$TEST_BASENAME" "$TEST_BASENAME.bak"
@@ -426,8 +454,9 @@ else
         cp "$newtest_2_file" "$REPO_BASE_DIR/$TEST_BASENAME"
         cd "$REPO_BASE_DIR"
 
+        # Run the test
         pytest -v "$TEST_BASENAME"
-        stage3_exit_code=$?
+        stage3_pytest_exit=$?
 
         # Restore both originals
         rm "$TASK_BASENAME"
@@ -436,12 +465,12 @@ else
         mv "$TEST_BASENAME.bak" "$TEST_BASENAME"
         cd - >/dev/null
 
-        if [ $stage3_exit_code -eq 0 ]; then
+        # Only count as a valid vulnerability if it compiled AND failed the test
+        if [ $stage3_pytest_exit -eq 0 ]; then
             echo "DISCARD: newtest_2 PASSED on mutant — vulnerability not caught."
         else
             echo "SUCCESS: newtest_2 FAILED on mutant — VALID VULNERABILITY FOUND!"
             ((TOTAL_VALID_VULNERABILITIES_FOUND++))
-            # Record this successful (newtest_2, mutant) pair for the report
             VALID_NEWTEST_ENTRIES+=("$(basename "$non_eq_mutant") | $(basename "$newtest_2_file")")
         fi
         echo "--------------------------------------------------------------------"
@@ -456,7 +485,7 @@ fi
 REPORT_FILE="$OUTPUT_DIR/final_report_$ISSUE_FOLDER_NAME.txt"
 
 if [ "$TOTAL_MUTANTS_GENERATED" -gt 0 ]; then
-    PERC_BUILD_PASS=$(awk "BEGIN {printf \"%.2f\", ($TOTAL_MUTANTS_BUILDABLE_AND_PASS / $TOTAL_PAIRS_FOUND) * 100}")
+    PERC_BUILD_PASS=$(awk "BEGIN {printf \"%.2f\", ($TOTAL_MUTANTS_BUILDABLE_AND_PASS / $TOTAL_MUTANTS_GENERATED) * 100}")
 else
     PERC_BUILD_PASS="0.00"
 fi
