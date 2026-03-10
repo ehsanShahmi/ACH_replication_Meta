@@ -37,6 +37,22 @@ mkdir -p "$OUTPUT_DIR"
 mkdir -p "$FAILED_MUTANTS_DIR"
 mkdir -p "$NEW_TESTS_DIR"
 
+# --- [SAFETY CHANGE] CLEANUP AND RECOVERY LOGIC ---
+cleanup() {
+    # This runs on Ctrl+C or script exit to ensure files aren't lost
+    find "$REPO_BASE_DIR" -maxdepth 1 -name "*.bak" | while read -r bak_file; do
+        original="${bak_file%.bak}"
+        mv -f "$bak_file" "$original" 2>/dev/null
+    done
+}
+trap cleanup SIGINT SIGTERM EXIT
+
+# If previous run crashed, recover files now
+if find "$REPO_BASE_DIR" -maxdepth 1 -name "*.bak" -quit | grep -q .; then
+    echo "Found leftover .bak files from a previous run. Recovering originals..."
+    cleanup
+fi
+
 # --- 3. PATH VALIDATION ---
 if [ ! -d "$REPO_BASE_DIR" ]; then
     echo "ERROR: The repository directory '$REPO_BASE_DIR' does not exist."
@@ -130,13 +146,6 @@ issue_count=0
 
 # ===========================================================
 # PHASE 1: MUTANT GENERATION — N x M nested loop
-#   For every (issue, code) pair:
-#     0. SKIP CHECK: if source == SKIP_SOURCE_NAME and issue_id
-#        is in skip_set, skip this pair entirely (no LLM call).
-#     1. Generate mutant → saved directly into OUTPUT_DIR
-#     2. Validate: must compile + pass existing tests
-#     3. If fails → move to FAILED_MUTANTS_DIR
-#     4. If passes → leave in OUTPUT_DIR (ready for eqChecker)
 # ===========================================================
 for issue_file in "${issue_files[@]}"; do
     ((issue_count++))
@@ -156,11 +165,6 @@ for issue_file in "${issue_files[@]}"; do
 
         ((TOTAL_PAIRS_FOUND++))
 
-        # ------------------------------------------------------------------
-        # SKIP CHECK
-        # Only applies when the current source is SKIP_SOURCE_NAME AND
-        # this issue_id is present in the loaded skip_set.
-        # ------------------------------------------------------------------
         current_basename=$(basename "$current_code")
         if [[ "$current_basename" == "$SKIP_SOURCE_NAME" ]] && \
            [[ -n "${skip_set[$issue_id]+_}" ]]; then
@@ -184,26 +188,23 @@ for issue_file in "${issue_files[@]}"; do
         echo "Mutant generated: $mutant_file"
         ((TOTAL_MUTANTS_GENERATED++))
 
-        # --- Step 2: Stage 1 Validation — mutant must compile + pass existing tests ---
+        # --- Step 2: Stage 1 Validation ---
         echo "<--- STAGE 1: Mutant vs existing tests (expect PASS) --->"
         cd "$REPO_BASE_DIR"
 
         TASK_BASENAME=$(basename "$current_code")
         TEST_BASENAME=$(basename "$existing_test_cases")
-        # Path to mutant relative to REPO_BASE_DIR (4 levels from project root)
         MUTANT_REL_PATH="../../../../$mutant_file"
 
-        # Swap mutant in as the task file
-        mv "$TASK_BASENAME" "$TASK_BASENAME.bak"
+        # [SAFETY] Swap mutant in using backups
+        cp "$TASK_BASENAME" "$TASK_BASENAME.bak"
         cp "$MUTANT_REL_PATH" "$TASK_BASENAME"
 
-        # Compile mutant (and _unsafe if present)
         gcc -w -I./includes "$TASK_BASENAME" -o ./compiled/"${TASK_BASENAME%_task.c}" -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
         compile_exit=$?
         [ -f "${TASK_BASENAME/_task.c/_unsafe.c}" ] && \
             gcc -w -I./includes "${TASK_BASENAME/_task.c/_unsafe.c}" -o ./compiled/"${TASK_BASENAME%_task.c}_unsafe" -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
 
-        # Only run pytest if compilation succeeded
         if [ $compile_exit -eq 0 ]; then
             pytest -v "$TEST_BASENAME"
             test_exit_code=$?
@@ -212,9 +213,8 @@ for issue_file in "${issue_files[@]}"; do
             test_exit_code=1
         fi
 
-        # Restore original task file
-        rm "$TASK_BASENAME"
-        mv "$TASK_BASENAME.bak" "$TASK_BASENAME"
+        # [SAFETY] Restore original task file immediately
+        mv -f "$TASK_BASENAME.bak" "$TASK_BASENAME"
         cd - >/dev/null
 
         if [ $test_exit_code -ne 0 ]; then
@@ -229,8 +229,8 @@ for issue_file in "${issue_files[@]}"; do
         ((TOTAL_MUTANTS_BUILDABLE_AND_PASS++))
         echo "--------------------------------------------------------------------"
 
-    done  # end inner loop (code files)
-done  # end outer loop (issue files)
+    done
+done
 
 echo
 echo "============================================================"
@@ -247,10 +247,7 @@ echo
 
 
 # ===========================================================
-# PHASE 2: EQUIVALENCY CHECKING (folder-level)
-#   eqCheckerFolder_v2.py operates on OUTPUT_DIR directly.
-#   It compares all *.c mutant files in that folder and saves
-#   non-equivalent ones to NON_EQ_DIR (auto-created by script).
+# PHASE 2: EQUIVALENCY CHECKING
 # ===========================================================
 echo "============================================================"
 echo "  PHASE 2: EQUIVALENCY CHECKING (folder-level)"
@@ -272,7 +269,6 @@ else
     echo "Equivalency checking complete."
 fi
 
-# Count non-equivalent mutants written by eqCheckerFolder
 readarray -t non_eq_mutants < <(find "$NON_EQ_DIR" -maxdepth 1 -name "*.c" 2>/dev/null | sort)
 TOTAL_NON_EQUIVALENT_MUTANTS=${#non_eq_mutants[@]}
 
@@ -287,16 +283,6 @@ echo
 
 # ===========================================================
 # PHASE 3 & 4: NEW TEST GENERATION + VALIDATION
-#   For each non-eq mutant in NON_EQ_DIR:
-#     1. Infer corresponding (source_task.c, existing_test.py) from filename.
-#        Convention: <CWE>_<issue_id>_<task_stem>_mutant.c
-#        e.g.  CWE-119_issue_3_cwe_020_0_c_task_mutant.c
-#               → task_stem = cwe_020_0_c_task
-#     2. Call sec_test_gen_v2 → returns TWO paths (newline-separated):
-#          line1: <stem>_newtest_1.py  ← run vs ORIGINAL source (expect PASS)
-#          line2: <stem>_newtest_2.py  ← run vs MUTANT          (expect FAIL)
-#     3. Stage 2: newtest_1 vs original source → expect PASS
-#     4. Stage 3: newtest_2 vs mutant          → expect FAIL
 # ===========================================================
 echo "============================================================"
 echo "  PHASE 3 & 4: NEW TEST GENERATION + VALIDATION"
@@ -313,15 +299,6 @@ else
         echo "  [NON-EQ MUTANT] $mutant_basename"
         echo "###########################################################"
 
-        # ------------------------------------------------------------------
-        # Infer original task stem from mutant filename.
-        # Format:  <ISSUE_FOLDER_NAME>_<issue_id>_<task_stem>_mutant.c
-        # Example: CWE-119_issue_3_cwe_020_0_c_task_mutant.c
-        #   1. drop .c              → CWE-119_issue_3_cwe_020_0_c_task_mutant
-        #   2. strip CWE prefix     → issue_3_cwe_020_0_c_task_mutant
-        #   3. strip _mutant        → issue_3_cwe_020_0_c_task
-        #   4. strip issue_<N>_     → cwe_020_0_c_task
-        # ------------------------------------------------------------------
         no_ext="${mutant_basename%.c}"
         stripped="${no_ext#${ISSUE_FOLDER_NAME}_}"
         issue_and_task="${stripped%_mutant}"
@@ -346,13 +323,6 @@ else
         TASK_BASENAME=$(basename "$current_code")
         TEST_BASENAME=$(basename "$existing_test_cases")
 
-        # ------------------------------------------------------------------
-        # Step 3.1: Generate newtest_1 and newtest_2 via sec_test_gen_v2.
-        # sec_test_gen_v2 returns two absolute paths separated by a newline:
-        #   line 1 → *_newtest_1.py  (vs original, expect PASS)
-        #   line 2 → *_newtest_2.py  (vs mutant,   expect FAIL)
-        # We pass OUTPUT_DIR so sec_test_gen builds new-tests-<CWE>/ inside it.
-        # ------------------------------------------------------------------
         echo "(LLM3) Generating new test cases..."
         sec_test_output=$(python3 "$sec_test_gen" "$current_code" "$existing_test_cases" "$non_eq_mutant" "$OUTPUT_DIR")
 
@@ -362,7 +332,6 @@ else
         fi
         ((TOTAL_NEWTESTS_GENERATED++))
 
-        # Parse the two newline-separated paths returned by sec_test_gen_v2
         newtest_1_file=$(echo "$sec_test_output" | sed -n '1p')
         newtest_2_file=$(echo "$sec_test_output" | sed -n '2p')
 
@@ -378,26 +347,23 @@ else
         echo "  newtest_1 (vs original): $newtest_1_file"
         echo "  newtest_2 (vs mutant):   $newtest_2_file"
 
-        # Stage 2: newtest_1 vs ORIGINAL source — expect PASS
-        # ------------------------------------------------------------------
+        # Stage 2: newtest_1 vs ORIGINAL source
         echo "<--- STAGE 2: newtest_1 vs original source (expect PASS) --->"
         cd "$REPO_BASE_DIR"
 
-        # Compile original source
         gcc -w -I./includes "$TASK_BASENAME" -o ./compiled/"${TASK_BASENAME%_task.c}" -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
         stage2_compile_exit=$?
         [ -f "${TASK_BASENAME/_task.c/_unsafe.c}" ] && \
             gcc -w -I./includes "${TASK_BASENAME/_task.c/_unsafe.c}" -o ./compiled/"${TASK_BASENAME%_task.c}_unsafe" -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
 
-        # Check if original source compiled successfully
         if [ $stage2_compile_exit -ne 0 ]; then
             echo "DISCARD: newtest_1 discarded for non-buildable (Original source failed to compile)."
             cd - >/dev/null
             continue
         fi
 
-        # Swap in newtest_1 as test file
-        mv "$TEST_BASENAME" "$TEST_BASENAME.bak"
+        # [SAFETY] Backup test
+        cp "$TEST_BASENAME" "$TEST_BASENAME.bak"
         cd - >/dev/null
         cp "$newtest_1_file" "$REPO_BASE_DIR/$TEST_BASENAME"
         cd "$REPO_BASE_DIR"
@@ -405,9 +371,8 @@ else
         pytest -v "$TEST_BASENAME"
         stage2_pytest_exit=$?
 
-        # Restore original test
-        rm "$TEST_BASENAME"
-        mv "$TEST_BASENAME.bak" "$TEST_BASENAME"
+        # [SAFETY] Restore original test
+        mv -f "$TEST_BASENAME.bak" "$TEST_BASENAME"
         cd - >/dev/null
 
         if [ $stage2_pytest_exit -ne 0 ]; then
@@ -420,52 +385,39 @@ else
         echo "--------------------------------------------------------------------"
 
 
-        # ------------------------------------------------------------------
-        # Stage 3: newtest_2 vs MUTANT — expect FAIL
-        # ------------------------------------------------------------------
+        # Stage 3: newtest_2 vs MUTANT
         echo "<--- STAGE 3: newtest_2 vs mutant (expect FAIL) --->"
         cd "$REPO_BASE_DIR"
 
-        # Swap mutant in as task file
-        mv "$TASK_BASENAME" "$TASK_BASENAME.bak"
+        # [SAFETY] Backup task and test
+        cp "$TASK_BASENAME" "$TASK_BASENAME.bak"
+        cp "$TEST_BASENAME" "$TEST_BASENAME.bak"
         cd - >/dev/null
         cp "$non_eq_mutant" "$REPO_BASE_DIR/$TASK_BASENAME"
+        cp "$newtest_2_file" "$REPO_BASE_DIR/$TEST_BASENAME"
         cd "$REPO_BASE_DIR"
 
-        # Compile mutant
         gcc -w -I./includes "$TASK_BASENAME" -o ./compiled/"${TASK_BASENAME%_task.c}" -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
         stage3_compile_exit=$?
         [ -f "${TASK_BASENAME/_task.c/_unsafe.c}" ] && \
             gcc -w -I./includes "${TASK_BASENAME/_task.c/_unsafe.c}" -o ./compiled/"${TASK_BASENAME%_task.c}_unsafe" -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
 
-        # --- CRITICAL CHECK: If mutant failed to compile, discard newtest_2 immediately ---
         if [ $stage3_compile_exit -ne 0 ]; then
             echo "DISCARD: newtest_2 discarded for non-buildable (Mutant failed to compile)."
-            # Restore original task file before skipping
-            rm "$TASK_BASENAME"
-            mv "$TASK_BASENAME.bak" "$TASK_BASENAME"
+            mv -f "$TASK_BASENAME.bak" "$TASK_BASENAME"
+            mv -f "$TEST_BASENAME.bak" "$TEST_BASENAME"
             cd - >/dev/null
             continue
         fi
 
-        # Swap in newtest_2 as test file
-        mv "$TEST_BASENAME" "$TEST_BASENAME.bak"
-        cd - >/dev/null
-        cp "$newtest_2_file" "$REPO_BASE_DIR/$TEST_BASENAME"
-        cd "$REPO_BASE_DIR"
-
-        # Run the test
         pytest -v "$TEST_BASENAME"
         stage3_pytest_exit=$?
 
-        # Restore both originals
-        rm "$TASK_BASENAME"
-        mv "$TASK_BASENAME.bak" "$TASK_BASENAME"
-        rm "$TEST_BASENAME"
-        mv "$TEST_BASENAME.bak" "$TEST_BASENAME"
+        # [SAFETY] Restore both
+        mv -f "$TASK_BASENAME.bak" "$TASK_BASENAME"
+        mv -f "$TEST_BASENAME.bak" "$TEST_BASENAME"
         cd - >/dev/null
 
-        # Only count as a valid vulnerability if it compiled AND failed the test
         if [ $stage3_pytest_exit -eq 0 ]; then
             echo "DISCARD: newtest_2 PASSED on mutant — vulnerability not caught."
         else
@@ -475,12 +427,12 @@ else
         fi
         echo "--------------------------------------------------------------------"
 
-    done  # end non-eq mutant loop
+    done
 fi
 
 
 # ==========================================
-# FINAL STATISTICAL REPORT
+# FINAL STATISTICAL REPORT (EXACT COPY)
 # ==========================================
 REPORT_FILE="$OUTPUT_DIR/final_report_$ISSUE_FOLDER_NAME.txt"
 
