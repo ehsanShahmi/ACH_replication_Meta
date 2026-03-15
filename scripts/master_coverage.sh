@@ -18,7 +18,7 @@ for CWE_FOLDER in "$@"; do
 
     CWE_PATH="$BASE_DIR/$CWE_FOLDER"
     REF_FILE="$CWE_PATH/final_report_${CWE_FOLDER}.txt"
-    REPORT_FILE="$CWE_PATH/final_coverage_report-$CWE_FOLDER.txt"
+    REPORT_FILE="$CWE_PATH/final_tool_coverage_report-$CWE_FOLDER.txt"
 
     # 1. Verification
     if [ ! -f "$REF_FILE" ]; then
@@ -73,7 +73,7 @@ for CWE_FOLDER in "$@"; do
         gcc -w -I./includes --coverage "$source_c" -o "./compiled/$task_name" -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
 
         # Step 4: Run pytest
-        pytest -v "$target_test_py" > /dev/null 2>&1
+        pytest -v --timeout=300 "$target_test_py" > /dev/null 2>&1
 
         # Step 5: Run gcov and extract summary
         if [ -f "./compiled/$task_name.gcda" ]; then
@@ -126,7 +126,7 @@ for CWE_FOLDER in "$@"; do
     } >> "$REPORT_FILE"
 
     echo "Completed $CWE_FOLDER. Report: $REPORT_FILE"
-    echo ""
+    echo "Average coverage for $CWE_FOLDER: $average_coverage."
 
     # Return to root directory before next loop iteration
     cd "$ROOT_DIR" || exit
