@@ -35,25 +35,46 @@ def get_includes_as_string(include_dir="./includes") -> str:
             continue
     return combined_includes
 
-def clean_llm_markdown(input_string) -> str:
-    # 1. Initial whitespace cleanup
+import re
+
+def clean_llm_markdown(input_string: str) -> str:
+    # 1. Initial Markdown Extraction
+    # Prioritize content inside ```python ... ``` blocks
     text = input_string.strip()
-    
-    # 2. Remove markdown code blocks (e.g., ```python ... ```)
-    # This pattern captures the content inside the backticks
-    # Using re.search is often more robust than re.sub for extracting code
     pattern = r'```(?:\w+)?\n?(.*?)\n?```'
     match = re.search(pattern, text, flags=re.DOTALL)
-    
     if match:
         text = match.group(1).strip()
     
-    # 3. Remove {}, [], () from the very start and very end
-    # The .strip() method removes any of the characters in the string 
-    # from both the beginning and the end repeatedly.
-    text = text.strip("{}[]()")
+    # 2. Remove stray trailing triple quotes
+    # This handles Sample 1 where the LLM appends an extra """ at the end
+    # We use a non-greedy approach to only target quotes at the absolute end
+    text = re.sub(r'\s*["\']{3}\s*$', '', text)
+
+    # 3. Repair unclosed brackets (The "Sample 2" Fix)
+    # Instead of deleting code, we find what's missing and add it.
+    stack = []
+    bracket_map = {'(': ')', '[': ']', '{': '}'}
     
-    # 4. Final strip to handle any whitespace left after brace removal
+    # We only care about unclosed brackets that were opened
+    for char in text:
+        if char in bracket_map:
+            stack.append(bracket_map[char])
+        elif char in bracket_map.values():
+            if stack and stack[-1] == char:
+                stack.pop()
+            else:
+                # If we see a stray closer that doesn't match the stack, 
+                # we don't pop, as the code is already malformed there.
+                pass
+
+    # Append missing closers in reverse order (FILO)
+    # e.g., if stack is [']', ')'], it appends ')]'
+    if stack:
+        text += "".join(reversed(stack))
+
+    # 4. Final Cleanup
+    # Remove any trailing whitespace left after appending
     return text.strip()
 
 # =============================================================================
@@ -216,8 +237,10 @@ def sec_test_gen_v2(current_filename_path: str, test_case_filename_path: str, mu
     if Separator_Sentence in file_content_full:
         parts = file_content_full.split(Separator_Sentence)
         content_1 = parts[0].strip()
+        content_1 = clean_llm_markdown(content_1)
         # If the marker appears multiple times for some reason, we take the rest as part 2
         content_2 = parts[1].strip() if len(parts) > 1 else ""
+        content_2 = clean_llm_markdown(content_2)
     else:
         # Fallback: If LLM missed the marker, dump everything in file 1
         logging.warning("Split marker not found in LLM response. Saving all to file 1.")
