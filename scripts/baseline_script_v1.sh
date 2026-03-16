@@ -22,6 +22,7 @@ GEN_DIR_ALL="$BASELINE_ROOT_DIR/baseline-new-tests-$ISSUE_FOLDER_NAME-all"
 GEN_DIR_PASSED="$BASELINE_ROOT_DIR/baseline-new-tests-$ISSUE_FOLDER_NAME"
 MUTANT_DIR_ALL="$BASELINE_ROOT_DIR/baseline-mutants-all"
 MUTANT_DIR_CAUGHT="$BASELINE_ROOT_DIR/baseline-mutants"
+REPORT_FILE="$REPO_BASE_DIR/$ISSUE_FOLDER_NAME/baseline_report_$ISSUE_FOLDER_NAME.txt"
 
 # Create required directories
 mkdir -p "$GEN_DIR_ALL"
@@ -84,7 +85,7 @@ for issue_file in "${issue_files[@]}"; do
         if [ ! -f "$existing_test_suite" ]; then continue; fi
 
         current_basename=$(basename "$current_code")
-        echo "[P1-PAIR] $issue_id x $current_basename"
+        echo "[PHASE1-LLM1-NEWTEST] $issue_id x $current_basename"
 
         # Step 1: Generate bNewtest
         generated_test_path=$(python3 "$Baseline_Newtest" "$issue_file" "$current_code" "$existing_test_suite" "$GEN_DIR_ALL")
@@ -94,7 +95,7 @@ for issue_file in "${issue_files[@]}"; do
             continue
         fi
 
-        # --- [NEW REQUIREMENT] Compilability Check ---
+        # Compilability Check for the Python Test
         python3 -m py_compile "$generated_test_path" > /dev/null 2>&1
         if [ $? -ne 0 ]; then
             echo "  DISCARD: Newtest has syntax errors (not compilable). DISCARD !!!"
@@ -118,6 +119,7 @@ for issue_file in "${issue_files[@]}"; do
             pytest -v --timeout=300 "$TEST_BASENAME"
             test_exit_code=$?
         else
+            echo "  ERROR: Original source failed to compile."
             test_exit_code=1
         fi
 
@@ -148,7 +150,7 @@ readarray -t passed_newtests < <(find "$GEN_DIR_PASSED" -maxdepth 1 -name "*.py"
 for bNewtest_path in "${passed_newtests[@]}"; do
     bNewtest_basename=$(basename "$bNewtest_path")
     
-    # Filename Logic: CWE-835_issue_1_cwe_020_0_c_task_bNewtest.py
+    # Filename Logic: CWE-XXX_issue_X_cwe_XXX_X_c_task_bNewtest.py
     temp_name="${bNewtest_basename%_bNewtest.py}"
     task_stem=$(echo "$temp_name" | grep -o 'cwe_[0-9a-z_]*_task')
     issue_id=$(echo "$temp_name" | sed "s/_${task_stem}//")
@@ -162,15 +164,15 @@ for bNewtest_path in "${passed_newtests[@]}"; do
         continue
     fi
 
-    echo "[P2-PROCESS] Creating mutant for $bNewtest_basename"
+    echo "[PHASE2-LLM2-MUTANT] Creating mutant for $bNewtest_basename"
 
     # Step 1: Generate Mutant
     generated_mutant_path=$(python3 "$Baseline_Mutant_Gen" "$orig_c_path" "$orig_test_path" "$bNewtest_path" "$issue_txt_path" "$MUTANT_DIR_ALL")
-
     if [ $? -ne 0 ] || [ -z "$generated_mutant_path" ]; then
         echo "  ERROR: baseline_mutant_gen.py script failed."
         continue
     fi
+    echo "bMutant generated in: $generated_mutant_path"
     ((TOTAL_MUTANTS_GENERATED++))
 
     # Step 2: Validate Mutant
@@ -185,7 +187,6 @@ for bNewtest_path in "${passed_newtests[@]}"; do
     cp "../../../../$generated_mutant_path" "$TASK_BASENAME"
     cp "../../../../$bNewtest_path" "$TEST_BASENAME"
 
-    # --- [NEW REQUIREMENT] Check if Mutant Compiles ---
     echo "  Compiling mutant..."
     gcc -w -I./includes "$TASK_BASENAME" -o ./compiled/${TASK_BASENAME%.c} -larchive -lcrypto -ljwt -ljansson -lxml2 -lsqlite3
     compile_status=$?
@@ -198,7 +199,7 @@ for bNewtest_path in "${passed_newtests[@]}"; do
         pytest_exit=$?
     else
         echo "  DISCARD: Mutant failed to compile. Skipping testing. DISCARD MUTANT !!!"
-        pytest_exit=0 # Reset exit code so it is not counted as "caught"
+        pytest_exit=0 
     fi
 
     # Restore originals
@@ -208,32 +209,48 @@ for bNewtest_path in "${passed_newtests[@]}"; do
 
     # If it compiled AND pytest failed, it's a success (caught mutant)
     if [ $compile_status -eq 0 ] && [ $pytest_exit -ne 0 ]; then
-        echo "  SUCCESS: Mutant caught by bNewtest. Moving the mutant to -> $MUTANT_DIR_CAUGHT"
+        echo "  SUCCESS: Mutant caught by bNewtest. Moving to -> $MUTANT_DIR_CAUGHT"
         mv "$generated_mutant_path" "$MUTANT_DIR_CAUGHT/"
         ((TOTAL_MUTANTS_CAUGHT_BY_NEWTEST++))
     elif [ $compile_status -eq 0 ]; then
-        echo "  FAILURE: Mutant PASSED bNewtest (Vulnerability missed)."
+        echo "  FAILURE: Mutant PASSED bNewtest. Vulnerability missed."
     fi
 done
+
+# Calculate Percentages
+if [ "$TOTAL_NEWTESTS_GENERATED" -gt 0 ]; then
+    PERC_NEWTEST=$(awk "BEGIN {printf \"%.2f\", ($TOTAL_NEWTESTS_PASSED_ORIGINAL / $TOTAL_NEWTESTS_GENERATED) * 100}")
+else
+    PERC_NEWTEST="0.00"
+fi
+
+if [ "$TOTAL_MUTANTS_GENERATED" -gt 0 ]; then
+    PERC_MUTANT=$(awk "BEGIN {printf \"%.2f\", ($TOTAL_MUTANTS_CAUGHT_BY_NEWTEST / $TOTAL_MUTANTS_GENERATED) * 100}")
+else
+    PERC_MUTANT="0.00"
+fi
 
 # ==========================================
 # FINAL REPORT
 # ==========================================
-echo ""
-echo "========================================================"
-echo "             BASELINE FINAL STATS REPORT                "
-echo "========================================================"
-echo "CWE Folder:                         $ISSUE_FOLDER_NAME"
-echo "--------------------------------------------------------"
-echo "PHASE 1 (Test Generation):"
-echo "  Total bNewtests (Compilable):     $TOTAL_NEWTESTS_GENERATED"
-echo "  Passed (Original Source):         $TOTAL_NEWTESTS_PASSED_ORIGINAL"
-echo "--------------------------------------------------------"
-echo "PHASE 2 (Mutant Generation):"
-echo "  Total bMutants Generated:         $TOTAL_MUTANTS_GENERATED"
-echo "  Total bMutants Buildable:         $TOTAL_MUTANTS_BUILDABLE"
-echo "  Caught (Pytest Failed):           $TOTAL_MUTANTS_CAUGHT_BY_NEWTEST"
-echo "--------------------------------------------------------"
-echo "Caught mutants saved in: $MUTANT_DIR_CAUGHT"
-echo "========================================================"
-echo "Process Finished."
+(
+    echo ""
+    echo "========================================================"
+    echo "             BASELINE FINAL STATS REPORT                "
+    echo "========================================================"
+    echo "CWE Folder:                         $ISSUE_FOLDER_NAME"
+    echo "--------------------------------------------------------"
+    echo "PHASE 1 (Test Generation):"
+    echo "  Total bNewtests (Compilable):     $TOTAL_NEWTESTS_GENERATED"
+    echo "  Passed (Original Source):         $TOTAL_NEWTESTS_PASSED_ORIGINAL ($PERC_NEWTEST %)"
+    echo "--------------------------------------------------------"
+    echo "PHASE 2 (Mutant Generation):"
+    echo "  Total bMutants Generated:         $TOTAL_MUTANTS_GENERATED"
+    echo "  Total bMutants Buildable:         $TOTAL_MUTANTS_BUILDABLE"
+    echo "  Caught (Pytest Failed):           $TOTAL_MUTANTS_CAUGHT_BY_NEWTEST ($PERC_MUTANT %)"
+    echo "--------------------------------------------------------"
+    echo "Caught mutants saved in: $MUTANT_DIR_CAUGHT"
+    echo "========================================================"
+) | tee "$REPORT_FILE"
+
+echo "Process Finished. Report saved to: $REPORT_FILE"
