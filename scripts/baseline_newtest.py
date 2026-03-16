@@ -1,4 +1,4 @@
-# python3 scripts/baseline_genLLM.py security_issues_FINAL_v5_with_cwe/CWE-119/CWE-119_issue_131.txt CWEval/benchmark/core/c/cwe_020_0_c_task.c CWEval/benchmark/core/c/cwe_020_0_c_test.py CWEval/benchmark/core/c/CWE-119/new-tests-CWE-119/baseline/
+# python3 scripts/baseline_newtest.py security_issues_FINAL_v5_with_cwe/CWE-835/CWE-835_issue_1.txt CWEval/benchmark/core/c/cwe_020_0_c_task.c CWEval/benchmark/core/c/cwe_020_0_c_test.py CWEval/benchmark/core/c/CWE-835/baseline/baseline-new-tests-CWE-119-all
 # models used for the project: gemma-3-27b-it, gemini-2.5-flash, gemini-2.5-pro, gemini-3-flash-preview, gemini-3-pro-preview
 
 
@@ -64,7 +64,47 @@ def clean_llm_markdown(input_string) -> str:
     
     return cleaned
 
-def mutator(issue_filepath: str, current_filename_path: str, test_case_filename_path: str, output_directory: str) -> str:
+def clean_llm_markdown_v2(input_string: str) -> str:
+    # 1. Initial Markdown Extraction
+    # Prioritize content inside ```python ... ``` blocks
+    text = input_string.strip()
+    pattern = r'```(?:\w+)?\n?(.*?)\n?```'
+    match = re.search(pattern, text, flags=re.DOTALL)
+    if match:
+        text = match.group(1).strip()
+    
+    # 2. Remove stray trailing triple quotes
+    # This handles Sample 1 where the LLM appends an extra """ at the end
+    # We use a non-greedy approach to only target quotes at the absolute end
+    text = re.sub(r'\s*["\']{3}\s*$', '', text)
+
+    # 3. Repair unclosed brackets (The "Sample 2" Fix)
+    # Instead of deleting code, we find what's missing and add it.
+    stack = []
+    bracket_map = {'(': ')', '[': ']', '{': '}'}
+    
+    # We only care about unclosed brackets that were opened
+    for char in text:
+        if char in bracket_map:
+            stack.append(bracket_map[char])
+        elif char in bracket_map.values():
+            if stack and stack[-1] == char:
+                stack.pop()
+            else:
+                # If we see a stray closer that doesn't match the stack, 
+                # we don't pop, as the code is already malformed there.
+                pass
+
+    # Append missing closers in reverse order (FILO)
+    # e.g., if stack is [']', ')'], it appends ')]'
+    if stack:
+        text += "".join(reversed(stack))
+
+    # 4. Final Cleanup
+    # Remove any trailing whitespace left after appending
+    return text.strip()
+
+def baseline_newtests(issue_filepath: str, current_filename_path: str, test_case_filename_path: str, output_directory: str) -> str:
     """
     Generates a mutant from the given issue, code, and test files.
     Saves mutant into the specified output directory.
@@ -86,15 +126,17 @@ def mutator(issue_filepath: str, current_filename_path: str, test_case_filename_
 
     # --- LLM Prompt ---
     INSTRUCT_1 = (
-        "INSTRUCTION: Here is a file under test and a file with some unit tests for the file under test."
+        "INSTRUCTION: Here is an original source task file and an original testcase file with some tests for the original source task file."
         "{" + string_current_filename + "}."
         "{" + string_test_case_filename + "}."
         " Write a new test file with more tests in which the coverage will be increased than the original test file."
         " Your new test file should also handle testcases concerning security violations introduced in the context."
-        " YOUR NEW TESTSUITE MUSS PASS THE ORIGINAL SOURCE FILE."
+        " YOUR NEW TESTSUITE MUSS PASS THE ORIGINAL SOURCE FILE. ALL YOUR TESTCASES IN THIS FILE WILL PASS AGAINST THE ORIGINAL SOURCE FILE - THIS IS YOUR MOST IMPORTANT FOCUS."
         "______________________________________________________________________________________"
         "IMPORTANT instructions: "
-        "The produced testfile MUST BE BUILDABLE. No import module error will be present. This means, add ONLY STANDARD LIBRARIES."
+        "The produced extended testfile MUST BE BUILDABLE with NO SYNTAX ERROR. "
+        "The produced extended testfile MUST BE ALL PASSSING AGAINST THE ORIGINAL SOURCE FILE."
+        "No import module error will be present. This means, add ONLY STANDARD LIBRARIES."
         "______________________________________________________________________________________"
         "Extra instructions: "
         "Your new testsuite file must have the original import modules, same runner functions and structures of pytest libraries."
@@ -108,12 +150,12 @@ def mutator(issue_filepath: str, current_filename_path: str, test_case_filename_
 
     
     # --- Generate new mutant content ---
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=PROMPT1)
-    file_content_mutant = clean_llm_markdown(response.text)
+    # response = client.models.generate_content(model="gemini-2.5-flash", contents=PROMPT1)
+    # file_content_mutant = clean_llm_markdown(response.text)
 
     # --- LLM Call using gpt---
-    # response = client_gpt.responses.create(model="gpt-4o-mini", input=PROMPT1)
-    # file_content_mutant = clean_llm_markdown(response.output_text)
+    response = client_gpt.responses.create(model="gpt-4o-mini", input=PROMPT1)
+    file_content_mutant = clean_llm_markdown_v2(response.output_text)
 
     # --- Build mutant filename ---
     current_filename_basename = os.path.basename(current_filename_path)
@@ -150,5 +192,7 @@ if __name__ == "__main__":
             print(f"Error: file not found at '{path}'")
             sys.exit(1)
 
-    mutant_filename = mutator(issue_filepath, current_file, existing_test_case, output_directory)
+    mutant_filename = baseline_newtests(issue_filepath, current_file, existing_test_case, output_directory)
     print(mutant_filename)
+
+# python3 scripts/baseline_newtest.py security_issues_FINAL_v5_with_cwe/CWE-835/CWE-835_issue_1.txt CWEval/benchmark/core/c/cwe_020_0_c_task.c CWEval/benchmark/core/c/cwe_020_0_c_test.py CWEval/benchmark/core/c/CWE-835/baseline/baseline-new-tests-CWE-835-all
